@@ -1,0 +1,79 @@
+package com.stansful.sshvpnclient.ui
+
+import androidx.compose.runtime.Composable
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import com.stansful.sshvpnclient.AppContainer
+import com.stansful.sshvpnclient.ui.configedit.EditConfigRoute
+import com.stansful.sshvpnclient.ui.configs.ConfigListRoute
+import com.stansful.sshvpnclient.ui.keyedit.EditKeyRoute
+import com.stansful.sshvpnclient.ui.keys.KeyListRoute
+import com.stansful.sshvpnclient.ui.main.MainRoute
+
+object Routes {
+    const val MAIN = "main"
+    const val CONFIGS = "configs"
+    const val KEYS = "keys"
+    const val EDIT_CONFIG = "edit-config"
+    const val EDIT_KEY = "edit-key"
+
+    fun editConfig(configId: String? = null) = "$EDIT_CONFIG/${configId ?: NEW_ID}"
+    fun editKey(keyId: String? = null) = "$EDIT_KEY/${keyId ?: NEW_ID}"
+
+    const val NEW_ID = "new"
+}
+
+@Composable
+fun SshVpnNavGraph(
+    container: AppContainer,
+    navController: NavHostController,
+) {
+    NavHost(
+        navController = navController,
+        startDestination = Routes.MAIN,
+    ) {
+        composable(Routes.MAIN) {
+            MainRoute(
+                container = container,
+                openConfigs = { navController.navigate(Routes.CONFIGS) },
+                openKeys = { navController.navigate(Routes.KEYS) },
+            )
+        }
+        composable(Routes.CONFIGS) {
+            ConfigListRoute(
+                container = container,
+                onBack = { navController.popBackStack() },
+                onAdd = { navController.navigate(Routes.editConfig()) },
+                onEdit = { navController.navigate(Routes.editConfig(it)) },
+            )
+        }
+        composable("${Routes.EDIT_CONFIG}/{configId}") { backStackEntry ->
+            val rawId = backStackEntry.arguments?.getString("configId")
+            EditConfigRoute(
+                container = container,
+                configId = rawId?.takeUnless { it == Routes.NEW_ID },
+                onBack = { navController.popBackStack() },
+                onSaved = { navController.popBackStack() },
+                onAddKey = { navController.navigate(Routes.editKey()) },
+            )
+        }
+        composable(Routes.KEYS) {
+            KeyListRoute(
+                container = container,
+                onBack = { navController.popBackStack() },
+                onAdd = { navController.navigate(Routes.editKey()) },
+                onEdit = { navController.navigate(Routes.editKey(it)) },
+            )
+        }
+        composable("${Routes.EDIT_KEY}/{keyId}") { backStackEntry ->
+            val rawId = backStackEntry.arguments?.getString("keyId")
+            EditKeyRoute(
+                container = container,
+                keyId = rawId?.takeUnless { it == Routes.NEW_ID },
+                onBack = { navController.popBackStack() },
+                onSaved = { navController.popBackStack() },
+            )
+        }
+    }
+}

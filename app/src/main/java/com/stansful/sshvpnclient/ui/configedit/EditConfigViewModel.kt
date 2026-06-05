@@ -1,0 +1,139 @@
+package com.stansful.sshvpnclient.ui.configedit
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.stansful.sshvpnclient.domain.model.AuthType
+import com.stansful.sshvpnclient.domain.model.SshConfig
+import com.stansful.sshvpnclient.domain.model.SshPrivateKey
+import com.stansful.sshvpnclient.domain.model.ValidationException
+import com.stansful.sshvpnclient.domain.usecase.config.AddSshConfigUseCase
+import com.stansful.sshvpnclient.domain.usecase.config.GetSshConfigByIdUseCase
+import com.stansful.sshvpnclient.domain.usecase.config.UpdateSshConfigUseCase
+import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyListUseCase
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import java.util.UUID
+
+data class EditConfigForm(
+    val id: String? = null,
+    val name: String = "",
+    val host: String = "",
+    val port: String = "22",
+    val username: String = "",
+    val authType: AuthType = AuthType.PASSWORD,
+    val password: String = "",
+    val privateKeyId: String = "",
+    val fingerprint: String = "",
+    val keepAliveIntervalSec: String = "30",
+    val enableUdpForwarding: Boolean = false,
+    val note: String = "",
+    val createdAt: Long? = null,
+)
+
+data class EditConfigUiState(
+    val form: EditConfigForm = EditConfigForm(),
+    val keys: List<SshPrivateKey> = emptyList(),
+    val errors: Map<String, String> = emptyMap(),
+    val message: String? = null,
+    val isSaved: Boolean = false,
+    val isEditing: Boolean = false,
+)
+
+class EditConfigViewModel(
+    private val configId: String?,
+    private val addSshConfigUseCase: AddSshConfigUseCase,
+    private val updateSshConfigUseCase: UpdateSshConfigUseCase,
+    private val getSshConfigByIdUseCase: GetSshConfigByIdUseCase,
+    getSshPrivateKeyListUseCase: GetSshPrivateKeyListUseCase,
+) : ViewModel() {
+    private val mutableState = MutableStateFlow(EditConfigUiState(isEditing = configId != null))
+    val uiState = mutableState.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            getSshPrivateKeyListUseCase().collect { keys ->
+                mutableState.update { it.copy(keys = keys) }
+            }
+        }
+        viewModelScope.launch {
+            val existing = configId?.let { getSshConfigByIdUseCase(it) } ?: return@launch
+            mutableState.update {
+                it.copy(
+                    form = existing.toForm(),
+                    isEditing = true,
+                )
+            }
+        }
+    }
+
+    fun updateForm(transform: (EditConfigForm) -> EditConfigForm) {
+        mutableState.update { it.copy(form = transform(it.form), errors = emptyMap(), message = null) }
+    }
+
+    fun save() {
+        viewModelScope.launch {
+            val state = mutableState.value
+            val now = System.currentTimeMillis()
+            val form = state.form
+            val config = form.toDomain(now)
+
+            try {
+                if (state.isEditing) {
+                    updateSshConfigUseCase(config)
+                } else {
+                    addSshConfigUseCase(config)
+                }
+                mutableState.update { it.copy(isSaved = true, errors = emptyMap(), message = null) }
+            } catch (error: ValidationException) {
+                mutableState.update {
+                    it.copy(errors = error.errors.associate { item -> item.field to item.message })
+                }
+            } catch (error: Exception) {
+                mutableState.update { it.copy(message = error.message ?: "Unable to save configuration") }
+            }
+        }
+    }
+
+    private fun SshConfig.toForm(): EditConfigForm {
+        return EditConfigForm(
+            id = id,
+            name = name,
+            host = host,
+            port = port.toString(),
+            username = username,
+            authType = authType,
+            password = password.orEmpty(),
+            privateKeyId = privateKeyId.orEmpty(),
+            fingerprint = fingerprint.orEmpty(),
+            keepAliveIntervalSec = keepAliveIntervalSec.toString(),
+            enableUdpForwarding = enableUdpForwarding,
+            note = note.orEmpty(),
+            createdAt = createdAt,
+        )
+    }
+
+    private fun EditConfigForm.toDomain(now: Long): SshConfig {
+        val parsedPort = port.toIntOrNull() ?: 0
+        val parsedKeepAlive = keepAliveIntervalSec.toIntOrNull() ?: 0
+        val configId = id ?: UUID.randomUUID().toString()
+
+        return SshConfig(
+            id = configId,
+            name = name.trim(),
+            host = host.trim(),
+            port = parsedPort,
+            username = username.trim(),
+            authType = authType,
+            password = password.takeIf { authType == AuthType.PASSWORD },
+            privateKeyId = privateKeyId.takeIf { authType == AuthType.PRIVATE_KEY },
+            fingerprint = fingerprint.trim().ifBlank { null },
+            keepAliveIntervalSec = parsedKeepAlive,
+            enableUdpForwarding = enableUdpForwarding,
+            note = note.trim().ifBlank { null },
+            createdAt = createdAt ?: now,
+            updatedAt = now,
+        )
+    }
+}
