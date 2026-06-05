@@ -106,7 +106,7 @@ class SshConnectionManager {
         val message = error.message.orEmpty()
         val userMessage = when {
             message.contains("Auth fail", ignoreCase = true) &&
-                authType == AuthType.PRIVATE_KEY -> "Invalid private key passphrase"
+                authType == AuthType.PRIVATE_KEY -> "Authentication failed"
             message.contains("Auth fail", ignoreCase = true) -> "Authentication failed"
             message.contains("timeout", ignoreCase = true) -> "Connection timeout"
             message.contains("UnknownHost", ignoreCase = true) -> "Host unreachable"

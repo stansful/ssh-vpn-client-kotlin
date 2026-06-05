@@ -150,3 +150,24 @@ Result:
 - Verified `./scripts/lint.sh`: success.
 - Verified `./scripts/test.sh`: success, with `testDebugUnitTest NO-SOURCE` because no tests exist yet.
 - Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 6
+
+Plan:
+
+- Fix misleading private-key SSH authentication error mapping.
+- Add clearer validation for accidentally pasted `.pub` public keys.
+- Rebuild and rerun checks.
+
+Result:
+
+- Fixed misleading SSH private-key auth error mapping:
+  - JSch `Auth fail` with private key now reports `Authentication failed`;
+  - `Invalid private key passphrase` is only used for errors that look passphrase-related while loading the key.
+- Added explicit validation for accidentally pasted `.pub` public keys:
+  - `ssh-rsa`, `ssh-ed25519`, and common ECDSA public-key prefixes are rejected with a specific message.
+- Added `SshPrivateKeyValidatorTest`.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
