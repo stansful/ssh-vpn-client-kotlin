@@ -4,6 +4,9 @@ import android.app.Activity
 import android.net.VpnService
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -82,10 +85,12 @@ private fun MainScreen(
 ) {
     AppScreen(title = "SSH VPN") {
         Column(
+            modifier = Modifier.verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             StatusPanel(state)
             SelectedConfigPanel(state)
+            DiagnosticsPanel(state)
 
             if (state.isConnected) {
                 PrimaryActionButton(
@@ -149,6 +154,26 @@ private fun StatusPanel(state: MainUiState) {
                 label = { Text(statusText) },
             )
             ErrorMessage(state.vpnState.errorMessage)
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticsPanel(state: MainUiState) {
+    if (state.vpnState.diagnostics.isEmpty()) return
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Connection diagnostics", style = MaterialTheme.typography.labelLarge)
+            SelectionContainer {
+                Text(
+                    text = state.vpnState.diagnostics.joinToString(separator = "\n"),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }

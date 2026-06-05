@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.vpn
 
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.JSchException
+import com.jcraft.jsch.Logger
 import com.jcraft.jsch.Session
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.SshConfig
@@ -16,19 +17,25 @@ class SshConnectionManager {
     suspend fun connect(
         config: SshConfig,
         privateKey: SshPrivateKey?,
+        log: (String) -> Unit = {},
     ): Session = withContext(Dispatchers.IO) {
         disconnect()
 
+        installJschLogger(log)
         val jsch = JSch()
         if (config.authType == AuthType.PRIVATE_KEY) {
             val key = privateKey ?: throw VpnConnectionException("Selected SSH key not found")
+            log("Loading private key into SSH client")
             addPrivateKeyIdentity(jsch, key)
+            log("Private key loaded; passphrase present: ${!key.passphrase.isNullOrBlank()}")
         }
 
         try {
+            log("Opening SSH session to ${config.username}@${config.host}:${config.port}")
             val session = jsch.getSession(config.username, config.host, config.port)
             session.setConfig(connectionConfig(config.authType))
             session.setServerAliveInterval(config.keepAliveIntervalSec * 1000)
+            log("SSH auth method: ${config.authType.label}; keepAlive=${config.keepAliveIntervalSec}s")
 
             if (config.authType == AuthType.PASSWORD) {
                 session.setPassword(
@@ -37,11 +44,13 @@ class SshConnectionManager {
             }
 
             session.connect(CONNECT_TIMEOUT_MS)
-            verifyFingerprintIfNeeded(jsch, session, config.fingerprint)
+            log("SSH transport connected")
+            verifyFingerprintIfNeeded(jsch, session, config.fingerprint, log)
             activeSession = session
             session
         } catch (error: JSchException) {
-            throw mapJschError(error, config.authType)
+            log("JSch exception: ${error.message.orEmpty().ifBlank { error::class.java.simpleName }}")
+            throw mapJschError(error, config)
         }
     }
 
@@ -84,15 +93,23 @@ class SshConnectionManager {
         jsch: JSch,
         session: Session,
         expectedFingerprint: String?,
+        log: (String) -> Unit,
     ) {
-        val expected = expectedFingerprint?.trim().orEmpty()
-        if (expected.isBlank()) return
-
         val actual = session.hostKey.getFingerPrint(jsch)
+        log("Server host key fingerprint: $actual")
+
+        val expected = expectedFingerprint?.trim().orEmpty()
+        if (expected.isBlank()) {
+            log("Fingerprint check skipped: no expected fingerprint configured")
+            return
+        }
+
+        log("Checking configured SSH fingerprint")
         if (normalizeFingerprint(actual) != normalizeFingerprint(expected)) {
             session.disconnect()
             throw VpnConnectionException("Fingerprint mismatch")
         }
+        log("Fingerprint matched")
     }
 
     private fun normalizeFingerprint(value: String): String {
@@ -102,11 +119,12 @@ class SshConnectionManager {
             .replace(" ", "")
     }
 
-    private fun mapJschError(error: JSchException, authType: AuthType): VpnConnectionException {
+    private fun mapJschError(error: JSchException, config: SshConfig): VpnConnectionException {
         val message = error.message.orEmpty()
         val userMessage = when {
             message.contains("Auth fail", ignoreCase = true) &&
-                authType == AuthType.PRIVATE_KEY -> "Authentication failed"
+                config.authType == AuthType.PRIVATE_KEY ->
+                    "Authentication failed: server rejected this private key for user '${config.username}'"
             message.contains("Auth fail", ignoreCase = true) -> "Authentication failed"
             message.contains("timeout", ignoreCase = true) -> "Connection timeout"
             message.contains("UnknownHost", ignoreCase = true) -> "Host unreachable"
@@ -114,6 +132,31 @@ class SshConnectionManager {
             else -> "Unknown connection error"
         }
         return VpnConnectionException(userMessage, error)
+    }
+
+    private fun installJschLogger(log: (String) -> Unit) {
+        JSch.setLogger(
+            object : Logger {
+                override fun isEnabled(level: Int): Boolean = true
+
+                override fun log(level: Int, message: String?) {
+                    val value = message?.trim().orEmpty()
+                    if (value.isBlank()) return
+                    log("JSch ${levelLabel(level)}: $value")
+                }
+            },
+        )
+    }
+
+    private fun levelLabel(level: Int): String {
+        return when (level) {
+            Logger.DEBUG -> "DEBUG"
+            Logger.INFO -> "INFO"
+            Logger.WARN -> "WARN"
+            Logger.ERROR -> "ERROR"
+            Logger.FATAL -> "FATAL"
+            else -> level.toString()
+        }
     }
 
     private companion object {

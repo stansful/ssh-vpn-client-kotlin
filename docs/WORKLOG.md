@@ -171,3 +171,56 @@ Result:
 - Verified `./scripts/test.sh`: success.
 - Verified `./scripts/lint.sh`: success.
 - Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 8
+
+Plan:
+
+- Add sanitized JSch internal diagnostics for SSH auth debugging.
+- Clarify connection display versus actual host/port usage.
+- Rebuild and rerun checks.
+
+Result:
+
+- Added sanitized JSch internal logger output to connection diagnostics.
+- Added raw JSch exception message to diagnostics as `Failure detail`.
+- Changed private-key auth failure message to include the selected username.
+- Verified that app host/port usage is already equivalent to `ssh -i key user@host -p port`; `user@host:port` only appears as display text.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 7
+
+Plan:
+
+- Add sanitized connection diagnostics visible to the user.
+- Improve SSH private-key authentication failure details without logging secrets.
+- Rebuild and rerun tests/lint.
+
+Result:
+
+- Added sanitized diagnostics to `VpnConnectionState` and `VpnConnectionRepository`.
+- `InMemoryVpnConnectionRepository` now keeps the last 80 timestamped diagnostic lines.
+- `SshVpnService` logs connection stages:
+  - selected endpoint;
+  - auth type;
+  - service start;
+  - key lookup;
+  - SSH manager stages;
+  - VPN interface and TUN forwarding stages;
+  - failure category.
+- `SshConnectionManager` logs:
+  - private key loading without key contents;
+  - whether passphrase is present;
+  - endpoint;
+  - auth method;
+  - server host key fingerprint;
+  - fingerprint check result.
+- Main screen now shows a copyable `Connection diagnostics` panel.
+- Improved private-key auth failure message to say that the server rejected the key for the selected username.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.

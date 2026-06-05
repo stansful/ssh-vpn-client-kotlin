@@ -10,4 +10,6 @@ interface VpnConnectionRepository {
     fun setDisconnecting(configId: String?)
     fun setDisconnected()
     fun setError(configId: String?, message: String)
+    fun appendDiagnostic(message: String)
+    fun clearDiagnostics()
 }

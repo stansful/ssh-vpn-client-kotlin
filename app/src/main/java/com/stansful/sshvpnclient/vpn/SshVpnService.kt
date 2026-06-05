@@ -52,7 +52,13 @@ class SshVpnService : android.net.VpnService() {
             }
 
             connectionRepository.setConnecting(config.id)
+            connectionRepository.appendDiagnostic("Starting VPN connection")
+            connectionRepository.appendDiagnostic(
+                "Selected config: ${config.username}@${config.host}:${config.port}",
+            )
+            connectionRepository.appendDiagnostic("Auth type: ${config.authType.label}")
             startVpnForeground()
+            connectionRepository.appendDiagnostic("Foreground VPN service started")
 
             try {
                 val privateKey = if (config.authType == AuthType.PRIVATE_KEY) {
@@ -60,25 +66,40 @@ class SshVpnService : android.net.VpnService() {
                     if (keyId.isNullOrBlank()) {
                         throw VpnConnectionException("Selected SSH key not found")
                     }
+                    connectionRepository.appendDiagnostic("Looking up selected SSH key")
                     keyRepository.getById(keyId)
                         ?: throw VpnConnectionException("Selected SSH key not found")
                 } else {
                     null
                 }
 
-                val sshSession = appContainer.sshConnectionManager.connect(config, privateKey)
+                val sshSession = appContainer.sshConnectionManager.connect(
+                    config = config,
+                    privateKey = privateKey,
+                    log = connectionRepository::appendDiagnostic,
+                )
+                connectionRepository.appendDiagnostic("Establishing Android VPN interface")
                 val vpnInterface = appContainer.vpnTunnelManager.establish(this@SshVpnService, config)
+                connectionRepository.appendDiagnostic("Starting local TUN forwarding layer")
                 appContainer.tun2SocksManager.start(
                     vpnInterface = vpnInterface,
                     sshSession = sshSession,
                     enableUdpForwarding = config.enableUdpForwarding,
                 )
+                connectionRepository.appendDiagnostic("VPN connection is connected")
                 connectionRepository.setConnected(config.id)
             } catch (error: VpnConnectionException) {
+                connectionRepository.appendDiagnostic("Connection failed: ${error.message}")
+                error.cause?.message?.let { causeMessage ->
+                    connectionRepository.appendDiagnostic("Failure detail: $causeMessage")
+                }
                 connectionRepository.setError(config.id, error.message ?: "Unknown connection error")
                 disconnectInternal(updateState = false)
                 stopSelf()
             } catch (error: Exception) {
+                connectionRepository.appendDiagnostic(
+                    "Connection failed with ${error::class.java.simpleName}: ${error.message}",
+                )
                 connectionRepository.setError(config.id, "Unknown connection error")
                 disconnectInternal(updateState = false)
                 stopSelf()
