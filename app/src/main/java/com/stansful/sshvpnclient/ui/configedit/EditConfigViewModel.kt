@@ -54,7 +54,15 @@ class EditConfigViewModel(
     init {
         viewModelScope.launch {
             getSshPrivateKeyListUseCase().collect { keys ->
-                mutableState.update { it.copy(keys = keys) }
+                mutableState.update { state ->
+                    state.copy(
+                        keys = keys,
+                        form = state.form.withDefaultPrivateKey(keys),
+                        errors = state.errors.clearPrivateKeyErrorIfSelected(
+                            state.form.withDefaultPrivateKey(keys),
+                        ),
+                    )
+                }
             }
         }
         viewModelScope.launch {
@@ -72,11 +80,31 @@ class EditConfigViewModel(
         mutableState.update { it.copy(form = transform(it.form), errors = emptyMap(), message = null) }
     }
 
+    fun selectAuthType(authType: AuthType) {
+        mutableState.update { state ->
+            val form = state.form.copy(authType = authType).withDefaultPrivateKey(state.keys)
+            state.copy(form = form, errors = emptyMap(), message = null)
+        }
+    }
+
+    fun selectPrivateKey(keyId: String) {
+        mutableState.update { state ->
+            state.copy(
+                form = state.form.copy(privateKeyId = keyId),
+                errors = state.errors - "privateKeyId",
+                message = null,
+            )
+        }
+    }
+
     fun save() {
         viewModelScope.launch {
             val state = mutableState.value
             val now = System.currentTimeMillis()
-            val form = state.form
+            val form = state.form.withDefaultPrivateKey(state.keys)
+            if (form != state.form) {
+                mutableState.update { it.copy(form = form) }
+            }
             val config = form.toDomain(now)
 
             try {
@@ -135,5 +163,17 @@ class EditConfigViewModel(
             createdAt = createdAt ?: now,
             updatedAt = now,
         )
+    }
+
+    private fun EditConfigForm.withDefaultPrivateKey(keys: List<SshPrivateKey>): EditConfigForm {
+        if (authType != AuthType.PRIVATE_KEY || privateKeyId.isNotBlank()) return this
+        return copy(privateKeyId = keys.firstOrNull()?.id.orEmpty())
+    }
+
+    private fun Map<String, String>.clearPrivateKeyErrorIfSelected(
+        form: EditConfigForm,
+    ): Map<String, String> {
+        if (form.privateKeyId.isBlank()) return this
+        return this - "privateKeyId"
     }
 }

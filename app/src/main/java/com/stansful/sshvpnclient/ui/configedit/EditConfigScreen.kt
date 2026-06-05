@@ -1,6 +1,7 @@
 package com.stansful.sshvpnclient.ui.configedit
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -61,6 +62,8 @@ fun EditConfigRoute(
         onAddKey = onAddKey,
         onSave = viewModel::save,
         onFormChange = viewModel::updateForm,
+        onAuthTypeSelected = viewModel::selectAuthType,
+        onPrivateKeySelected = viewModel::selectPrivateKey,
     )
 }
 
@@ -71,6 +74,8 @@ private fun EditConfigScreen(
     onAddKey: () -> Unit,
     onSave: () -> Unit,
     onFormChange: ((EditConfigForm) -> EditConfigForm) -> Unit,
+    onAuthTypeSelected: (AuthType) -> Unit,
+    onPrivateKeySelected: (String) -> Unit,
 ) {
     AppScreen(
         title = if (state.isEditing) "Edit configuration" else "Add configuration",
@@ -108,21 +113,7 @@ private fun EditConfigScreen(
 
             AuthTypeSelector(
                 selected = state.form.authType,
-                onSelected = { authType ->
-                    onFormChange { form ->
-                        form.copy(
-                            authType = authType,
-                            privateKeyId = if (
-                                authType == AuthType.PRIVATE_KEY &&
-                                form.privateKeyId.isBlank()
-                            ) {
-                                state.keys.firstOrNull()?.id.orEmpty()
-                            } else {
-                                form.privateKeyId
-                            },
-                        )
-                    }
-                },
+                onSelected = onAuthTypeSelected,
             )
 
             if (state.form.authType == AuthType.PASSWORD) {
@@ -137,7 +128,7 @@ private fun EditConfigScreen(
                 PrivateKeySelector(
                     state = state,
                     onAddKey = onAddKey,
-                    onFormChange = onFormChange,
+                    onPrivateKeySelected = onPrivateKeySelected,
                 )
             }
 
@@ -202,7 +193,7 @@ private fun AuthTypeSelector(
 private fun PrivateKeySelector(
     state: EditConfigUiState,
     onAddKey: () -> Unit,
-    onFormChange: ((EditConfigForm) -> EditConfigForm) -> Unit,
+    onPrivateKeySelected: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val selectedKey = state.keys.firstOrNull { it.id == state.form.privateKeyId }
@@ -212,24 +203,27 @@ private fun PrivateKeySelector(
         if (state.keys.isEmpty()) {
             Text("No saved SSH keys")
         } else {
-            OutlinedButton(
-                onClick = { expanded = true },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(selectedKey?.name ?: "Select existing key")
-            }
-            DropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { expanded = false },
-            ) {
-                state.keys.forEach { key ->
-                    DropdownMenuItem(
-                        text = { Text(key.name) },
-                        onClick = {
-                            onFormChange { it.copy(privateKeyId = key.id) }
-                            expanded = false
-                        },
-                    )
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { expanded = true },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(selectedKey?.name ?: "Select existing key")
+                }
+                DropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    state.keys.forEach { key ->
+                        DropdownMenuItem(
+                            text = { Text(key.name) },
+                            onClick = {
+                                onPrivateKeySelected(key.id)
+                                expanded = false
+                            },
+                        )
+                    }
                 }
             }
         }

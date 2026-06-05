@@ -127,3 +127,26 @@ Result:
 - Verified `./scripts/lint.sh`: success.
 - Debug APK built at `app/build/outputs/apk/debug/app-debug.apk`.
 - Remaining lint warnings are version-availability warnings for target/compile SDK and dependencies; no lint errors.
+
+### 2026-06-06 - Before Block 5
+
+Plan:
+
+- Investigate why `Save` does not work on add configuration.
+- Fix private key selection in the add/edit configuration form.
+- Rebuild the project and run lint/test checks.
+
+Result:
+
+- Reworked private key selection in `EditConfigScreen`:
+  - wrapped dropdown in an anchor `Box`;
+  - selection now calls a dedicated `EditConfigViewModel.selectPrivateKey`.
+- Added dedicated `EditConfigViewModel.selectAuthType`.
+- Added private-key defaulting in `EditConfigViewModel`:
+  - when switching to private-key auth, the first available key is selected if no key is selected;
+  - after returning from creating a new key, the config form auto-selects the available key when `privateKeyId` is still blank;
+  - save normalizes `privateKeyId` before validation.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/test.sh`: success, with `testDebugUnitTest NO-SOURCE` because no tests exist yet.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
