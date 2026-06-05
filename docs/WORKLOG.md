@@ -98,3 +98,32 @@ Result:
 - Verified shell syntax with `bash -n`.
 - Verified scripts are executable.
 - `./scripts/check-env.sh` fails in the current execution environment because JDK 17 is not installed; Gradle/Android build was not run.
+
+### 2026-06-06 - Before Block 4
+
+Plan:
+
+- Re-check local Android Studio, bundled JDK, Android SDK, and Gradle availability.
+- Configure local project files if SDK/JDK are available.
+- Run a Gradle build.
+- Fix compile/build errors and update this log with the final result.
+
+Result:
+
+- Found Android Studio at `/Applications/Android Studio.app`.
+- Found usable bundled JBR at `/Applications/Android Studio.app/Contents/jbr/Contents/Home` with OpenJDK 21.
+- Found Android SDK at `/Users/stansful/Library/Android/sdk`.
+- Added `local.properties` with the SDK path.
+- Updated scripts to source `scripts/env.sh`, so they can use Android Studio JBR and SDK automatically.
+- Added `scripts/lint.sh`.
+- Added Gradle Wrapper files using Gradle 9.5.0.
+- Fixed Kotlin deprecation warning by using `Icons.AutoMirrored.Filled.ArrowBack`.
+- Fixed lint code warnings:
+  - removed obsolete SDK checks in `SshVpnService`;
+  - switched encrypted preferences writes to Android KTX `edit`.
+- Verified `./scripts/check-env.sh`: success.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success, with `testDebugUnitTest NO-SOURCE` because no tests exist yet.
+- Verified `./scripts/lint.sh`: success.
+- Debug APK built at `app/build/outputs/apk/debug/app-debug.apk`.
+- Remaining lint warnings are version-availability warnings for target/compile SDK and dependencies; no lint errors.

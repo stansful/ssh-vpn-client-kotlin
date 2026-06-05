@@ -13,6 +13,14 @@ if command -v gradle >/dev/null 2>&1; then
   exit 0
 fi
 
+shopt -s nullglob
+cached_gradles=("$HOME"/.gradle/wrapper/dists/gradle-*-bin/*/gradle-*/bin/gradle)
+if ((${#cached_gradles[@]} > 0)); then
+  last_index=$((${#cached_gradles[@]} - 1))
+  printf '%s\n' "${cached_gradles[$last_index]}"
+  exit 0
+fi
+
 cat >&2 <<'EOF'
 Gradle was not found.
 

@@ -32,7 +32,7 @@ Native Android MVP на Kotlin + Jetpack Compose для VPN-клиента, ко
 ## Требования для локального запуска
 
 - macOS/Linux.
-- JDK 17.
+- JDK 17+ или JBR из Android Studio.
 - Android Studio или Android SDK с установленным API 35.
 - Gradle 8.x или Gradle Wrapper.
 - Android emulator или физическое устройство с включённым USB debugging.
@@ -57,9 +57,10 @@ sdk.dir=/Users/<user>/Library/Android/sdk
 ## Скрипты
 
 - `./scripts/check-env.sh` - проверяет Java, Android SDK и Gradle/Wrapper.
-- `./scripts/create-gradle-wrapper.sh` - создаёт Gradle Wrapper через локально установленный `gradle`.
+- `./scripts/create-gradle-wrapper.sh` - создаёт Gradle Wrapper через доступный Gradle или cached distribution.
 - `./scripts/build-debug.sh` - собирает debug APK.
 - `./scripts/install-debug.sh` - устанавливает debug APK на подключённое устройство.
+- `./scripts/lint.sh` - запускает Android lint для debug variant.
 - `./scripts/test.sh` - запускает unit tests.
 - `./scripts/clean.sh` - очищает Gradle build outputs.
 
@@ -68,6 +69,7 @@ sdk.dir=/Users/<user>/Library/Android/sdk
 ```bash
 ./gradlew :app:assembleDebug
 ./gradlew :app:installDebug
+./gradlew :app:lintDebug
 ./gradlew :app:testDebugUnitTest
 ```
 

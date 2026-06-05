@@ -2,16 +2,26 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/env.sh"
+ANDROID_STUDIO_JAVA="/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java"
 
 printf 'Project: %s\n' "$ROOT_DIR"
 
 if command -v java >/dev/null 2>&1; then
   if ! java -version; then
-    printf 'Java command exists, but no usable JDK was found. Install JDK 17.\n' >&2
-    exit 1
+    if [[ -x "$ANDROID_STUDIO_JAVA" ]]; then
+      "$ANDROID_STUDIO_JAVA" -version
+      printf 'Using Android Studio bundled JDK.\n'
+    else
+      printf 'Java command exists, but no usable JDK was found. Install JDK 17+.\n' >&2
+      exit 1
+    fi
   fi
+elif [[ -x "$ANDROID_STUDIO_JAVA" ]]; then
+  "$ANDROID_STUDIO_JAVA" -version
+  printf 'Using Android Studio bundled JDK.\n'
 else
-  printf 'Java was not found. Install JDK 17.\n' >&2
+  printf 'Java was not found. Install JDK 17+.\n' >&2
   exit 1
 fi
 

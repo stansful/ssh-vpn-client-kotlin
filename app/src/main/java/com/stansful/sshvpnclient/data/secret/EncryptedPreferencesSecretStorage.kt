@@ -1,6 +1,7 @@
 package com.stansful.sshvpnclient.data.secret
 
 import android.content.Context
+import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
@@ -24,13 +25,17 @@ class EncryptedPreferencesSecretStorage(
     }
 
     override suspend fun saveSecret(id: String, value: String) {
-        preferences.edit().putString(id, value).apply()
+        preferences.edit {
+            putString(id, value)
+        }
     }
 
     override suspend fun getSecret(id: String): String? = preferences.getString(id, null)
 
     override suspend fun deleteSecret(id: String) {
-        preferences.edit().remove(id).apply()
+        preferences.edit {
+            remove(id)
+        }
     }
 
     private companion object {
