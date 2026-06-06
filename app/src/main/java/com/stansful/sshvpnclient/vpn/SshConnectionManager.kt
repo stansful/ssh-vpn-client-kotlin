@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.vpn
 
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.JSchException
+import com.jcraft.jsch.KeyPair
 import com.jcraft.jsch.Logger
 import com.jcraft.jsch.Session
 import com.stansful.sshvpnclient.domain.model.AuthType
@@ -10,6 +11,8 @@ import com.stansful.sshvpnclient.domain.model.SshPrivateKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.Socket
+import java.security.MessageDigest
+import java.util.Base64
 import java.util.Properties
 
 class SshConnectionManager {
@@ -31,6 +34,7 @@ class SshConnectionManager {
             log("Loading private key into SSH client")
             addPrivateKeyIdentity(jsch, key)
             log("Private key loaded; passphrase present: ${!key.passphrase.isNullOrBlank()}")
+            logPrivateKeyFingerprint(jsch, key, log)
         }
 
         try {
@@ -66,6 +70,12 @@ class SshConnectionManager {
             session
         } catch (error: JSchException) {
             log("JSch exception: ${error.message.orEmpty().ifBlank { error::class.java.simpleName }}")
+            if (isPrivateKeyAuthFailure(error, config)) {
+                log(
+                    "Authentication hint: server rejected the selected key; verify username, host, " +
+                        "and that this public key is present in the server authorized_keys",
+                )
+            }
             throw mapJschError(error, config)
         }
     }
@@ -90,6 +100,49 @@ class SshConnectionManager {
             }
             throw VpnConnectionException("Invalid private key format", error)
         }
+    }
+
+    private fun logPrivateKeyFingerprint(
+        jsch: JSch,
+        key: SshPrivateKey,
+        log: (String) -> Unit,
+    ) {
+        var keyPair: KeyPair? = null
+        try {
+            keyPair = KeyPair.load(
+                jsch,
+                key.privateKey.toByteArray(Charsets.UTF_8),
+                null,
+            )
+            if (keyPair.isEncrypted) {
+                val passphrase = key.passphrase?.toByteArray(Charsets.UTF_8)
+                if (passphrase == null || !keyPair.decrypt(passphrase)) {
+                    log("Selected private key fingerprint unavailable: passphrase required")
+                    return
+                }
+            }
+
+            val publicKeyBlob = keyPair.getPublicKeyBlob()
+            val sha256Fingerprint = publicKeyBlob?.let(::openSshSha256Fingerprint)
+                ?: "SHA256 unavailable"
+            log(
+                "Selected private key public fingerprint: " +
+                    "${keyPair.getKeyTypeString()} $sha256Fingerprint; md5=${keyPair.getFingerPrint()}",
+            )
+        } catch (error: JSchException) {
+            log(
+                "Selected private key fingerprint unavailable: " +
+                    error.message.orEmpty().ifBlank { error::class.java.simpleName },
+            )
+        } finally {
+            keyPair?.dispose()
+        }
+    }
+
+    private fun openSshSha256Fingerprint(publicKeyBlob: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(publicKeyBlob)
+        val encoded = Base64.getEncoder().withoutPadding().encodeToString(digest)
+        return "SHA256:$encoded"
     }
 
     private fun connectionConfig(authType: AuthType): Properties {
@@ -153,6 +206,14 @@ class SshConnectionManager {
             else -> "Unknown connection error"
         }
         return VpnConnectionException(userMessage, error)
+    }
+
+    private fun isPrivateKeyAuthFailure(
+        error: JSchException,
+        config: SshConfig,
+    ): Boolean {
+        return config.authType == AuthType.PRIVATE_KEY &&
+            error.message.orEmpty().contains("Auth fail", ignoreCase = true)
     }
 
     private fun configureEdDsaSupport(log: (String) -> Unit) {

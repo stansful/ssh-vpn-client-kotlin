@@ -71,11 +71,46 @@ sdk.dir=/Users/<user>/Library/Android/sdk
 
 Если wrapper уже создан, `create-gradle-wrapper.sh` можно не запускать.
 
+## Release APK
+
+Для локальной установки можно собрать release APK с локальным keystore. Скрипт создаст его автоматически в `.local/signing/`; эта директория игнорируется git:
+
+```bash
+./scripts/build-release.sh
+```
+
+Выходной файл:
+
+```text
+app/build/outputs/apk/release/app-release.apk
+```
+
+Этот APK можно устанавливать на телефон, но локальный keystore не подходит для production-дистрибуции.
+
+Для production release APK передай свой keystore через переменные окружения:
+
+```bash
+export SSH_VPN_RELEASE_STORE_FILE=/absolute/path/release.keystore
+export SSH_VPN_RELEASE_STORE_PASSWORD='store-password'
+export SSH_VPN_RELEASE_KEY_ALIAS='key-alias'
+export SSH_VPN_RELEASE_KEY_PASSWORD='key-password'
+./scripts/build-release.sh
+```
+
+Выходной файл:
+
+```text
+app/build/outputs/apk/release/app-release.apk
+```
+
+Production release-ключи и пароли нельзя хранить в репозитории.
+
 ## Скрипты
 
 - `./scripts/check-env.sh` - проверяет Java, Android SDK и Gradle/Wrapper.
 - `./scripts/create-gradle-wrapper.sh` - создаёт Gradle Wrapper через доступный Gradle или cached distribution.
 - `./scripts/build-debug.sh` - собирает debug APK.
+- `./scripts/build-release.sh` - собирает installable release APK; использует production signing переменные или локальный ignored keystore.
 - `./scripts/install-debug.sh` - устанавливает debug APK на подключённое устройство.
 - `./scripts/lint.sh` - запускает Android lint для debug variant.
 - `./scripts/test.sh` - запускает unit tests.
@@ -85,6 +120,7 @@ sdk.dir=/Users/<user>/Library/Android/sdk
 
 ```bash
 ./gradlew :app:assembleDebug
+./gradlew :app:assembleRelease
 ./gradlew :app:installDebug
 ./gradlew :app:lintDebug
 ./gradlew :app:testDebugUnitTest

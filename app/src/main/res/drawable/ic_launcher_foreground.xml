@@ -1,113 +1,92 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <path
-        android:fillColor="#0B0B0B"
-        android:pathData="M22,10h64a12,12 0,0 1,12 12v64a12,12 0,0 1,-12 12H22a12,12 0,0 1,-12 -12V22a12,12 0,0 1,12 -12z" />
-    <path
-        android:fillColor="#15110B"
-        android:pathData="M25,13h58a12,12 0,0 1,12 12v58a12,12 0,0 1,-12 12H25a12,12 0,0 1,-12 -12V25a12,12 0,0 1,12 -12z" />
+    android:viewportWidth="512"
+    android:viewportHeight="512">
 
-    <!-- Tunnel arcs adapted from the source SVG. -->
+    <!-- Background from ssh_vpn_black_orange.svg. Gradients are flattened for VectorDrawable support. -->
+    <path
+        android:fillColor="#080808"
+        android:pathData="M132,32H380A100,100 0,0 1,480 132V380A100,100 0,0 1,380 480H132A100,100 0,0 1,32 380V132A100,100 0,0 1,132 32Z" />
     <path
         android:fillColor="@android:color/transparent"
-        android:pathData="M25,58C33,47 43,42 54,42C65,42 75,47 83,58"
-        android:strokeColor="#FF9F1C"
-        android:strokeWidth="4.2"
-        android:strokeAlpha="0.32"
-        android:strokeLineCap="round" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M32,63C38,56 46,52 54,52C62,52 70,56 76,63"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="3.2"
-        android:strokeAlpha="0.12"
-        android:strokeLineCap="round" />
+        android:pathData="M132,32.5H380A99.5,99.5 0,0 1,479.5 132V380A99.5,99.5 0,0 1,380 479.5H132A99.5,99.5 0,0 1,32.5 380V132A99.5,99.5 0,0 1,132 32.5Z"
+        android:strokeColor="#2A2A2A"
+        android:strokeWidth="1" />
 
-    <!-- Shield silhouette. -->
+    <!-- Vector approximation of the source drop shadow. -->
+    <path
+        android:fillColor="#000000"
+        android:fillAlpha="0.42"
+        android:pathData="M256,97L384,146V238C384,335 330,407 256,452C182,407 128,335 128,238V146L256,97Z" />
+
+    <!-- Shield. -->
+    <path
+        android:fillColor="#090909"
+        android:pathData="M256,83L384,132V224C384,321 330,393 256,438C182,393 128,321 128,224V132L256,83Z"
+        android:strokeColor="#F68B00"
+        android:strokeWidth="18"
+        android:strokeLineJoin="round" />
+
+    <!-- Small top-right dot. -->
     <path
         android:fillColor="#F2F2F2"
-        android:pathData="M54,16L82,26V48C82,69 70,84 54,93C38,84 26,69 26,48V26L54,16z" />
-    <path
-        android:fillColor="#20160A"
-        android:fillAlpha="0.08"
-        android:pathData="M54,20L77,29V49C77,66 68,79 54,87C40,79 31,66 31,49V29L54,20z" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M54,20L77,29V49C77,66 68,79 54,87C40,79 31,66 31,49V29L54,20z"
-        android:strokeColor="#FF9F1C"
-        android:strokeWidth="2.2"
-        android:strokeAlpha="0.48"
-        android:strokeLineJoin="round" />
+        android:pathData="M358,147A12,12 0,1 1,358 171A12,12 0,1 1,358 147Z" />
 
-    <!-- Key head and shaft. -->
-    <path
-        android:fillColor="#111111"
-        android:pathData="M44,35a7,7 0,1 0,0.1 0M44,39a3,3 0,1 1,-0.1 0z"
-        android:fillType="evenOdd" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M50,42H72"
-        android:strokeColor="#111111"
-        android:strokeWidth="5.8"
-        android:strokeLineCap="round" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M64,42V50"
-        android:strokeColor="#111111"
-        android:strokeWidth="4.6"
-        android:strokeLineCap="round" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M72,42V48"
-        android:strokeColor="#111111"
-        android:strokeWidth="4.6"
-        android:strokeLineCap="round" />
-
-    <!-- Inner tunnel lines. -->
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M36,59C41,51 47,47 54,47C61,47 67,51 72,59"
-        android:strokeColor="#FF9F1C"
-        android:strokeWidth="4.6"
-        android:strokeLineCap="round" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M42,65C45,61 49,59 54,59C59,59 63,61 66,65"
-        android:strokeColor="#111111"
-        android:strokeWidth="3.6"
-        android:strokeAlpha="0.88"
-        android:strokeLineCap="round" />
-
-    <!-- SSH pill. -->
-    <path
-        android:fillColor="#111111"
-        android:pathData="M37,72h34a6,6 0,0 1,6 6v0a6,6 0,0 1,-6 6H37a6,6 0,0 1,-6 -6v0a6,6 0,0 1,6 -6z" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M43,75H50C52,75 52,78 50,78H45C43,78 43,82 46,82H52"
-        android:strokeColor="#FF9F1C"
-        android:strokeWidth="2.6"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M55,75H62C64,75 64,78 62,78H57C55,78 55,82 58,82H64"
-        android:strokeColor="#FF9F1C"
-        android:strokeWidth="2.6"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M68,74V83M68,78C70,76 74,76 74,80V83"
-        android:strokeColor="#FF9F1C"
-        android:strokeWidth="2.6"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round" />
-
+    <!-- Key. -->
     <path
         android:fillColor="#FF9F1C"
-        android:pathData="M76,27a3,3 0,1 0,0.1 0z" />
+        android:pathData="M206,165A40,40 0,1 1,206 245A40,40 0,1 1,206 165Z" />
+    <path
+        android:fillColor="#F2F2F2"
+        android:pathData="M206,189A16,16 0,1 1,206 221A16,16 0,1 1,206 189Z" />
+    <path
+        android:fillColor="#FF9F1C"
+        android:pathData="M254,189H338A16,16 0,0 1,354 205A16,16 0,0 1,338 221H254A16,16 0,0 1,238 205A16,16 0,0 1,254 189Z" />
+    <path
+        android:fillColor="#FF9F1C"
+        android:pathData="M316,189A12,12 0,0 1,328 201V239A12,12 0,0 1,304 239V201A12,12 0,0 1,316 189Z" />
+    <path
+        android:fillColor="#FF9F1C"
+        android:pathData="M348,189A12,12 0,0 1,360 201V221A12,12 0,0 1,336 221V201A12,12 0,0 1,348 189Z" />
+
+    <!-- Tunnel/VPN arcs. -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M165,317C187,280 220,260 256,260C292,260 325,280 347,317"
+        android:strokeColor="#FF9F1C"
+        android:strokeWidth="18"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M190,354C206,329 229,315 256,315C283,315 306,329 322,354"
+        android:strokeColor="#F2F2F2"
+        android:strokeWidth="18"
+        android:strokeLineCap="round" />
+
+    <!-- SSH label. -->
+    <path
+        android:fillColor="#FF9F1C"
+        android:pathData="M199,393H313A29,29 0,0 1,342 422A29,29 0,0 1,313 451H199A29,29 0,0 1,170 422A29,29 0,0 1,199 393Z" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M230,408H205C197,408 195,421 205,421H220C233,421 233,436 220,436H195"
+        android:strokeColor="#111111"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M276,408H251C243,408 241,421 251,421H266C279,421 279,436 266,436H241"
+        android:strokeColor="#111111"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M291,408V436M321,408V436M291,422H321"
+        android:strokeColor="#111111"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
 </vector>

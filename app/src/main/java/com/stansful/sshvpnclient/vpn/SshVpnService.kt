@@ -176,7 +176,9 @@ class SshVpnService : android.net.VpnService() {
             throw VpnConnectionException("Selected SSH key not found")
         }
         appendConnectionDiagnostic(runId, "Looking up selected SSH key")
-        return getKeyById(keyId) ?: throw VpnConnectionException("Selected SSH key not found")
+        val privateKey = getKeyById(keyId) ?: throw VpnConnectionException("Selected SSH key not found")
+        appendConnectionDiagnostic(runId, "Selected SSH key: ${privateKey.name}")
+        return privateKey
     }
 
     private suspend fun connectSingleAttempt(

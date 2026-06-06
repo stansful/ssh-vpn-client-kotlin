@@ -39,6 +39,144 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-06 - Before Block 31
+
+Plan:
+
+- Diagnose the attached SSH auth log.
+- Add safe diagnostics for private-key authentication failures:
+  - log the selected SSH key name;
+  - log a fingerprint of the public key derived from the selected private key;
+  - do not log private key contents or passphrases.
+- Add a user-facing diagnostic hint when the server rejects the private key, so the next debug step is clear.
+- Rebuild and rerun checks.
+
+Result:
+
+- Diagnosed the attached SSH log:
+  - TCP socket to `77.239.103.155:22` connects successfully;
+  - SSH KEX and server host key verification succeed;
+  - Ed25519 support is working;
+  - failure happens at public-key auth: `ssh-ed25519 preauth failure` followed by `Auth fail`.
+- Added safe key diagnostics:
+  - service logs the selected SSH key name;
+  - SSH manager logs the selected private key's derived public fingerprint in OpenSSH `SHA256:...` form plus legacy md5 from JSch;
+  - private key bytes and passphrase are not logged.
+- Added an auth-failure diagnostic hint when the server rejects the key:
+  - verify username, host, and that the derived public key is present in server `authorized_keys`.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/build-release.sh`: success.
+- Verified release APK signature with `apksigner verify --verbose`:
+  - v2 signature: true;
+  - signers: 1.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+- Updated signed release APK at `app/build/outputs/apk/release/app-release.apk`.
+
+### 2026-06-06 - Before Block 30
+
+Plan:
+
+- Fix release APK install failure caused by the unsigned release artifact.
+- Change `scripts/build-release.sh` so the default no-production-key path creates and uses a local ignored keystore.
+- Keep production signing via explicit environment variables.
+- Add `.local/` to `.gitignore` so generated local signing material is never committed.
+- Update README to clarify that the default release script output is installable but local-signed.
+- Build signed release APK and verify it.
+
+Result:
+
+- Confirmed the install failure was caused by trying to install an unsigned release artifact.
+- Updated `.gitignore` to ignore `.local/`.
+- Updated `scripts/build-release.sh`:
+  - production signing still uses explicit `SSH_VPN_RELEASE_*` variables;
+  - when production variables are not set, the script creates a local signing config under `.local/signing/`;
+  - generated local signing secrets stay outside git;
+  - local PKCS12 signing uses one password for store and key so Gradle can read the key;
+  - older incompatible local signing configs are rotated into `.local/signing/backup-*`.
+- Updated `README.md` so the default release script output is documented as an installable local-signed APK.
+- Built signed release APK:
+  - `app/build/outputs/apk/release/app-release.apk`.
+- Verified APK signature with `apksigner verify --verbose`:
+  - v2 signature: true;
+  - signers: 1.
+- Verified `./scripts/build-release.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `git diff --check`: success.
+
+### 2026-06-06 - Before Block 29
+
+Plan:
+
+- Add a release build script.
+- Support two release modes:
+  - unsigned release APK when signing credentials are not provided;
+  - signed release APK when keystore credentials are provided via environment variables.
+- Add Gradle release signing config that reads credentials from environment variables without storing secrets in the repository.
+- Update README with release build usage and output paths.
+- Build the release APK and rerun focused checks.
+
+Result:
+
+- Added `scripts/build-release.sh`.
+- The release script now:
+  - resolves Gradle the same way as existing scripts;
+  - builds `:app:assembleRelease`;
+  - detects whether signing credentials are complete;
+  - prints the signed or unsigned release APK path according to the active mode.
+- Added optional release signing config to `app/build.gradle.kts`.
+- Release signing credentials are read only from environment variables or Gradle properties:
+  - `SSH_VPN_RELEASE_STORE_FILE`;
+  - `SSH_VPN_RELEASE_STORE_PASSWORD`;
+  - `SSH_VPN_RELEASE_KEY_ALIAS`;
+  - `SSH_VPN_RELEASE_KEY_PASSWORD`.
+- Updated `README.md` with release build commands, output paths, and signing variable examples.
+- Built unsigned release APK because signing credentials were not provided:
+  - `app/build/outputs/apk/release/app-release-unsigned.apk`.
+- Verified `./scripts/build-release.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `git diff --check`: success.
+
+### 2026-06-06 - Before Block 28
+
+Plan:
+
+- Replace the launcher icon with an Android VectorDrawable adapted from `/Users/stansful/Downloads/ssh_vpn_black_orange.svg`.
+- Preserve the supplied icon composition:
+  - rounded black background;
+  - orange outlined shield;
+  - orange SSH key;
+  - VPN tunnel arcs;
+  - orange SSH label pill.
+- Keep only Android-required adaptations:
+  - convert unsupported SVG gradients to close solid colors;
+  - replace unsupported drop shadow filter with a subtle vector shadow shape;
+  - replace unsupported SVG text with vector stroke paths reading `SSH`.
+- Rebuild and rerun checks.
+
+Result:
+
+- Replaced `app/src/main/res/drawable/ic_launcher_foreground.xml` with an Android VectorDrawable based on `/Users/stansful/Downloads/ssh_vpn_black_orange.svg`.
+- Preserved the supplied composition:
+  - rounded black background;
+  - orange outlined shield;
+  - orange SSH key;
+  - orange and white VPN arcs;
+  - orange `SSH` label pill.
+- Kept only Android VectorDrawable compatibility adaptations:
+  - flattened SVG gradients to close black/orange solid colors;
+  - approximated the SVG drop shadow with a translucent vector shadow path;
+  - converted the unsupported SVG text into black vector stroke paths reading `SSH`.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
 ### 2026-06-06 - Before Block 27
 
 Plan:

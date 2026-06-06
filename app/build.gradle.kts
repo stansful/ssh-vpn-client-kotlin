@@ -4,6 +4,25 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+val releaseStoreFilePath = providers.environmentVariable("SSH_VPN_RELEASE_STORE_FILE")
+    .orElse(providers.gradleProperty("SSH_VPN_RELEASE_STORE_FILE"))
+    .orNull
+val releaseStorePassword = providers.environmentVariable("SSH_VPN_RELEASE_STORE_PASSWORD")
+    .orElse(providers.gradleProperty("SSH_VPN_RELEASE_STORE_PASSWORD"))
+    .orNull
+val releaseKeyAlias = providers.environmentVariable("SSH_VPN_RELEASE_KEY_ALIAS")
+    .orElse(providers.gradleProperty("SSH_VPN_RELEASE_KEY_ALIAS"))
+    .orNull
+val releaseKeyPassword = providers.environmentVariable("SSH_VPN_RELEASE_KEY_PASSWORD")
+    .orElse(providers.gradleProperty("SSH_VPN_RELEASE_KEY_PASSWORD"))
+    .orNull
+val releaseSigningConfigured = listOf(
+    releaseStoreFilePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.stansful.sshvpnclient"
     compileSdk = 35
@@ -33,6 +52,27 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = file(releaseStoreFilePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            isShrinkResources = false
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
 
     packaging {
