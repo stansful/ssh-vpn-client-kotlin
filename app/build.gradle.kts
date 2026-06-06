@@ -70,6 +70,8 @@ dependencies {
 
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("com.github.mwiede:jsch:0.2.21")
+    implementation(files("libs/hevtunnel-1.0.1-kotlin19.aar"))
+    implementation("org.bouncycastle:bcprov-jdk18on:1.79")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     testImplementation("junit:junit:4.13.2")

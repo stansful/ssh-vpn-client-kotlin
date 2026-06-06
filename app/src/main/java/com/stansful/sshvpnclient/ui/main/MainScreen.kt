@@ -6,25 +6,35 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
-import androidx.compose.material3.ElevatedButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -37,8 +47,6 @@ import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
 import com.stansful.sshvpnclient.ui.common.ErrorMessage
 import com.stansful.sshvpnclient.ui.common.PrimaryActionButton
 import com.stansful.sshvpnclient.ui.common.SecondaryActionButton
-import com.stansful.sshvpnclient.ui.common.VerticalGap
-import androidx.compose.runtime.collectAsState
 
 @Composable
 fun MainRoute(
@@ -162,17 +170,46 @@ private fun StatusPanel(state: MainUiState) {
 private fun DiagnosticsPanel(state: MainUiState) {
     if (state.vpnState.diagnostics.isEmpty()) return
 
+    var expanded by remember { mutableStateOf(false) }
+    val clipboardManager = LocalClipboardManager.current
+    val logText = state.vpnState.diagnostics.joinToString(separator = "\n")
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Connection diagnostics", style = MaterialTheme.typography.labelLarge)
-            SelectionContainer {
-                Text(
-                    text = state.vpnState.diagnostics.joinToString(separator = "\n"),
-                    style = MaterialTheme.typography.bodySmall,
-                )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Connection diagnostics", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "${state.vpnState.diagnostics.size} lines",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { clipboardManager.setText(AnnotatedString(logText)) }) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy diagnostics")
+                    }
+                    IconButton(onClick = { expanded = !expanded }) {
+                        val icon = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore
+                        val description = if (expanded) "Hide diagnostics" else "Show diagnostics"
+                        Icon(icon, contentDescription = description)
+                    }
+                }
+            }
+
+            if (expanded) {
+                SelectionContainer {
+                    Text(
+                        text = logText,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         }
     }

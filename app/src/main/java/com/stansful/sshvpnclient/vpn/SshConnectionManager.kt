@@ -9,6 +9,7 @@ import com.stansful.sshvpnclient.domain.model.SshConfig
 import com.stansful.sshvpnclient.domain.model.SshPrivateKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.net.Socket
 import java.util.Properties
 
 class SshConnectionManager {
@@ -18,10 +19,12 @@ class SshConnectionManager {
         config: SshConfig,
         privateKey: SshPrivateKey?,
         log: (String) -> Unit = {},
+        socketProtector: ((Socket) -> Boolean)? = null,
     ): Session = withContext(Dispatchers.IO) {
         disconnect()
 
         installJschLogger(log)
+        configureEdDsaSupport(log)
         val jsch = JSch()
         if (config.authType == AuthType.PRIVATE_KEY) {
             val key = privateKey ?: throw VpnConnectionException("Selected SSH key not found")
@@ -33,6 +36,15 @@ class SshConnectionManager {
         try {
             log("Opening SSH session to ${config.username}@${config.host}:${config.port}")
             val session = jsch.getSession(config.username, config.host, config.port)
+            if (socketProtector != null) {
+                session.setSocketFactory(
+                    VpnProtectedSocketFactory(
+                        protectSocket = socketProtector,
+                        connectTimeoutMs = CONNECT_TIMEOUT_MS,
+                    ),
+                )
+                log("SSH socket protection enabled")
+            }
             session.setConfig(connectionConfig(config.authType))
             session.setServerAliveInterval(config.keepAliveIntervalSec * 1000)
             log("SSH auth method: ${config.authType.label}; keepAlive=${config.keepAliveIntervalSec}s")
@@ -128,6 +140,8 @@ class SshConnectionManager {
             message.contains("Auth fail", ignoreCase = true) -> "Authentication failed"
             message.contains("timeout", ignoreCase = true) -> "Connection timeout"
             message.contains("UnknownHost", ignoreCase = true) -> "Host unreachable"
+            message.contains("protect SSH socket", ignoreCase = true) ->
+                "Could not protect SSH socket from VPN routing"
             message.contains("invalid privatekey", ignoreCase = true) -> "Invalid private key format"
             else -> "Unknown connection error"
         }
@@ -146,6 +160,14 @@ class SshConnectionManager {
                 }
             },
         )
+    }
+
+    private fun configureEdDsaSupport(log: (String) -> Unit) {
+        JSch.setConfig("keypairgen.eddsa", "com.jcraft.jsch.bc.KeyPairGenEdDSA")
+        JSch.setConfig("keypairgen_fromprivate.eddsa", "com.jcraft.jsch.bc.KeyPairGenEdDSA")
+        JSch.setConfig("ssh-ed25519", "com.jcraft.jsch.bc.SignatureEd25519")
+        JSch.setConfig("ssh-ed448", "com.jcraft.jsch.bc.SignatureEd448")
+        log("Configured BouncyCastle-backed EdDSA support for JSch")
     }
 
     private fun levelLabel(level: Int): String {

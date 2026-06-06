@@ -19,15 +19,29 @@ Native Android MVP на Kotlin + Jetpack Compose для VPN-клиента, ко
 - SSH-подключение через password или private key.
 - Проверка fingerprint, если он указан.
 - KeepAlive interval для SSH-сессии.
-- UDP forwarding как experimental flag в конфигурации.
+- Локальный TUN-to-SOCKS forwarding через native `hev-socks5-tunnel`.
+- Локальный SOCKS5 bridge поверх SSH `direct-tcpip` channels.
+- DNS из VPN обрабатывается как DNS-over-TCP через SSH.
+- Диагностические логи подключения: по умолчанию свёрнуты, есть копирование в clipboard.
 
-## Важное ограничение MVP
+## Сетевые ограничения
 
-`VpnService` и SSH-сессия подготовлены, но полноценный packet forwarding из TUN в SSH требует подключения реального tun2socks/native engine. Точка интеграции находится в:
+- TCP-трафик из Android VPN идёт через SSH.
+- DNS-запросы из VPN идут через SSH как DNS-over-TCP к DNS-серверам из `VpnTunnelManager`.
+- Произвольный non-DNS UDP пока не проксируется через SSH и отбрасывается локальным SOCKS bridge.
+- `enableUdpForwarding` пока оставлен как experimental flag; текущая реализация явно пишет в diagnostics, что поддержаны TCP и DNS.
 
-`app/src/main/java/com/stansful/sshvpnclient/vpn/Tun2SocksManager.kt`
+Точки интеграции:
 
-Без этой интеграции приложение покрывает модели, хранение, UI, lifecycle VPN-сервиса и SSH-сессию, но не является production-ready системным VPN.
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/Tun2SocksManager.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/SshSocks5Server.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/VpnProtectedSocketFactory.kt`
+
+`hev-socks5-tunnel` подключён как локальный AAR:
+
+`app/libs/hevtunnel-1.0.1-kotlin19.aar`
+
+В AAR удалён Kotlin module metadata, потому что upstream `com.zaneschepke:hevtunnel:1.0.1` опубликован Kotlin 2.2, а проект сейчас использует Kotlin 1.9. Native `.so` и Java class bridge сохранены.
 
 ## Требования для локального запуска
 

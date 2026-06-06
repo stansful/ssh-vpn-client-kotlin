@@ -77,14 +77,17 @@ class SshVpnService : android.net.VpnService() {
                     config = config,
                     privateKey = privateKey,
                     log = connectionRepository::appendDiagnostic,
+                    socketProtector = { socket -> protect(socket) },
                 )
                 connectionRepository.appendDiagnostic("Establishing Android VPN interface")
                 val vpnInterface = appContainer.vpnTunnelManager.establish(this@SshVpnService, config)
                 connectionRepository.appendDiagnostic("Starting local TUN forwarding layer")
                 appContainer.tun2SocksManager.start(
+                    context = this@SshVpnService,
                     vpnInterface = vpnInterface,
                     sshSession = sshSession,
                     enableUdpForwarding = config.enableUdpForwarding,
+                    log = connectionRepository::appendDiagnostic,
                 )
                 connectionRepository.appendDiagnostic("VPN connection is connected")
                 connectionRepository.setConnected(config.id)

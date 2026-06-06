@@ -32,8 +32,9 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Known Limits For This Pass
 
-- Full production-grade SSH-over-TUN forwarding requires platform/device testing and a real SSH/tun2socks integration.
-- UDP forwarding is represented as an experimental configuration flag for MVP.
+- SSH-over-TUN forwarding now has a native tun2socks engine, but still requires platform/device testing for production confidence.
+- TCP and DNS are routed through SSH; arbitrary non-DNS UDP is still not proxied.
+- UDP forwarding is still represented as an experimental configuration flag.
 - Secrets must not be logged or stored in plain config/key records.
 
 ## Change Log
@@ -167,6 +168,64 @@ Result:
 - Added explicit validation for accidentally pasted `.pub` public keys:
   - `ssh-rsa`, `ssh-ed25519`, and common ECDSA public-key prefixes are rejected with a specific message.
 - Added `SshPrivateKeyValidatorTest`.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 10
+
+Plan:
+
+- Put connection diagnostics behind a collapsed-by-default spoiler.
+- Add a copy diagnostics button.
+- Fix the current traffic blackhole caused by establishing a full-device VPN route without a real TUN forwarding engine.
+- Rebuild and rerun tests/lint.
+
+Result:
+
+- Attached diagnostics show successful SSH public-key authentication.
+- The freeze starts after the VPN interface is established.
+- Current `Tun2SocksManager` only marks itself running and does not forward packets, so the full-device `0.0.0.0/0` VPN route blackholes traffic.
+- Added collapsed-by-default connection diagnostics on the main screen.
+- Added a copy button for diagnostics.
+- Replaced the `Tun2SocksManager` placeholder with a real native TUN-to-SOCKS launch path using `hev-socks5-tunnel`.
+- Added local SSH SOCKS5 bridge:
+  - TCP `CONNECT` opens JSch `direct-tcpip` channels through the authenticated SSH session;
+  - SOCKS UDP associate handles DNS packets by converting DNS UDP to DNS-over-TCP through SSH;
+  - non-DNS UDP is dropped and logged once.
+- Added SSH socket protection via `VpnService.protect(socket)` before the Android default VPN route is installed.
+- Added vendored `app/libs/hevtunnel-1.0.1-kotlin19.aar`.
+  - The upstream AAR is published with Kotlin 2.2 metadata.
+  - The vendored AAR removes only the Kotlin module metadata so the Kotlin 1.9 app can compile while using the Java/native bridge through reflection.
+- Updated `README.md` with the real forwarding path and current UDP limitation.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 9
+
+Plan:
+
+- Fix Ed25519 SSH private key authentication support.
+- Add required crypto provider/dependency for JSch on Android.
+- Register provider before SSH auth.
+- Rebuild and rerun tests/lint.
+
+Result:
+
+- Diagnosed attached JSch log:
+  - SSH transport and key exchange succeeded;
+  - server allowed `publickey`;
+  - failure happened because `ssh-ed25519` signature was unavailable for the loaded identity.
+- Added runtime dependency `org.bouncycastle:bcprov-jdk18on:1.79`.
+- Forced JSch EdDSA config to BouncyCastle-backed implementations:
+  - `keypairgen.eddsa`;
+  - `keypairgen_fromprivate.eddsa`;
+  - `ssh-ed25519`;
+  - `ssh-ed448`.
+- Added a diagnostic line confirming BouncyCastle-backed EdDSA setup.
 - Verified `./scripts/build-debug.sh`: success.
 - Verified `./scripts/test.sh`: success.
 - Verified `./scripts/lint.sh`: success.
