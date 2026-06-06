@@ -51,9 +51,9 @@ class SshSocks5Server(
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
         closeQuietly(serverSocket)
-        activeSockets.toList().forEach(::closeQuietly)
-        activeUdpSockets.toList().forEach(::closeQuietly)
-        activeChannels.toList().forEach { channel -> channel.disconnect() }
+        snapshot(activeSockets).forEach(::closeQuietly)
+        snapshot(activeUdpSockets).forEach(::closeQuietly)
+        snapshot(activeChannels).forEach { channel -> channel.disconnect() }
         executor.shutdownNow()
     }
 
@@ -93,11 +93,11 @@ class SshSocks5Server(
         } catch (_: EOFException) {
             // Client closed the SOCKS connection during handshake.
         } catch (error: IOException) {
-            if (!stopped.get()) {
+            if (!isExpectedShutdown(error)) {
                 log("SOCKS client failed: ${error.message}")
             }
         } catch (error: RuntimeException) {
-            if (!stopped.get()) {
+            if (!isExpectedShutdown(error)) {
                 log("SOCKS client failed: ${error.message}")
             }
         } finally {
@@ -205,10 +205,12 @@ class SshSocks5Server(
                 upstream.cancel(true)
             }
         } catch (error: Exception) {
-            if (!replySent) {
-                sendReply(output, SOCKS_REPLY_HOST_UNREACHABLE)
+            if (!replySent && !stopped.get()) {
+                runCatching {
+                    sendReply(output, SOCKS_REPLY_HOST_UNREACHABLE)
+                }
             }
-            if (!stopped.get()) {
+            if (!isExpectedShutdown(error)) {
                 log("SOCKS CONNECT ${request.address.host}:${request.port} failed: ${error.message}")
             }
         } finally {
@@ -273,7 +275,11 @@ class SshSocks5Server(
             } catch (_: SocketException) {
                 if (!alive.get() || stopped.get()) return
             } catch (error: IOException) {
-                if (!stopped.get() && alive.get()) {
+                if (!isExpectedShutdown(error) && alive.get()) {
+                    log("SOCKS UDP relay failed: ${error.message}")
+                }
+            } catch (error: RuntimeException) {
+                if (!isExpectedShutdown(error) && alive.get()) {
                     log("SOCKS UDP relay failed: ${error.message}")
                 }
             }
@@ -357,7 +363,7 @@ class SshSocks5Server(
                 )
             }
         } catch (error: Exception) {
-            if (!stopped.get()) {
+            if (!isExpectedShutdown(error)) {
                 log("DNS over SSH failed for ${packet.address.host}:${packet.port}: ${error.message}")
             }
         }
@@ -466,6 +472,17 @@ class SshSocks5Server(
             output?.close()
         } catch (_: IOException) {
         }
+    }
+
+    private fun isExpectedShutdown(error: Throwable): Boolean {
+        val message = error.message.orEmpty()
+        if (stopped.get() || Thread.currentThread().isInterrupted) return true
+        return message.contains("executor", ignoreCase = true) &&
+            message.contains("shut", ignoreCase = true)
+    }
+
+    private fun <T> snapshot(set: MutableSet<T>): List<T> {
+        return synchronized(set) { set.toList() }
     }
 
     private data class SocksRequest(

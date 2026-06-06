@@ -39,6 +39,37 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-06 - Before Block 12
+
+Plan:
+
+- Investigate disconnect-time diagnostics from attached logs.
+- Suppress expected close exceptions from in-flight DNS/SOCKS tasks during disconnect.
+- Make TUN/SOCKS/SSH shutdown order more deterministic and idempotent.
+- Rebuild and rerun checks.
+
+Result:
+
+- Attached logs show successful connection and disconnect-time noise:
+  - repeated `DNS over SSH failed ... Socket is closed`;
+  - benign JSch shutdown log `Caught an exception, leaving main loop due to Socket closed`.
+- Reordered `Tun2SocksManager.stop()`:
+  - stop the local SOCKS bridge first so in-flight DNS/SOCKS workers immediately see shutdown state;
+  - then stop the native `hev-socks5-tunnel` engine.
+- Hardened `SshSocks5Server.stop()`:
+  - snapshot synchronized active socket/channel sets before iteration;
+  - suppress expected shutdown errors from DNS, UDP relay, and SOCKS client workers.
+- Filtered the benign JSch `Socket closed` main-loop message from user diagnostics.
+- Wrapped each disconnect cleanup step in `SshVpnService` so one close failure cannot crash disconnect.
+- Added disconnect diagnostics:
+  - `Stopping VPN connection`;
+  - `VPN connection disconnected`;
+  - short cleanup warning only if a close step genuinely fails.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
 ### 2026-06-06 - Before Block 11
 
 Plan:

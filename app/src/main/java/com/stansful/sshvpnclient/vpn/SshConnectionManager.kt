@@ -156,6 +156,7 @@ class SshConnectionManager {
                 override fun log(level: Int, message: String?) {
                     val value = message?.trim().orEmpty()
                     if (value.isBlank()) return
+                    if (isExpectedDisconnectLog(value)) return
                     log("JSch ${levelLabel(level)}: $value")
                 }
             },
@@ -179,6 +180,10 @@ class SshConnectionManager {
             Logger.FATAL -> "FATAL"
             else -> level.toString()
         }
+    }
+
+    private fun isExpectedDisconnectLog(message: String): Boolean {
+        return message.contains("leaving main loop due to Socket closed", ignoreCase = true)
     }
 
     private companion object {

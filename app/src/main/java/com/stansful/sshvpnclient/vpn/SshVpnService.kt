@@ -112,20 +112,41 @@ class SshVpnService : android.net.VpnService() {
 
     private fun disconnect() {
         serviceScope.launch {
+            appContainer.vpnConnectionRepository.appendDiagnostic("Stopping VPN connection")
             appContainer.vpnConnectionRepository.setDisconnecting(null)
             disconnectInternal(updateState = true)
+            appContainer.vpnConnectionRepository.appendDiagnostic("VPN connection disconnected")
             stopSelf()
         }
     }
 
     private fun disconnectInternal(updateState: Boolean) {
-        appContainer.tun2SocksManager.stop()
-        appContainer.vpnTunnelManager.close()
-        appContainer.sshConnectionManager.disconnect()
+        cleanupDisconnectStep("TUN forwarding") {
+            appContainer.tun2SocksManager.stop()
+        }
+        cleanupDisconnectStep("VPN interface") {
+            appContainer.vpnTunnelManager.close()
+        }
+        cleanupDisconnectStep("SSH session") {
+            appContainer.sshConnectionManager.disconnect()
+        }
         if (updateState) {
             appContainer.vpnConnectionRepository.setDisconnected()
         }
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        cleanupDisconnectStep("foreground notification") {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+    }
+
+    private inline fun cleanupDisconnectStep(
+        label: String,
+        action: () -> Unit,
+    ) {
+        runCatching(action).onFailure { error ->
+            appContainer.vpnConnectionRepository.appendDiagnostic(
+                "Disconnect cleanup warning ($label): ${error.message ?: error::class.java.simpleName}",
+            )
+        }
     }
 
     private fun startVpnForeground() {

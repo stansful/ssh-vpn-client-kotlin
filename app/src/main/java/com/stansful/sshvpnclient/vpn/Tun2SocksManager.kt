@@ -69,6 +69,10 @@ class Tun2SocksManager {
     }
 
     fun stop() {
+        val socks = socksServer
+        socksServer = null
+        socks?.stop()
+
         val wasRunning = isRunning
         isRunning = false
         if (wasRunning) {
@@ -77,8 +81,6 @@ class Tun2SocksManager {
             } catch (_: Throwable) {
             }
         }
-        socksServer?.stop()
-        socksServer = null
         tunnelExecutor?.shutdownNow()
         tunnelExecutor = null
         configFile?.delete()
