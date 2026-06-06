@@ -23,6 +23,7 @@ Native Android MVP на Kotlin + Jetpack Compose для VPN-клиента, ко
 - Локальный SOCKS5 bridge поверх SSH `direct-tcpip` channels.
 - DNS из VPN обрабатывается как DNS-over-TCP через SSH.
 - Диагностические логи подключения: по умолчанию свёрнуты, есть копирование в clipboard.
+- Автоматическое переподключение при обрыве SSH-сессии до явного Disconnect.
 
 ## Сетевые ограничения
 
@@ -30,6 +31,8 @@ Native Android MVP на Kotlin + Jetpack Compose для VPN-клиента, ко
 - DNS-запросы из VPN идут через SSH как DNS-over-TCP к DNS-серверам из `VpnTunnelManager`.
 - Произвольный non-DNS UDP пока не проксируется через SSH и отбрасывается локальным SOCKS bridge.
 - `enableUdpForwarding` пока оставлен как experimental flag; текущая реализация явно пишет в diagnostics, что поддержаны TCP и DNS.
+- Если SSH-сессия обрывается, приложение закрывает текущие TUN/SOCKS/SSH ресурсы и переподключается с backoff от 2 до 30 секунд.
+- Diagnostics не обрезаются по количеству строк в рамках текущего подключения и сбрасываются только при новом пользовательском Connect.
 
 Точки интеграции:
 

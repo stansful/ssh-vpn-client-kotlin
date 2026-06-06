@@ -7,17 +7,26 @@ import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.jcraft.jsch.Session
 import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.SshVpnApplication
 import com.stansful.sshvpnclient.domain.model.AuthType
+import com.stansful.sshvpnclient.domain.model.SshConfig
+import com.stansful.sshvpnclient.domain.model.SshPrivateKey
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class SshVpnService : android.net.VpnService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var connectionJob: Job? = null
+    private var connectionRunId: Long = 0L
+    private var userRequestedDisconnect: Boolean = true
 
     private val appContainer
         get() = (application as SshVpnApplication).container
@@ -33,24 +42,36 @@ class SshVpnService : android.net.VpnService() {
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
     override fun onDestroy() {
+        userRequestedDisconnect = true
+        connectionRunId += 1
+        connectionJob?.cancel()
         disconnectInternal(updateState = false)
         serviceScope.cancel()
         super.onDestroy()
     }
 
     private fun connect() {
-        serviceScope.launch {
-            val configRepository = appContainer.sshConfigRepository
-            val keyRepository = appContainer.sshPrivateKeyRepository
-            val connectionRepository = appContainer.vpnConnectionRepository
+        userRequestedDisconnect = false
+        val runId = ++connectionRunId
+        connectionJob?.cancel()
+        connectionJob = serviceScope.launch {
+            runConnectionLoop(runId)
+        }
+    }
 
-            val config = configRepository.getSelectedConfig()
-            if (config == null) {
-                connectionRepository.setError(null, "No configuration selected")
-                stopSelf()
-                return@launch
-            }
+    private suspend fun runConnectionLoop(runId: Long) {
+        val configRepository = appContainer.sshConfigRepository
+        val keyRepository = appContainer.sshPrivateKeyRepository
+        val connectionRepository = appContainer.vpnConnectionRepository
 
+        val config = configRepository.getSelectedConfig()
+        if (config == null) {
+            connectionRepository.setError(null, "No configuration selected")
+            stopSelf()
+            return
+        }
+
+        try {
             connectionRepository.setConnecting(config.id)
             connectionRepository.appendDiagnostic("Starting VPN connection")
             connectionRepository.appendDiagnostic(
@@ -60,58 +81,181 @@ class SshVpnService : android.net.VpnService() {
             startVpnForeground()
             connectionRepository.appendDiagnostic("Foreground VPN service started")
 
-            try {
-                val privateKey = if (config.authType == AuthType.PRIVATE_KEY) {
-                    val keyId = config.privateKeyId
-                    if (keyId.isNullOrBlank()) {
-                        throw VpnConnectionException("Selected SSH key not found")
-                    }
-                    connectionRepository.appendDiagnostic("Looking up selected SSH key")
-                    keyRepository.getById(keyId)
-                        ?: throw VpnConnectionException("Selected SSH key not found")
-                } else {
-                    null
+            var attempt = 1
+            var everConnected = false
+            var reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS
+            while (shouldKeepConnectionAlive(runId)) {
+                if (attempt > 1) {
+                    connectionRepository.setReconnecting(config.id)
+                    connectionRepository.appendDiagnostic("Reconnect attempt $attempt starting")
                 }
 
-                val sshSession = appContainer.sshConnectionManager.connect(
-                    config = config,
-                    privateKey = privateKey,
-                    log = connectionRepository::appendDiagnostic,
-                    socketProtector = { socket -> protect(socket) },
-                )
-                connectionRepository.appendDiagnostic("Establishing Android VPN interface")
-                val vpnInterface = appContainer.vpnTunnelManager.establish(this@SshVpnService, config)
-                connectionRepository.appendDiagnostic("Starting local TUN forwarding layer")
-                appContainer.tun2SocksManager.start(
-                    context = this@SshVpnService,
-                    vpnInterface = vpnInterface,
-                    sshSession = sshSession,
-                    enableUdpForwarding = config.enableUdpForwarding,
-                    log = connectionRepository::appendDiagnostic,
-                )
-                connectionRepository.appendDiagnostic("VPN connection is connected")
-                connectionRepository.setConnected(config.id)
-            } catch (error: VpnConnectionException) {
-                connectionRepository.appendDiagnostic("Connection failed: ${error.message}")
-                error.cause?.message?.let { causeMessage ->
-                    connectionRepository.appendDiagnostic("Failure detail: $causeMessage")
+                try {
+                    val privateKey = loadPrivateKey(config, runId, keyRepository::getById)
+                    val sshSession = connectSingleAttempt(config, privateKey, runId)
+                    everConnected = true
+                    reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS
+
+                    val interruptReason = monitorActiveConnection(sshSession, runId)
+                    if (!shouldKeepConnectionAlive(runId)) {
+                        break
+                    }
+                    connectionRepository.appendDiagnostic("Connection interrupted: $interruptReason")
+                } catch (error: CancellationException) {
+                    disconnectInternal(updateState = false, stopForegroundNotification = false)
+                    break
+                } catch (error: VpnConnectionException) {
+                    if (!shouldKeepConnectionAlive(runId)) {
+                        break
+                    }
+                    if (error.isRecoverableBeforeFirstConnection() || everConnected) {
+                        connectionRepository.setReconnecting(config.id)
+                    }
+                    logConnectionAttemptFailure(
+                        attempt = attempt,
+                        errorMessage = error.message ?: "Unknown connection error",
+                        causeMessage = error.cause?.message,
+                    )
+                    if (!everConnected && !error.isRecoverableBeforeFirstConnection()) {
+                        connectionRepository.setError(config.id, error.message ?: "Unknown connection error")
+                        disconnectInternal(updateState = false)
+                        stopSelf()
+                        return
+                    }
+                } catch (error: Exception) {
+                    if (!shouldKeepConnectionAlive(runId)) {
+                        break
+                    }
+                    logConnectionAttemptFailure(
+                        attempt = attempt,
+                        errorMessage = "Unknown connection error",
+                        causeMessage = "${error::class.java.simpleName}: ${error.message}",
+                    )
                 }
-                connectionRepository.setError(config.id, error.message ?: "Unknown connection error")
-                disconnectInternal(updateState = false)
-                stopSelf()
-            } catch (error: Exception) {
+
+                disconnectInternal(updateState = false, stopForegroundNotification = false)
+                if (!shouldKeepConnectionAlive(runId)) {
+                    break
+                }
+                connectionRepository.setReconnecting(config.id)
                 connectionRepository.appendDiagnostic(
-                    "Connection failed with ${error::class.java.simpleName}: ${error.message}",
+                    "Reconnecting in ${reconnectDelayMs / 1000}s; press Disconnect to stop",
                 )
-                connectionRepository.setError(config.id, "Unknown connection error")
-                disconnectInternal(updateState = false)
-                stopSelf()
+                delay(reconnectDelayMs)
+                reconnectDelayMs = minOf(reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS)
+                attempt += 1
             }
+        } finally {
+            if (connectionRunId == runId) {
+                connectionJob = null
+            }
+        }
+    }
+
+    private suspend fun loadPrivateKey(
+        config: SshConfig,
+        runId: Long,
+        getKeyById: suspend (String) -> SshPrivateKey?,
+    ): SshPrivateKey? {
+        if (config.authType != AuthType.PRIVATE_KEY) return null
+
+        val keyId = config.privateKeyId
+        if (keyId.isNullOrBlank()) {
+            throw VpnConnectionException("Selected SSH key not found")
+        }
+        appendConnectionDiagnostic(runId, "Looking up selected SSH key")
+        return getKeyById(keyId) ?: throw VpnConnectionException("Selected SSH key not found")
+    }
+
+    private suspend fun connectSingleAttempt(
+        config: SshConfig,
+        privateKey: SshPrivateKey?,
+        runId: Long,
+    ): Session {
+        val connectionRepository = appContainer.vpnConnectionRepository
+        ensureConnectionStillWanted(runId)
+        NetworkDiagnostics.describe(this@SshVpnService).forEach { message ->
+            appendConnectionDiagnostic(runId, message)
+        }
+        val log = connectionLogger(runId)
+        val sshSession = appContainer.sshConnectionManager.connect(
+            config = config,
+            privateKey = privateKey,
+            log = log,
+            socketProtector = { socket -> protect(socket) },
+        )
+        ensureConnectionStillWanted(runId)
+        connectionRepository.appendDiagnostic("Establishing Android VPN interface")
+        val vpnInterface = appContainer.vpnTunnelManager.establish(this@SshVpnService, config)
+        ensureConnectionStillWanted(runId)
+        connectionRepository.appendDiagnostic("Starting local TUN forwarding layer")
+        appContainer.tun2SocksManager.start(
+            context = this@SshVpnService,
+            vpnInterface = vpnInterface,
+            sshSession = sshSession,
+            enableUdpForwarding = config.enableUdpForwarding,
+            log = connectionRepository::appendDiagnostic,
+        )
+        ensureConnectionStillWanted(runId)
+        connectionRepository.appendDiagnostic("VPN connection is connected")
+        connectionRepository.setConnected(config.id)
+        return sshSession
+    }
+
+    private suspend fun monitorActiveConnection(
+        sshSession: Session,
+        runId: Long,
+    ): String {
+        while (shouldKeepConnectionAlive(runId)) {
+            delay(CONNECTION_MONITOR_INTERVAL_MS)
+            if (!sshSession.isConnected) {
+                return "SSH session disconnected"
+            }
+        }
+        return "Connection stopped"
+    }
+
+    private fun logConnectionAttemptFailure(
+        attempt: Int,
+        errorMessage: String,
+        causeMessage: String?,
+    ) {
+        val connectionRepository = appContainer.vpnConnectionRepository
+        val prefix = if (attempt == 1) "Connection failed" else "Reconnect failed"
+        connectionRepository.appendDiagnostic("$prefix: $errorMessage")
+        causeMessage?.let { message ->
+            connectionRepository.appendDiagnostic("Failure detail: $message")
+        }
+    }
+
+    private fun connectionLogger(runId: Long): (String) -> Unit {
+        return { message -> appendConnectionDiagnostic(runId, message) }
+    }
+
+    private fun appendConnectionDiagnostic(
+        runId: Long?,
+        message: String,
+    ) {
+        if (runId != null && connectionRunId != runId) return
+        appContainer.vpnConnectionRepository.appendDiagnostic(message)
+    }
+
+    private fun shouldKeepConnectionAlive(runId: Long): Boolean {
+        return connectionRunId == runId && !userRequestedDisconnect
+    }
+
+    private fun ensureConnectionStillWanted(runId: Long) {
+        if (!shouldKeepConnectionAlive(runId)) {
+            throw CancellationException("Connection run stopped")
         }
     }
 
     private fun disconnect() {
         serviceScope.launch {
+            userRequestedDisconnect = true
+            connectionRunId += 1
+            connectionJob?.cancel()
+            connectionJob = null
             appContainer.vpnConnectionRepository.appendDiagnostic("Stopping VPN connection")
             appContainer.vpnConnectionRepository.setDisconnecting(null)
             disconnectInternal(updateState = true)
@@ -120,7 +264,10 @@ class SshVpnService : android.net.VpnService() {
         }
     }
 
-    private fun disconnectInternal(updateState: Boolean) {
+    private fun disconnectInternal(
+        updateState: Boolean,
+        stopForegroundNotification: Boolean = true,
+    ) {
         cleanupDisconnectStep("TUN forwarding") {
             appContainer.tun2SocksManager.stop()
         }
@@ -133,8 +280,10 @@ class SshVpnService : android.net.VpnService() {
         if (updateState) {
             appContainer.vpnConnectionRepository.setDisconnected()
         }
-        cleanupDisconnectStep("foreground notification") {
-            stopForeground(STOP_FOREGROUND_REMOVE)
+        if (stopForegroundNotification) {
+            cleanupDisconnectStep("foreground notification") {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
         }
     }
 
@@ -177,6 +326,9 @@ class SshVpnService : android.net.VpnService() {
         private const val ACTION_DISCONNECT = "com.stansful.sshvpnclient.action.DISCONNECT"
         private const val CHANNEL_ID = "ssh_vpn_connection"
         private const val NOTIFICATION_ID = 3001
+        private const val CONNECTION_MONITOR_INTERVAL_MS = 5_000L
+        private const val INITIAL_RECONNECT_DELAY_MS = 2_000L
+        private const val MAX_RECONNECT_DELAY_MS = 30_000L
 
         fun connectIntent(context: Context): Intent {
             return Intent(context, SshVpnService::class.java).setAction(ACTION_CONNECT)
@@ -186,4 +338,12 @@ class SshVpnService : android.net.VpnService() {
             return Intent(context, SshVpnService::class.java).setAction(ACTION_DISCONNECT)
         }
     }
+}
+
+private fun VpnConnectionException.isRecoverableBeforeFirstConnection(): Boolean {
+    val value = message.orEmpty()
+    return value.contains("timeout", ignoreCase = true) ||
+        value.contains("Host unreachable", ignoreCase = true) ||
+        value.contains("Unknown connection error", ignoreCase = true) ||
+        value.contains("Could not start local SSH SOCKS bridge", ignoreCase = true)
 }

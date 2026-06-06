@@ -100,17 +100,17 @@ private fun MainScreen(
             SelectedConfigPanel(state)
             DiagnosticsPanel(state)
 
-            if (state.isConnected) {
+            if (state.canDisconnect) {
                 PrimaryActionButton(
                     text = "Disconnect",
                     onClick = onDisconnect,
-                    enabled = !state.isBusy,
+                    enabled = state.vpnState.status != VpnConnectionStatus.DISCONNECTING,
                 )
             } else {
                 PrimaryActionButton(
                     text = "Connect",
                     onClick = onConnect,
-                    enabled = state.selectedConfig != null && !state.isBusy,
+                    enabled = state.canConnect,
                 )
             }
 
@@ -147,6 +147,7 @@ private fun StatusPanel(state: MainUiState) {
         VpnConnectionStatus.DISCONNECTED -> "Disconnected"
         VpnConnectionStatus.CONNECTING -> "Connecting"
         VpnConnectionStatus.CONNECTED -> "Connected"
+        VpnConnectionStatus.RECONNECTING -> "Reconnecting"
         VpnConnectionStatus.DISCONNECTING -> "Disconnecting"
         VpnConnectionStatus.ERROR -> "Error"
     }

@@ -7,6 +7,7 @@ interface VpnConnectionRepository {
     val state: Flow<VpnConnectionState>
     fun setConnecting(configId: String?)
     fun setConnected(configId: String)
+    fun setReconnecting(configId: String)
     fun setDisconnecting(configId: String?)
     fun setDisconnected()
     fun setError(configId: String?, message: String)

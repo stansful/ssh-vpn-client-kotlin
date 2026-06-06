@@ -9,6 +9,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 class Tun2SocksManager {
+    @Volatile
     var isRunning: Boolean = false
         private set
 

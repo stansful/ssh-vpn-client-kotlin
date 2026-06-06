@@ -22,11 +22,20 @@ data class MainUiState(
     val selectedKeyName: String? = null,
 ) {
     val isBusy: Boolean
-        get() = vpnState.status == VpnConnectionStatus.CONNECTING ||
-            vpnState.status == VpnConnectionStatus.DISCONNECTING
+        get() = vpnState.status == VpnConnectionStatus.DISCONNECTING
 
     val isConnected: Boolean
         get() = vpnState.status == VpnConnectionStatus.CONNECTED
+
+    val canDisconnect: Boolean
+        get() = vpnState.status == VpnConnectionStatus.CONNECTING ||
+            vpnState.status == VpnConnectionStatus.CONNECTED ||
+            vpnState.status == VpnConnectionStatus.RECONNECTING
+
+    val canConnect: Boolean
+        get() = selectedConfig != null &&
+            (vpnState.status == VpnConnectionStatus.DISCONNECTED ||
+                vpnState.status == VpnConnectionStatus.ERROR)
 }
 
 class MainViewModel(

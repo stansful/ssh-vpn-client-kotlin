@@ -39,6 +39,223 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-06 - Before Block 20
+
+Plan:
+
+- Treat the latest timeout as a client regression because committed v9 (`747e501`) worked with the same server and port.
+- Compare current uncommitted SSH connect code against v9.
+- Restore the v9 direct JSch TCP connect path for the initial SSH connection instead of forcing a custom protected/bound socket before any Android VPN interface exists.
+- Preserve useful diagnostics, reconnect behavior, and previous UI/documentation changes where they do not affect initial TCP connect.
+- Rebuild and rerun checks.
+
+Result:
+
+- Compared current uncommitted SSH connect path with committed v9 (`747e501`).
+- Regression source was the post-v9 pre-connect socket setup:
+  - current code created a socket, locally bound it, called `VpnService.protect(socket)`, then called `Network.bindSocket(socket)`, and only after that attempted TCP connect;
+  - latest device logs confirmed both `protect()` and `Network.bindSocket(...)` succeeded, but TCP connect then timed out.
+- Restored the v9 TCP ordering in `VpnProtectedSocketFactory`:
+  - create socket;
+  - call normal `socket.connect(...)`;
+  - log the connected local/remote endpoints;
+  - call `VpnService.protect(socket)` on the connected socket.
+- Removed active-network `Network.bindSocket(...)` from the SSH connect path.
+- Kept diagnostics, reconnect loop, run-aware JSch logging, and `ServerAliveCountMax`.
+- Expected new connection diagnostics:
+  - `SSH socket: opening TCP socket for ...`;
+  - on success, `SSH socket: TCP connected ...`;
+  - then `SSH socket: protect connected socket result=true`.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 19
+
+Plan:
+
+- Investigate the latest connection diagnostics where the protected SSH socket still times out before authentication.
+- Bind the SSH TCP socket explicitly to Android's active validated network in addition to `VpnService.protect(socket)`.
+- Add diagnostics for the active-network socket bind step.
+- Map Android `ECONNABORTED` TCP connect failures as a recoverable connection failure instead of `Unknown connection error`.
+- Rebuild and rerun checks.
+
+Result:
+
+- Latest attached diagnostics show:
+  - active Android network is validated Wi-Fi and not VPN;
+  - `VpnService.protect(socket)` returns `true`;
+  - the SSH TCP connect to `77.239.103.135:22` still times out before authentication.
+- Added active-network socket binding for SSH:
+  - each connection/reconnect attempt captures `ConnectivityManager.activeNetwork`;
+  - the SSH socket is created, locally bound, protected with `VpnService.protect(socket)`, then bound with `Network.bindSocket(socket)` before `connect(...)`;
+  - diagnostics now show whether active-network binding is available and whether `Network.bindSocket(...)` succeeded.
+- Updated SSH error mapping:
+  - Android `ECONNABORTED` / `Software caused connection abort` during TCP connect is now reported as `Connection timeout`;
+  - active-network bind failures are reported as `Could not bind SSH socket to active Android network`.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 18
+
+Plan:
+
+- Create root-level `README_SA.md` for a systems analyst.
+- Describe the application purpose, actors, configuration data, connection lifecycle, SSH/VPN tunnel, DNS path, reconnect behavior, and known limitations.
+- Keep the document non-code-focused and useful for requirements/support discussions.
+
+Result:
+
+- Added root-level `README_SA.md`.
+- The document explains:
+  - application purpose and actors;
+  - stored configuration/key data;
+  - Android VPN, TUN, SOCKS5, SSH, DNS, and external site traffic path;
+  - connect/reconnect/disconnect lifecycle;
+  - diagnostics meaning;
+  - typical failure causes;
+  - current limitations;
+  - key implementation files.
+- No code changes were required for this documentation block.
+
+### 2026-06-06 - Before Block 17
+
+Plan:
+
+- Add detailed diagnostics for SSH TCP socket setup and Android network state.
+- Log socket bind/protect/connect steps and timings.
+- Log active Android network transports/capabilities before SSH connect.
+- Keep reconnect behavior unchanged while gathering enough data to distinguish app routing issues from external port blocking.
+- Rebuild and rerun checks.
+
+Result:
+
+- Added `ACCESS_NETWORK_STATE` permission for diagnostics.
+- Added `NetworkDiagnostics` helper:
+  - logs active Android network;
+  - logs transports and selected capabilities;
+  - logs link summary with interface name, DNS count, and route count.
+- Added protected socket diagnostics in `VpnProtectedSocketFactory`:
+  - target endpoint;
+  - local bind endpoint;
+  - `VpnService.protect(socket)` result;
+  - connect duration and local/remote endpoints on success;
+  - exact socket failure class/message and elapsed time on failure.
+- Wired network diagnostics before each SSH connection attempt.
+- No reconnect policy change in this block.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 16
+
+Plan:
+
+- Fix SSH TCP connect timeout risk caused by protecting the SSH socket only after `connect(...)`.
+- Create a socket file descriptor with `bind(null)`, call `VpnService.protect(socket)`, then call `connect(...)`.
+- Keep reconnect behavior unchanged.
+- Rebuild and rerun checks.
+
+Result:
+
+- Updated `VpnProtectedSocketFactory` to use the correct socket setup order:
+  - create `Socket`;
+  - call `socket.bind(null)` to force Android/Java to allocate a file descriptor;
+  - call `VpnService.protect(socket)` before `connect(...)`;
+  - then connect to the SSH endpoint.
+- This protects the SSH TCP connect from stale/current VPN routes while avoiding Android returning `false` for a socket without a file descriptor.
+- Reconnect behavior remains unchanged.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 15
+
+Plan:
+
+- Fix initial timeout UX where the app can look stuck in `Connecting`.
+- Switch to `Reconnecting` immediately after the first recoverable connection failure.
+- Prevent stale/cancelled SSH attempts from appending diagnostics into the current session log.
+- Rebuild and rerun checks.
+
+Result:
+
+- On recoverable initial SSH failures, the service now switches to `RECONNECTING` before logging the failure/retry delay.
+- Added run-aware diagnostics callbacks in `SshVpnService`.
+  - Logs from stale connection runs are ignored after a new Connect or Disconnect changes `connectionRunId`.
+- Reworked JSch internal logging in `SshConnectionManager`.
+  - JSch uses a static/global logger, so replacing it per connection let old connection attempts write into a newer session log.
+  - The global logger is now installed once and routes messages through an `InheritableThreadLocal` callback for the current SSH connect/session thread.
+- Fixed Kotlin inline/lambda storage by marking the thread-local logger parameter `noinline`.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 14
+
+Plan:
+
+- Fix regression where reconnect monitoring immediately tears down an otherwise successful connection.
+- Treat `hev-socks5-tunnel` native start return as non-fatal because the upstream bridge can return after starting background work.
+- Avoid using `Tun2SocksManager.isRunning` as a health signal unless the app itself called stop.
+- Rebuild and rerun checks.
+
+Result:
+
+- Attached diagnostics showed that SSH authentication and VPN setup still succeeded.
+- Regression source:
+  - `TUN forwarding engine started` was immediately followed by `TUN forwarding engine exited`;
+  - reconnect monitor treated `Tun2SocksManager.isRunning == false` as a failure;
+  - the native `TProxyStartService(...)` bridge can return after starting background native work, so that return is not a reliable engine-stop signal.
+- Removed the false `isRunning = false` transition from the native start thread `finally` block.
+- Removed `Tun2SocksManager.isRunning` from the reconnect health monitor.
+- Reconnect now monitors SSH session health; the TUN/SOCKS stack is still restarted on SSH reconnect.
+- Updated `README.md` to describe SSH-session-based reconnect accurately.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 13
+
+Plan:
+
+- Remove the 80-line diagnostics cap; keep diagnostics until the next user-started Connect resets connection state.
+- Add automatic reconnect when the active SSH/VPN connection is interrupted.
+- Keep reconnecting until the user explicitly presses Disconnect.
+- Ensure UI shows a disconnect action while connecting/reconnecting.
+- Rebuild and rerun checks.
+
+Result:
+
+- Removed the diagnostics line cap in `InMemoryVpnConnectionRepository`.
+  - `setConnecting(...)` still creates a fresh `VpnConnectionState`, so diagnostics reset on a new user-started Connect.
+  - Reconnect attempts use `setReconnecting(...)`, which preserves diagnostics.
+- Added `VpnConnectionStatus.RECONNECTING`.
+- Updated the main screen state/buttons:
+  - Connecting/Reconnecting/Connected show a Disconnect action;
+  - Reconnecting is displayed as a distinct status.
+- Added automatic reconnect loop in `SshVpnService`:
+  - monitors SSH session and TUN forwarding health every 5 seconds;
+  - reconnects after interruptions until the user presses Disconnect;
+  - uses backoff from 2 seconds up to 30 seconds;
+  - keeps the foreground service alive between reconnect attempts.
+- Added run-id cancellation checks so stale connection attempts cannot establish VPN after Disconnect.
+- Cancellation cleanup no longer stops the foreground notification; explicit Disconnect and service destroy still stop it.
+- Added `Session.setServerAliveCountMax(3)` so JSch keepalive detects silent SSH transport drops.
+- Updated `Tun2SocksManager` to mark `isRunning = false` if the native TUN engine exits unexpectedly.
+- Updated `README.md` with reconnect and diagnostics behavior.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
 ### 2026-06-06 - Before Block 12
 
 Plan:

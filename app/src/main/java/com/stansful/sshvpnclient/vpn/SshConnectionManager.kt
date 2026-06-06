@@ -23,7 +23,7 @@ class SshConnectionManager {
     ): Session = withContext(Dispatchers.IO) {
         disconnect()
 
-        installJschLogger(log)
+        installJschLogger()
         configureEdDsaSupport(log)
         val jsch = JSch()
         if (config.authType == AuthType.PRIVATE_KEY) {
@@ -41,12 +41,14 @@ class SshConnectionManager {
                     VpnProtectedSocketFactory(
                         protectSocket = socketProtector,
                         connectTimeoutMs = CONNECT_TIMEOUT_MS,
+                        log = log,
                     ),
                 )
                 log("SSH socket protection enabled")
             }
             session.setConfig(connectionConfig(config.authType))
             session.setServerAliveInterval(config.keepAliveIntervalSec * 1000)
+            session.setServerAliveCountMax(SERVER_ALIVE_COUNT_MAX)
             log("SSH auth method: ${config.authType.label}; keepAlive=${config.keepAliveIntervalSec}s")
 
             if (config.authType == AuthType.PASSWORD) {
@@ -55,7 +57,9 @@ class SshConnectionManager {
                 )
             }
 
-            session.connect(CONNECT_TIMEOUT_MS)
+            withJschLog(log) {
+                session.connect(CONNECT_TIMEOUT_MS)
+            }
             log("SSH transport connected")
             verifyFingerprintIfNeeded(jsch, session, config.fingerprint, log)
             activeSession = session
@@ -139,6 +143,9 @@ class SshConnectionManager {
                     "Authentication failed: server rejected this private key for user '${config.username}'"
             message.contains("Auth fail", ignoreCase = true) -> "Authentication failed"
             message.contains("timeout", ignoreCase = true) -> "Connection timeout"
+            message.contains("ECONNABORTED", ignoreCase = true) ||
+                message.contains("Software caused connection abort", ignoreCase = true) ->
+                    "Connection timeout"
             message.contains("UnknownHost", ignoreCase = true) -> "Host unreachable"
             message.contains("protect SSH socket", ignoreCase = true) ->
                 "Could not protect SSH socket from VPN routing"
@@ -146,21 +153,6 @@ class SshConnectionManager {
             else -> "Unknown connection error"
         }
         return VpnConnectionException(userMessage, error)
-    }
-
-    private fun installJschLogger(log: (String) -> Unit) {
-        JSch.setLogger(
-            object : Logger {
-                override fun isEnabled(level: Int): Boolean = true
-
-                override fun log(level: Int, message: String?) {
-                    val value = message?.trim().orEmpty()
-                    if (value.isBlank()) return
-                    if (isExpectedDisconnectLog(value)) return
-                    log("JSch ${levelLabel(level)}: $value")
-                }
-            },
-        )
     }
 
     private fun configureEdDsaSupport(log: (String) -> Unit) {
@@ -188,5 +180,47 @@ class SshConnectionManager {
 
     private companion object {
         const val CONNECT_TIMEOUT_MS = 20_000
+        const val SERVER_ALIVE_COUNT_MAX = 3
+        val jschThreadLog = InheritableThreadLocal<((String) -> Unit)?>()
+
+        @Volatile
+        var jschLoggerInstalled = false
+    }
+
+    private fun installJschLogger() {
+        if (jschLoggerInstalled) return
+        synchronized(SshConnectionManager::class.java) {
+            if (jschLoggerInstalled) return
+            JSch.setLogger(
+                object : Logger {
+                    override fun isEnabled(level: Int): Boolean = true
+
+                    override fun log(level: Int, message: String?) {
+                        val value = message?.trim().orEmpty()
+                        if (value.isBlank()) return
+                        if (isExpectedDisconnectLog(value)) return
+                        jschThreadLog.get()?.invoke("JSch ${levelLabel(level)}: $value")
+                    }
+                },
+            )
+            jschLoggerInstalled = true
+        }
+    }
+
+    private inline fun <T> withJschLog(
+        noinline log: (String) -> Unit,
+        block: () -> T,
+    ): T {
+        val previous = jschThreadLog.get()
+        jschThreadLog.set(log)
+        return try {
+            block()
+        } finally {
+            if (previous == null) {
+                jschThreadLog.remove()
+            } else {
+                jschThreadLog.set(previous)
+            }
+        }
     }
 }

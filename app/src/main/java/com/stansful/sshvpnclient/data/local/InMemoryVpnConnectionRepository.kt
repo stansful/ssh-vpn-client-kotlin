@@ -30,6 +30,14 @@ class InMemoryVpnConnectionRepository : VpnConnectionRepository {
         )
     }
 
+    override fun setReconnecting(configId: String) {
+        mutableState.value = mutableState.value.copy(
+            status = VpnConnectionStatus.RECONNECTING,
+            activeConfigId = configId,
+            errorMessage = null,
+        )
+    }
+
     override fun setDisconnecting(configId: String?) {
         mutableState.value = mutableState.value.copy(
             status = VpnConnectionStatus.DISCONNECTING,
@@ -57,7 +65,7 @@ class InMemoryVpnConnectionRepository : VpnConnectionRepository {
     override fun appendDiagnostic(message: String) {
         val line = "${timeFormat.format(Date())} $message"
         mutableState.value = mutableState.value.copy(
-            diagnostics = (mutableState.value.diagnostics + line).takeLast(MAX_DIAGNOSTIC_LINES),
+            diagnostics = mutableState.value.diagnostics + line,
         )
     }
 
@@ -66,7 +74,6 @@ class InMemoryVpnConnectionRepository : VpnConnectionRepository {
     }
 
     private companion object {
-        const val MAX_DIAGNOSTIC_LINES = 80
         val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
     }
 }
