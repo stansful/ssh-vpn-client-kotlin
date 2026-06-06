@@ -27,21 +27,23 @@ private val LightColors = lightColorScheme(
 )
 
 private val DarkColors = darkColorScheme(
-    primary = Color(0xFF66D9FF),
-    onPrimary = Color(0xFF002534),
-    primaryContainer = Color(0xFF063544),
-    onPrimaryContainer = Color(0xFFD8F4FF),
-    secondary = Color(0xFF7AE4D4),
-    secondaryContainer = Color(0xFF123B37),
-    tertiary = Color(0xFFC7C2FF),
+    primary = Color(0xFFFF9F1C),
+    onPrimary = Color(0xFF101010),
+    primaryContainer = Color(0xFF2E1A00),
+    onPrimaryContainer = Color(0xFFFFD8A0),
+    secondary = Color(0xFFFFB84D),
+    secondaryContainer = Color(0xFF271805),
+    tertiary = Color(0xFFE65A00),
+    tertiaryContainer = Color(0xFF351300),
     background = Color(0xFF000000),
-    onBackground = Color(0xFFEFF3F8),
-    surface = Color(0xFF08090C),
-    onSurface = Color(0xFFEFF3F8),
-    surfaceVariant = Color(0xFF171B22),
-    onSurfaceVariant = Color(0xFFB8C1CC),
-    outline = Color(0xFF2B3440),
-    error = Color(0xFFFFB4AB),
+    onBackground = Color(0xFFF6F1EA),
+    surface = Color(0xFF090909),
+    onSurface = Color(0xFFF6F1EA),
+    surfaceVariant = Color(0xFF17110A),
+    onSurfaceVariant = Color(0xFFC9B8A2),
+    outline = Color(0xFF3A2A18),
+    outlineVariant = Color(0xFF24180D),
+    error = Color(0xFFFF6B6B),
 )
 
 @Composable

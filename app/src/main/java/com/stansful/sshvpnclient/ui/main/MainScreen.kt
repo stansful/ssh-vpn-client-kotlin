@@ -15,6 +15,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -416,16 +417,21 @@ private fun GlassNavButton(
     )
 
     Surface(
-        onClick = onClick,
-        interactionSource = interactionSource,
         shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surface.copy(alpha = glassAlpha()),
         contentColor = MaterialTheme.colorScheme.onSurface,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)),
-        modifier = modifier.graphicsLayer {
-            scaleX = scale
-            scaleY = scale
-        },
+        modifier = modifier
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                role = Role.Button,
+                onClick = onClick,
+            ),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
@@ -799,6 +805,17 @@ private fun GlassPanel(
     val shape = RoundedCornerShape(8.dp)
     val colorScheme = MaterialTheme.colorScheme
     val darkTheme = colorScheme.background.luminance() < 0.5f
+    val gradientStart = if (darkTheme) {
+        colorScheme.surface.copy(alpha = 0.98f)
+    } else {
+        colorScheme.surface.copy(alpha = 0.82f)
+    }
+    val gradientEnd = if (darkTheme) {
+        colorScheme.surfaceVariant.copy(alpha = 0.72f)
+    } else {
+        colorScheme.surfaceVariant.copy(alpha = 0.28f)
+    }
+
     Surface(
         modifier = modifier
             .fillMaxWidth()
@@ -813,8 +830,8 @@ private fun GlassPanel(
             modifier = Modifier.background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        colorScheme.surface.copy(alpha = 0.82f),
-                        colorScheme.surfaceVariant.copy(alpha = 0.28f),
+                        gradientStart,
+                        gradientEnd,
                     ),
                 ),
             ),
@@ -826,7 +843,7 @@ private fun GlassPanel(
 
 @Composable
 private fun glassAlpha(): Float {
-    return if (MaterialTheme.colorScheme.background.luminance() < 0.5f) 0.72f else 0.78f
+    return if (MaterialTheme.colorScheme.background.luminance() < 0.5f) 0.94f else 0.78f
 }
 
 private fun VpnConnectionStatus.label(): String {

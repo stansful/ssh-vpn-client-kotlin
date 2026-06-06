@@ -4,15 +4,110 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
-        android:fillColor="#006C5B"
-        android:pathData="M18,18h72v72h-72z" />
+        android:fillColor="#0B0B0B"
+        android:pathData="M22,10h64a12,12 0,0 1,12 12v64a12,12 0,0 1,-12 12H22a12,12 0,0 1,-12 -12V22a12,12 0,0 1,12 -12z" />
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M34,52h40v8h-40z" />
+        android:fillColor="#15110B"
+        android:pathData="M25,13h58a12,12 0,0 1,12 12v58a12,12 0,0 1,-12 12H25a12,12 0,0 1,-12 -12V25a12,12 0,0 1,12 -12z" />
+
+    <!-- Tunnel arcs adapted from the source SVG. -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M50,34h8v40h-8z" />
+        android:fillColor="@android:color/transparent"
+        android:pathData="M25,58C33,47 43,42 54,42C65,42 75,47 83,58"
+        android:strokeColor="#FF9F1C"
+        android:strokeWidth="4.2"
+        android:strokeAlpha="0.32"
+        android:strokeLineCap="round" />
     <path
-        android:fillColor="#445E91"
-        android:pathData="M30,76h48v6h-48z" />
+        android:fillColor="@android:color/transparent"
+        android:pathData="M32,63C38,56 46,52 54,52C62,52 70,56 76,63"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.2"
+        android:strokeAlpha="0.12"
+        android:strokeLineCap="round" />
+
+    <!-- Shield silhouette. -->
+    <path
+        android:fillColor="#F2F2F2"
+        android:pathData="M54,16L82,26V48C82,69 70,84 54,93C38,84 26,69 26,48V26L54,16z" />
+    <path
+        android:fillColor="#20160A"
+        android:fillAlpha="0.08"
+        android:pathData="M54,20L77,29V49C77,66 68,79 54,87C40,79 31,66 31,49V29L54,20z" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M54,20L77,29V49C77,66 68,79 54,87C40,79 31,66 31,49V29L54,20z"
+        android:strokeColor="#FF9F1C"
+        android:strokeWidth="2.2"
+        android:strokeAlpha="0.48"
+        android:strokeLineJoin="round" />
+
+    <!-- Key head and shaft. -->
+    <path
+        android:fillColor="#111111"
+        android:pathData="M44,35a7,7 0,1 0,0.1 0M44,39a3,3 0,1 1,-0.1 0z"
+        android:fillType="evenOdd" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M50,42H72"
+        android:strokeColor="#111111"
+        android:strokeWidth="5.8"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M64,42V50"
+        android:strokeColor="#111111"
+        android:strokeWidth="4.6"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M72,42V48"
+        android:strokeColor="#111111"
+        android:strokeWidth="4.6"
+        android:strokeLineCap="round" />
+
+    <!-- Inner tunnel lines. -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M36,59C41,51 47,47 54,47C61,47 67,51 72,59"
+        android:strokeColor="#FF9F1C"
+        android:strokeWidth="4.6"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M42,65C45,61 49,59 54,59C59,59 63,61 66,65"
+        android:strokeColor="#111111"
+        android:strokeWidth="3.6"
+        android:strokeAlpha="0.88"
+        android:strokeLineCap="round" />
+
+    <!-- SSH pill. -->
+    <path
+        android:fillColor="#111111"
+        android:pathData="M37,72h34a6,6 0,0 1,6 6v0a6,6 0,0 1,-6 6H37a6,6 0,0 1,-6 -6v0a6,6 0,0 1,6 -6z" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M43,75H50C52,75 52,78 50,78H45C43,78 43,82 46,82H52"
+        android:strokeColor="#FF9F1C"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M55,75H62C64,75 64,78 62,78H57C55,78 55,82 58,82H64"
+        android:strokeColor="#FF9F1C"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M68,74V83M68,78C70,76 74,76 74,80V83"
+        android:strokeColor="#FF9F1C"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <path
+        android:fillColor="#FF9F1C"
+        android:pathData="M76,27a3,3 0,1 0,0.1 0z" />
 </vector>

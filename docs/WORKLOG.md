@@ -39,6 +39,71 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-06 - Before Block 27
+
+Plan:
+
+- Fix dark-theme backgrounds that still appear white/gray by making the shared app background and glass panels use opaque black/orange tones in dark mode.
+- Remove bright white press/ripple animation from `Configurations`, `SSH Keys`, and app-picker rows.
+- Fix launcher icon text from the current shape that reads like `EEH` to a clearer lowercase `ssh`.
+- Rebuild and rerun checks.
+
+Result:
+
+- Fixed the shared Compose screen background in dark mode:
+  - `Scaffold` and `TopAppBar` now use opaque theme colors instead of transparent containers;
+  - the dark app background uses a black/orange vertical gradient;
+  - the content background fills the whole screen before padding is applied.
+- Updated system status/navigation bar colors from the persisted theme mode so the native light window theme no longer leaves white/gray system areas in dark mode.
+- Removed bright white Material ripple from the main `Configurations` and `SSH Keys` buttons:
+  - switched navigation cards to a custom clickable modifier with `indication = null`;
+  - kept the scale press animation.
+- Removed bright white Material ripple from app picker rows:
+  - switched rows to custom click handling with `indication = null`;
+  - kept a subtle scale press animation;
+  - made the row checkbox passive so row selection remains the single interaction path.
+- Made dark glass panels less transparent so the dark theme reads as black/orange rather than gray.
+- Replaced the icon pill lettering with clearer lowercase `ssh` stroke paths.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 26
+
+Plan:
+
+- Replace the launcher icon with an adapted Android VectorDrawable based on `/Users/stansful/Downloads/ssh_vpn_app_icon.svg`.
+  - Preserve the source concept: rounded icon, shield, SSH key, tunnel lines, and SSH label.
+  - Adapt unsupported SVG gradients/filter/text into Android-compatible vector paths and black/orange styling.
+- Rename the application label to lowercase `shadow-ssh`.
+- Rework only the dark theme into a black/orange palette.
+- Reduce bright white selected/pressed transitions in dark mode by using darker orange selected containers and softer surface variants.
+- Keep the light theme unchanged.
+- Rebuild and rerun checks.
+
+Result:
+
+- Replaced launcher icon with an adapted Android VectorDrawable based on the provided SVG.
+  - Preserved the source concept: rounded icon, shield, key, tunnel arcs, SSH pill.
+  - Converted unsupported SVG features such as gradients, filters, and text into Android vector-compatible paths.
+  - Adapted the visual style to black/orange.
+- Renamed the application label to lowercase `shadow-ssh`.
+- Updated foreground service notification title to `shadow-ssh is active`.
+- Updated native Android accent color to orange.
+- Reworked only the dark color scheme:
+  - black background and dark surfaces;
+  - orange primary/secondary accents;
+  - dark orange selected containers;
+  - softer brown/orange outlines and surface variants to avoid bright white transition flashes.
+- Left the light theme unchanged.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
 ### 2026-06-06 - Before Block 25
 
 Plan:

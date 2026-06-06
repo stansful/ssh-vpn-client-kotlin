@@ -37,6 +37,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 
@@ -50,13 +51,13 @@ fun AppScreen(
 ) {
     Scaffold(
         modifier = Modifier.background(appBackgroundBrush()),
-        containerColor = Color.Transparent,
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = { Text(title) },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color.Transparent,
-                    scrolledContainerColor = Color.Transparent,
+                    containerColor = MaterialTheme.colorScheme.background,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
                 ),
                 navigationIcon = {
                     if (onBack != null) {
@@ -71,9 +72,9 @@ fun AppScreen(
     ) { paddingValues ->
         Column(
             modifier = Modifier
+                .fillMaxSize()
                 .background(appBackgroundBrush())
                 .padding(paddingValues)
-                .fillMaxSize()
                 .padding(horizontal = 16.dp),
         ) {
             content()
@@ -211,6 +212,19 @@ fun VerticalGap() {
 @Composable
 private fun appBackgroundBrush(): Brush {
     val colorScheme = MaterialTheme.colorScheme
+    val darkTheme = colorScheme.background.luminance() < 0.5f
+
+    if (darkTheme) {
+        return Brush.verticalGradient(
+            colors = listOf(
+                Color(0xFF000000),
+                Color(0xFF120800),
+                Color(0xFF17110A),
+                Color(0xFF000000),
+            ),
+        )
+    }
+
     return Brush.verticalGradient(
         colors = listOf(
             colorScheme.background,
