@@ -39,6 +39,23 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-06 - Before Block 11
+
+Plan:
+
+- Fix `VpnService.protect(socket)` failure in the protected SSH socket factory.
+- Keep SSH socket protection, but call it only after the socket has a real file descriptor.
+- Rebuild and rerun checks.
+
+Result:
+
+- Fixed `VpnProtectedSocketFactory` to connect the SSH TCP socket first, then call `VpnService.protect(socket)` on the connected socket.
+- This keeps SSH socket protection in place while avoiding Android returning `false` for an unconnected socket without a ready file descriptor.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
 ### 2026-06-06 - Before Block 1
 
 Plan:

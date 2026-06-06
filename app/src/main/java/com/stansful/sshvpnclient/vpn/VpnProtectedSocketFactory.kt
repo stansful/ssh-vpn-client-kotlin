@@ -15,10 +15,10 @@ class VpnProtectedSocketFactory(
     override fun createSocket(host: String, port: Int): Socket {
         val socket = Socket()
         try {
-            if (!protectSocket(socket)) {
-                throw IOException("Could not protect SSH socket from VPN routing")
-            }
             socket.connect(InetSocketAddress(host, port), connectTimeoutMs)
+            if (!protectSocket(socket)) {
+                throw IOException("Could not protect connected SSH socket from VPN routing")
+            }
             return socket
         } catch (error: UnknownHostException) {
             socket.close()
