@@ -39,6 +39,69 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-06 - Before Block 25
+
+Plan:
+
+- Remove the checkbox icon from the app picker selected-count summary row.
+- Keep the `Selected` label and selected count.
+- Rebuild and rerun checks.
+
+Result:
+
+- Removed the checkbox icon from the app picker selected-count summary row.
+- The summary row now shows only `Selected` on the left and the selected count on the right.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 24
+
+Plan:
+
+- Add split tunneling settings:
+  - `vpnMode=PROXY|SELECTED_APPS`, default `PROXY`;
+  - persisted selected application package names.
+- Add a fullscreen selected-apps picker with search, checkboxes, user/system apps, and saved selection state.
+- Apply split tunneling when establishing the Android VPN:
+  - `PROXY`: keep current full-device VPN behavior;
+  - `SELECTED_APPS`: call `VpnService.Builder.addAllowedApplication(...)` for each selected package.
+- If `SELECTED_APPS` has no selected apps, block Connect and show a modal saying `Нет выбранных приложений`.
+- If split-tunnel settings change while VPN is active, automatically reconnect.
+- Remove the duplicated large status text on the main screen and keep only the colored status badge.
+- Rebuild and rerun checks.
+
+Result:
+
+- Added split tunneling settings:
+  - `VpnMode.PROXY` and `VpnMode.SELECTED_APPS`;
+  - persisted selected application package names;
+  - default remains `PROXY`.
+- Added full-screen app picker:
+  - lists installed apps through `PackageManager`, including system apps;
+  - has search by app label and package name;
+  - uses checkboxes and saves selection on Back/Done.
+- Added `QUERY_ALL_PACKAGES` permission with lint suppression so Android 11+ can show the full installed-app list.
+- Updated settings sheet:
+  - added VPN mode selector;
+  - added `Select apps` button and selected count for `SELECTED_APPS`.
+- Updated VPN setup:
+  - `PROXY` keeps current full-device routing;
+  - `SELECTED_APPS` applies `VpnService.Builder.addAllowedApplication(...)`;
+  - empty or fully invalid selected-app lists fail with `Нет выбранных приложений`.
+- Added modal validation on Connect for `SELECTED_APPS` with no apps selected.
+- Added automatic reconnect when split-tunnel mode or the selected-app set changes while VPN is active.
+  - Theme/log setting changes do not trigger reconnect.
+  - Selected-app changes in `PROXY` mode do not trigger reconnect because they do not affect active routing.
+- Removed the duplicated large status text from the main screen and kept the colored status badge.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
 ### 2026-06-06 - Before Block 23
 
 Plan:

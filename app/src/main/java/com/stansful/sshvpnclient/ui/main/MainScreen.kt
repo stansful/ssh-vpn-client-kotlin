@@ -4,9 +4,7 @@ import android.app.Activity
 import android.net.VpnService
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.tween
@@ -14,7 +12,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,6 +31,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
@@ -43,6 +41,7 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -56,6 +55,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -83,6 +83,7 @@ import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
+import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
 import com.stansful.sshvpnclient.ui.common.ErrorMessage
@@ -92,6 +93,7 @@ fun MainRoute(
     container: AppContainer,
     openConfigs: () -> Unit,
     openKeys: () -> Unit,
+    openAppPicker: () -> Unit,
 ) {
     val viewModel: MainViewModel = viewModel(factory = AppViewModelFactory(container))
     val state by viewModel.uiState.collectAsState()
@@ -109,18 +111,28 @@ fun MainRoute(
     MainScreen(
         state = state,
         onConnect = {
-            val permissionIntent = VpnService.prepare(context)
-            if (permissionIntent != null) {
-                vpnPermissionLauncher.launch(permissionIntent)
-            } else {
+            if (
+                state.appSettings.vpnMode == VpnMode.SELECTED_APPS &&
+                state.appSettings.selectedAppPackages.isEmpty()
+            ) {
                 viewModel.connect()
+            } else {
+                val permissionIntent = VpnService.prepare(context)
+                if (permissionIntent != null) {
+                    vpnPermissionLauncher.launch(permissionIntent)
+                } else {
+                    viewModel.connect()
+                }
             }
         },
         onDisconnect = viewModel::disconnect,
         openConfigs = openConfigs,
         openKeys = openKeys,
+        openAppPicker = openAppPicker,
         onShowLogsChange = viewModel::setShowLogsOnMain,
         onThemeModeChange = viewModel::setThemeMode,
+        onVpnModeChange = viewModel::setVpnMode,
+        onDismissNoSelectedApps = viewModel::dismissNoSelectedAppsDialog,
     )
 }
 
@@ -132,8 +144,11 @@ private fun MainScreen(
     onDisconnect: () -> Unit,
     openConfigs: () -> Unit,
     openKeys: () -> Unit,
+    openAppPicker: () -> Unit,
     onShowLogsChange: (Boolean) -> Unit,
     onThemeModeChange: (AppThemeMode) -> Unit,
+    onVpnModeChange: (VpnMode) -> Unit,
+    onDismissNoSelectedApps: () -> Unit,
 ) {
     var settingsVisible by remember { mutableStateOf(false) }
 
@@ -176,7 +191,25 @@ private fun MainScreen(
             settings = state.appSettings,
             onShowLogsChange = onShowLogsChange,
             onThemeModeChange = onThemeModeChange,
+            onVpnModeChange = onVpnModeChange,
+            onOpenAppPicker = {
+                settingsVisible = false
+                openAppPicker()
+            },
             onDismiss = { settingsVisible = false },
+        )
+    }
+
+    if (state.showNoSelectedAppsDialog) {
+        AlertDialog(
+            onDismissRequest = onDismissNoSelectedApps,
+            confirmButton = {
+                TextButton(onClick = onDismissNoSelectedApps) {
+                    Text("OK")
+                }
+            },
+            title = { Text("VPN mode") },
+            text = { Text("нет выбранных приложений") },
         )
     }
 }
@@ -218,22 +251,6 @@ private fun ConnectionPanel(
                     )
                 }
                 StatusBadge(text = statusText, color = statusColor)
-            }
-
-            AnimatedContent(
-                targetState = statusText,
-                transitionSpec = {
-                    (fadeIn(tween(180)) + slideInVertically(tween(180)) { it / 3 })
-                        .togetherWith(fadeOut(tween(120)) + slideOutVertically(tween(120)) { -it / 3 })
-                        .using(SizeTransform(clip = false))
-                },
-                label = "status-text",
-            ) { text ->
-                Text(
-                    text = text,
-                    style = MaterialTheme.typography.displaySmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
             }
 
             ErrorMessage(state.vpnState.errorMessage)
@@ -492,6 +509,8 @@ private fun SettingsSheet(
     settings: AppSettings,
     onShowLogsChange: (Boolean) -> Unit,
     onThemeModeChange: (AppThemeMode) -> Unit,
+    onVpnModeChange: (VpnMode) -> Unit,
+    onOpenAppPicker: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     ModalBottomSheet(
@@ -517,6 +536,18 @@ private fun SettingsSheet(
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
 
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("VPN mode", style = MaterialTheme.typography.labelLarge)
+                VpnModeSelector(
+                    selected = settings.vpnMode,
+                    selectedAppsCount = settings.selectedAppPackages.size,
+                    onSelected = onVpnModeChange,
+                    onOpenAppPicker = onOpenAppPicker,
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Theme", style = MaterialTheme.typography.labelLarge)
                 ThemeModeSelector(
                     selected = settings.themeMode,
@@ -525,6 +556,121 @@ private fun SettingsSheet(
             }
 
             Box(modifier = Modifier.padding(bottom = 12.dp))
+        }
+    }
+}
+
+@Composable
+private fun VpnModeSelector(
+    selected: VpnMode,
+    selectedAppsCount: Int,
+    onSelected: (VpnMode) -> Unit,
+    onOpenAppPicker: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            VpnMode.values().forEach { mode ->
+                VpnModeTile(
+                    mode = mode,
+                    selected = mode == selected,
+                    onSelected = { onSelected(mode) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
+        AnimatedVisibility(visible = selected == VpnMode.SELECTED_APPS) {
+            FilledTonalButton(
+                onClick = onOpenAppPicker,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Icon(Icons.Default.Apps, contentDescription = null)
+                Text(
+                    "Select apps ($selectedAppsCount)",
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun VpnModeTile(
+    mode: VpnMode,
+    selected: Boolean,
+    onSelected: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        animationSpec = tween(120),
+        label = "vpn-mode-tile-scale",
+    )
+    val background by animateColorAsState(
+        targetValue = if (selected) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        },
+        animationSpec = tween(180),
+        label = "vpn-mode-tile-background",
+    )
+
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = background,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (selected) {
+                MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+            } else {
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)
+            },
+        ),
+        modifier = modifier
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .selectable(
+                selected = selected,
+                role = Role.RadioButton,
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onSelected,
+            ),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                imageVector = mode.icon(),
+                contentDescription = null,
+                tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = mode.label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            )
+            AnimatedVisibility(visible = selected) {
+                Icon(
+                    Icons.Default.Check,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
     }
 }
@@ -712,5 +858,12 @@ private fun AppThemeMode.icon(): ImageVector {
         AppThemeMode.SYSTEM -> Icons.Default.Settings
         AppThemeMode.LIGHT -> Icons.Default.LightMode
         AppThemeMode.DARK -> Icons.Default.DarkMode
+    }
+}
+
+private fun VpnMode.icon(): ImageVector {
+    return when (this) {
+        VpnMode.PROXY -> Icons.Default.Settings
+        VpnMode.SELECTED_APPS -> Icons.Default.Apps
     }
 }

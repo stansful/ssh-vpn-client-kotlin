@@ -7,6 +7,7 @@ import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.domain.model.SshConfig
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
+import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.SshPrivateKeyRepository
@@ -14,8 +15,11 @@ import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -24,6 +28,7 @@ data class MainUiState(
     val selectedConfig: SshConfig? = null,
     val selectedKeyName: String? = null,
     val appSettings: AppSettings = AppSettings(),
+    val showNoSelectedAppsDialog: Boolean = false,
 ) {
     val isBusy: Boolean
         get() = vpnState.status == VpnConnectionStatus.DISCONNECTING
@@ -51,12 +56,20 @@ class MainViewModel(
     private val disconnectVpnUseCase: DisconnectVpnUseCase,
     observeVpnConnectionStateUseCase: ObserveVpnConnectionStateUseCase,
 ) : ViewModel() {
+    private val showNoSelectedAppsDialog = MutableStateFlow(false)
+    private val vpnState = observeVpnConnectionStateUseCase().stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = VpnConnectionState(),
+    )
+
     val uiState = combine(
-        observeVpnConnectionStateUseCase(),
+        vpnState,
         configRepository.observeSelectedConfig(),
         keyRepository.observeAll(),
         appSettingsRepository.settings,
-    ) { vpnState, selectedConfig, keys, appSettings ->
+        showNoSelectedAppsDialog,
+    ) { vpnState, selectedConfig, keys, appSettings, showNoSelectedAppsDialog ->
         MainUiState(
             vpnState = vpnState,
             selectedConfig = selectedConfig,
@@ -64,6 +77,7 @@ class MainViewModel(
                 ?.privateKeyId
                 ?.let { keyId -> keys.firstOrNull { it.id == keyId }?.name },
             appSettings = appSettings,
+            showNoSelectedAppsDialog = showNoSelectedAppsDialog,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -71,7 +85,26 @@ class MainViewModel(
         initialValue = MainUiState(),
     )
 
+    init {
+        viewModelScope.launch {
+            var previousSplitTunnelSettings = appSettingsRepository.settings.value.splitTunnelSettings()
+            appSettingsRepository.settings
+                .drop(1)
+                .collect { settings ->
+                    val nextSplitTunnelSettings = settings.splitTunnelSettings()
+                    if (previousSplitTunnelSettings != nextSplitTunnelSettings) {
+                        applyVpnSettingsChange(settings)
+                    }
+                    previousSplitTunnelSettings = nextSplitTunnelSettings
+                }
+        }
+    }
+
     fun connect() {
+        if (uiState.value.appSettings.requiresSelectedAppsButHasNone()) {
+            showNoSelectedAppsDialog.value = true
+            return
+        }
         viewModelScope.launch {
             try {
                 connectVpnUseCase()
@@ -99,4 +132,67 @@ class MainViewModel(
     fun setThemeMode(themeMode: AppThemeMode) {
         appSettingsRepository.setThemeMode(themeMode)
     }
+
+    fun setVpnMode(vpnMode: VpnMode) {
+        appSettingsRepository.setVpnMode(vpnMode)
+    }
+
+    fun setSelectedAppPackages(packageNames: Set<String>) {
+        appSettingsRepository.setSelectedAppPackages(packageNames)
+    }
+
+    fun dismissNoSelectedAppsDialog() {
+        showNoSelectedAppsDialog.value = false
+    }
+
+    private fun applyVpnSettingsChange(settings: AppSettings) {
+        if (!vpnState.value.canDisconnect()) return
+        if (settings.requiresSelectedAppsButHasNone()) {
+            showNoSelectedAppsDialog.value = true
+            return
+        }
+
+        viewModelScope.launch {
+            disconnectVpnUseCase()
+            delay(SETTINGS_RECONNECT_DELAY_MS)
+            runCatching {
+                connectVpnUseCase(preserveDiagnostics = true)
+            }.onFailure { error ->
+                vpnConnectionRepository.setError(
+                    uiState.value.selectedConfig?.id,
+                    error.message ?: "Unknown connection error",
+                )
+            }
+        }
+    }
+
+    private fun AppSettings.requiresSelectedAppsButHasNone(): Boolean {
+        return vpnMode == VpnMode.SELECTED_APPS && selectedAppPackages.isEmpty()
+    }
+
+    private fun AppSettings.splitTunnelSettings(): SplitTunnelSettings {
+        return SplitTunnelSettings(
+            vpnMode = vpnMode,
+            selectedAppPackages = if (vpnMode == VpnMode.SELECTED_APPS) {
+                selectedAppPackages
+            } else {
+                emptySet()
+            },
+        )
+    }
+
+    private fun VpnConnectionState.canDisconnect(): Boolean {
+        return status == VpnConnectionStatus.CONNECTING ||
+            status == VpnConnectionStatus.CONNECTED ||
+            status == VpnConnectionStatus.RECONNECTING
+    }
+
+    private companion object {
+        const val SETTINGS_RECONNECT_DELAY_MS = 450L
+    }
 }
+
+private data class SplitTunnelSettings(
+    val vpnMode: VpnMode,
+    val selectedAppPackages: Set<String>,
+)

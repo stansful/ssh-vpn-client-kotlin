@@ -10,9 +10,11 @@ import androidx.core.app.NotificationCompat
 import com.jcraft.jsch.Session
 import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.SshVpnApplication
+import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.SshConfig
 import com.stansful.sshvpnclient.domain.model.SshPrivateKey
+import com.stansful.sshvpnclient.domain.model.VpnMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,7 +35,9 @@ class SshVpnService : android.net.VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_CONNECT -> connect()
+            ACTION_CONNECT -> connect(
+                preserveDiagnostics = intent.getBooleanExtra(EXTRA_PRESERVE_DIAGNOSTICS, false),
+            )
             ACTION_DISCONNECT -> disconnect()
         }
         return START_STICKY
@@ -50,16 +54,19 @@ class SshVpnService : android.net.VpnService() {
         super.onDestroy()
     }
 
-    private fun connect() {
+    private fun connect(preserveDiagnostics: Boolean) {
         userRequestedDisconnect = false
         val runId = ++connectionRunId
         connectionJob?.cancel()
         connectionJob = serviceScope.launch {
-            runConnectionLoop(runId)
+            runConnectionLoop(runId, preserveDiagnostics)
         }
     }
 
-    private suspend fun runConnectionLoop(runId: Long) {
+    private suspend fun runConnectionLoop(
+        runId: Long,
+        preserveDiagnostics: Boolean,
+    ) {
         val configRepository = appContainer.sshConfigRepository
         val keyRepository = appContainer.sshPrivateKeyRepository
         val connectionRepository = appContainer.vpnConnectionRepository
@@ -72,7 +79,12 @@ class SshVpnService : android.net.VpnService() {
         }
 
         try {
-            connectionRepository.setConnecting(config.id)
+            if (preserveDiagnostics) {
+                connectionRepository.setReconnecting(config.id)
+                connectionRepository.appendDiagnostic("Applying updated VPN settings")
+            } else {
+                connectionRepository.setConnecting(config.id)
+            }
             connectionRepository.appendDiagnostic("Starting VPN connection")
             connectionRepository.appendDiagnostic(
                 "Selected config: ${config.username}@${config.host}:${config.port}",
@@ -173,7 +185,9 @@ class SshVpnService : android.net.VpnService() {
         runId: Long,
     ): Session {
         val connectionRepository = appContainer.vpnConnectionRepository
+        val appSettings = appContainer.appSettingsRepository.settings.value
         ensureConnectionStillWanted(runId)
+        validateAppSettings(appSettings)
         NetworkDiagnostics.describe(this@SshVpnService).forEach { message ->
             appendConnectionDiagnostic(runId, message)
         }
@@ -186,7 +200,12 @@ class SshVpnService : android.net.VpnService() {
         )
         ensureConnectionStillWanted(runId)
         connectionRepository.appendDiagnostic("Establishing Android VPN interface")
-        val vpnInterface = appContainer.vpnTunnelManager.establish(this@SshVpnService, config)
+        val vpnInterface = appContainer.vpnTunnelManager.establish(
+            service = this@SshVpnService,
+            config = config,
+            appSettings = appSettings,
+            log = connectionRepository::appendDiagnostic,
+        )
         ensureConnectionStillWanted(runId)
         connectionRepository.appendDiagnostic("Starting local TUN forwarding layer")
         appContainer.tun2SocksManager.start(
@@ -247,6 +266,12 @@ class SshVpnService : android.net.VpnService() {
     private fun ensureConnectionStillWanted(runId: Long) {
         if (!shouldKeepConnectionAlive(runId)) {
             throw CancellationException("Connection run stopped")
+        }
+    }
+
+    private fun validateAppSettings(appSettings: AppSettings) {
+        if (appSettings.vpnMode == VpnMode.SELECTED_APPS && appSettings.selectedAppPackages.isEmpty()) {
+            throw VpnConnectionException("Нет выбранных приложений")
         }
     }
 
@@ -324,14 +349,21 @@ class SshVpnService : android.net.VpnService() {
     companion object {
         private const val ACTION_CONNECT = "com.stansful.sshvpnclient.action.CONNECT"
         private const val ACTION_DISCONNECT = "com.stansful.sshvpnclient.action.DISCONNECT"
+        private const val EXTRA_PRESERVE_DIAGNOSTICS =
+            "com.stansful.sshvpnclient.extra.PRESERVE_DIAGNOSTICS"
         private const val CHANNEL_ID = "ssh_vpn_connection"
         private const val NOTIFICATION_ID = 3001
         private const val CONNECTION_MONITOR_INTERVAL_MS = 5_000L
         private const val INITIAL_RECONNECT_DELAY_MS = 2_000L
         private const val MAX_RECONNECT_DELAY_MS = 30_000L
 
-        fun connectIntent(context: Context): Intent {
-            return Intent(context, SshVpnService::class.java).setAction(ACTION_CONNECT)
+        fun connectIntent(
+            context: Context,
+            preserveDiagnostics: Boolean = false,
+        ): Intent {
+            return Intent(context, SshVpnService::class.java)
+                .setAction(ACTION_CONNECT)
+                .putExtra(EXTRA_PRESERVE_DIAGNOSTICS, preserveDiagnostics)
         }
 
         fun disconnectIntent(context: Context): Intent {

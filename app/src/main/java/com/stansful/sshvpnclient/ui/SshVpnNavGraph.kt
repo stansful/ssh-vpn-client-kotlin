@@ -9,6 +9,7 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import com.stansful.sshvpnclient.AppContainer
+import com.stansful.sshvpnclient.ui.apppicker.AppPickerRoute
 import com.stansful.sshvpnclient.ui.configedit.EditConfigRoute
 import com.stansful.sshvpnclient.ui.configs.ConfigListRoute
 import com.stansful.sshvpnclient.ui.keyedit.EditKeyRoute
@@ -21,6 +22,7 @@ object Routes {
     const val KEYS = "keys"
     const val EDIT_CONFIG = "edit-config"
     const val EDIT_KEY = "edit-key"
+    const val APP_PICKER = "app-picker"
 
     fun editConfig(configId: String? = null) = "$EDIT_CONFIG/${configId ?: NEW_ID}"
     fun editKey(keyId: String? = null) = "$EDIT_KEY/${keyId ?: NEW_ID}"
@@ -60,6 +62,13 @@ fun SshVpnNavGraph(
                 container = container,
                 openConfigs = { navController.navigate(Routes.CONFIGS) },
                 openKeys = { navController.navigate(Routes.KEYS) },
+                openAppPicker = { navController.navigate(Routes.APP_PICKER) },
+            )
+        }
+        composable(Routes.APP_PICKER) {
+            AppPickerRoute(
+                container = container,
+                onBack = { navController.popBackStack() },
             )
         }
         composable(Routes.CONFIGS) {

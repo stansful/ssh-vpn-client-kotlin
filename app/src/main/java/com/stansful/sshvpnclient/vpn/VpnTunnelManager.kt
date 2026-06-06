@@ -3,7 +3,9 @@ package com.stansful.sshvpnclient.vpn
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.SshConfig
+import com.stansful.sshvpnclient.domain.model.VpnMode
 
 class VpnTunnelManager {
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -11,6 +13,8 @@ class VpnTunnelManager {
     fun establish(
         service: VpnService,
         config: SshConfig,
+        appSettings: AppSettings,
+        log: (String) -> Unit = {},
     ): ParcelFileDescriptor {
         close()
 
@@ -26,6 +30,8 @@ class VpnTunnelManager {
             builder.setMetered(false)
         }
 
+        applySplitTunnelSettings(builder, appSettings, log)
+
         return builder.establish()
             ?.also { vpnInterface = it }
             ?: throw VpnConnectionException("VPN permission denied")
@@ -34,6 +40,40 @@ class VpnTunnelManager {
     fun close() {
         vpnInterface?.close()
         vpnInterface = null
+    }
+
+    private fun applySplitTunnelSettings(
+        builder: VpnService.Builder,
+        appSettings: AppSettings,
+        log: (String) -> Unit,
+    ) {
+        when (appSettings.vpnMode) {
+            VpnMode.PROXY -> {
+                log("VPN app routing mode: proxy; all applications are routed through VPN")
+            }
+
+            VpnMode.SELECTED_APPS -> {
+                if (appSettings.selectedAppPackages.isEmpty()) {
+                    throw VpnConnectionException("Нет выбранных приложений")
+                }
+                log(
+                    "VPN app routing mode: selected-apps; " +
+                        "${appSettings.selectedAppPackages.size} selected applications",
+                )
+                var allowedApplications = 0
+                appSettings.selectedAppPackages.sorted().forEach { packageName ->
+                    try {
+                        builder.addAllowedApplication(packageName)
+                        allowedApplications += 1
+                    } catch (error: Exception) {
+                        log("Skipping selected app '$packageName': ${error.message ?: error::class.java.simpleName}")
+                    }
+                }
+                if (allowedApplications == 0) {
+                    throw VpnConnectionException("Нет выбранных приложений")
+                }
+            }
+        }
     }
 
     private companion object {

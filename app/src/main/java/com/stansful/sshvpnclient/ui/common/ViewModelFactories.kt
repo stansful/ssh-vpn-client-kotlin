@@ -3,6 +3,7 @@ package com.stansful.sshvpnclient.ui.common
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.stansful.sshvpnclient.AppContainer
+import com.stansful.sshvpnclient.ui.apppicker.AppPickerViewModel
 import com.stansful.sshvpnclient.ui.configedit.EditConfigViewModel
 import com.stansful.sshvpnclient.ui.configs.ConfigListViewModel
 import com.stansful.sshvpnclient.ui.keyedit.EditKeyViewModel
@@ -25,6 +26,11 @@ class AppViewModelFactory(
                 connectVpnUseCase = container.connectVpnUseCase,
                 disconnectVpnUseCase = container.disconnectVpnUseCase,
                 observeVpnConnectionStateUseCase = container.observeVpnConnectionStateUseCase,
+            )
+
+            modelClass.isAssignableFrom(AppPickerViewModel::class.java) -> AppPickerViewModel(
+                appSettingsRepository = container.appSettingsRepository,
+                installedAppsRepository = container.installedAppsRepository,
             )
 
             modelClass.isAssignableFrom(ConfigListViewModel::class.java) -> ConfigListViewModel(

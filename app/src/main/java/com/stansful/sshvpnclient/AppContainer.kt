@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient
 
 import android.content.Context
 import androidx.room.Room
+import com.stansful.sshvpnclient.data.apps.PackageManagerInstalledAppsRepository
 import com.stansful.sshvpnclient.data.config.RoomSshConfigRepository
 import com.stansful.sshvpnclient.data.key.RoomSshPrivateKeyRepository
 import com.stansful.sshvpnclient.data.local.AppDatabase
@@ -9,6 +10,7 @@ import com.stansful.sshvpnclient.data.local.InMemoryVpnConnectionRepository
 import com.stansful.sshvpnclient.data.secret.EncryptedPreferencesSecretStorage
 import com.stansful.sshvpnclient.data.settings.SharedPreferencesAppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
+import com.stansful.sshvpnclient.domain.repository.InstalledAppsRepository
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.SshPrivateKeyRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
@@ -57,6 +59,7 @@ class AppContainer(
 
     val vpnConnectionRepository: VpnConnectionRepository = InMemoryVpnConnectionRepository(appContext)
     val appSettingsRepository: AppSettingsRepository = SharedPreferencesAppSettingsRepository(appContext)
+    val installedAppsRepository: InstalledAppsRepository = PackageManagerInstalledAppsRepository(appContext)
 
     val sshConnectionManager = SshConnectionManager()
     val vpnTunnelManager = VpnTunnelManager()
@@ -82,6 +85,7 @@ class AppContainer(
         configRepository = sshConfigRepository,
         keyRepository = sshPrivateKeyRepository,
         vpnConnectionRepository = vpnConnectionRepository,
+        appSettingsRepository = appSettingsRepository,
     )
     val disconnectVpnUseCase = DisconnectVpnUseCase(appContext)
     val observeVpnConnectionStateUseCase = ObserveVpnConnectionStateUseCase(vpnConnectionRepository)
