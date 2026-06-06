@@ -2,9 +2,12 @@ package com.stansful.sshvpnclient.ui.main
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.stansful.sshvpnclient.domain.model.AppSettings
+import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.domain.model.SshConfig
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
+import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.SshPrivateKeyRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
@@ -20,6 +23,7 @@ data class MainUiState(
     val vpnState: VpnConnectionState = VpnConnectionState(),
     val selectedConfig: SshConfig? = null,
     val selectedKeyName: String? = null,
+    val appSettings: AppSettings = AppSettings(),
 ) {
     val isBusy: Boolean
         get() = vpnState.status == VpnConnectionStatus.DISCONNECTING
@@ -39,6 +43,7 @@ data class MainUiState(
 }
 
 class MainViewModel(
+    private val appSettingsRepository: AppSettingsRepository,
     configRepository: SshConfigRepository,
     keyRepository: SshPrivateKeyRepository,
     private val vpnConnectionRepository: VpnConnectionRepository,
@@ -50,13 +55,15 @@ class MainViewModel(
         observeVpnConnectionStateUseCase(),
         configRepository.observeSelectedConfig(),
         keyRepository.observeAll(),
-    ) { vpnState, selectedConfig, keys ->
+        appSettingsRepository.settings,
+    ) { vpnState, selectedConfig, keys, appSettings ->
         MainUiState(
             vpnState = vpnState,
             selectedConfig = selectedConfig,
             selectedKeyName = selectedConfig
                 ?.privateKeyId
                 ?.let { keyId -> keys.firstOrNull { it.id == keyId }?.name },
+            appSettings = appSettings,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -83,5 +90,13 @@ class MainViewModel(
 
     fun onVpnPermissionDenied() {
         vpnConnectionRepository.setError(uiState.value.selectedConfig?.id, "VPN permission denied")
+    }
+
+    fun setShowLogsOnMain(show: Boolean) {
+        appSettingsRepository.setShowLogsOnMain(show)
+    }
+
+    fun setThemeMode(themeMode: AppThemeMode) {
+        appSettingsRepository.setThemeMode(themeMode)
     }
 }

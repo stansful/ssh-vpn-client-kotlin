@@ -1,5 +1,6 @@
 package com.stansful.sshvpnclient.data.local
 
+import android.content.Context
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
@@ -9,13 +10,23 @@ import java.util.Locale
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
 
-class InMemoryVpnConnectionRepository : VpnConnectionRepository {
-    private val mutableState = MutableStateFlow(VpnConnectionState())
+class InMemoryVpnConnectionRepository(
+    context: Context,
+) : VpnConnectionRepository {
+    private val preferences = context.applicationContext.getSharedPreferences(
+        PREFERENCES_NAME,
+        Context.MODE_PRIVATE,
+    )
+    private val mutableState = MutableStateFlow(
+        VpnConnectionState(diagnostics = readDiagnostics()),
+    )
 
     override val state: Flow<VpnConnectionState> = mutableState.asStateFlow()
 
     override fun setConnecting(configId: String?) {
+        persistDiagnostics(emptyList())
         mutableState.value = VpnConnectionState(
             status = VpnConnectionStatus.CONNECTING,
             activeConfigId = configId,
@@ -64,16 +75,43 @@ class InMemoryVpnConnectionRepository : VpnConnectionRepository {
 
     override fun appendDiagnostic(message: String) {
         val line = "${timeFormat.format(Date())} $message"
+        val diagnostics = mutableState.value.diagnostics + line
+        persistDiagnostics(diagnostics)
         mutableState.value = mutableState.value.copy(
-            diagnostics = mutableState.value.diagnostics + line,
+            diagnostics = diagnostics,
         )
     }
 
     override fun clearDiagnostics() {
+        persistDiagnostics(emptyList())
         mutableState.value = mutableState.value.copy(diagnostics = emptyList())
     }
 
+    private fun readDiagnostics(): List<String> {
+        val raw = preferences.getString(KEY_DIAGNOSTICS, null) ?: return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (index in 0 until array.length()) {
+                    add(array.optString(index))
+                }
+            }.filter { it.isNotBlank() }
+        }.getOrElse {
+            emptyList()
+        }
+    }
+
+    private fun persistDiagnostics(diagnostics: List<String>) {
+        val array = JSONArray()
+        diagnostics.forEach { line -> array.put(line) }
+        preferences.edit()
+            .putString(KEY_DIAGNOSTICS, array.toString())
+            .apply()
+    }
+
     private companion object {
+        const val PREFERENCES_NAME = "ssh-vpn-connection-state"
+        const val KEY_DIAGNOSTICS = "diagnostics"
         val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
     }
 }

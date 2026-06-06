@@ -1,11 +1,16 @@
 package com.stansful.sshvpnclient.ui.common
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -22,10 +27,16 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 
@@ -38,9 +49,15 @@ fun AppScreen(
     content: @Composable () -> Unit,
 ) {
     Scaffold(
+        modifier = Modifier.background(appBackgroundBrush()),
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text(title) },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.Transparent,
+                    scrolledContainerColor = Color.Transparent,
+                ),
                 navigationIcon = {
                     if (onBack != null) {
                         IconButton(onClick = onBack) {
@@ -54,6 +71,7 @@ fun AppScreen(
     ) { paddingValues ->
         Column(
             modifier = Modifier
+                .background(appBackgroundBrush())
                 .padding(paddingValues)
                 .fillMaxSize()
                 .padding(horizontal = 16.dp),
@@ -132,11 +150,26 @@ fun PrimaryActionButton(
     text: String,
     onClick: () -> Unit,
     enabled: Boolean = true,
+    modifier: Modifier = Modifier,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        animationSpec = tween(120),
+        label = "primary-button-scale",
+    )
+
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier.fillMaxWidth(),
+        interactionSource = interactionSource,
+        modifier = modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            },
     ) {
         Text(text)
     }
@@ -146,10 +179,25 @@ fun PrimaryActionButton(
 fun SecondaryActionButton(
     text: String,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.98f else 1f,
+        animationSpec = tween(120),
+        label = "secondary-button-scale",
+    )
+
     TextButton(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        interactionSource = interactionSource,
+        modifier = modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            },
     ) {
         Text(text)
     }
@@ -158,4 +206,16 @@ fun SecondaryActionButton(
 @Composable
 fun VerticalGap() {
     Spacer(Modifier.size(12.dp))
+}
+
+@Composable
+private fun appBackgroundBrush(): Brush {
+    val colorScheme = MaterialTheme.colorScheme
+    return Brush.verticalGradient(
+        colors = listOf(
+            colorScheme.background,
+            colorScheme.surfaceVariant.copy(alpha = 0.28f),
+            colorScheme.background,
+        ),
+    )
 }

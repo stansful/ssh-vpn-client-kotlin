@@ -39,6 +39,99 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-06 - Before Block 23
+
+Plan:
+
+- Fix diagnostics disappearing from the main screen after app restart when the persisted logs toggle is enabled.
+- Keep `showLogsOnMain` as an app setting, but persist the diagnostics list separately.
+- Initialize VPN connection state with the last saved diagnostics on app startup.
+- Preserve existing reset behavior: a new user-started `Connect` clears diagnostics.
+- Rebuild and rerun checks.
+
+Result:
+
+- Updated `InMemoryVpnConnectionRepository` to persist diagnostics in `SharedPreferences`.
+- On app startup, `VpnConnectionState` is initialized with the last saved diagnostics.
+- `appendDiagnostic(...)` now saves the updated list after every new diagnostic line.
+- `setConnecting(...)` and `clearDiagnostics()` still clear diagnostics and persist the empty list, so a new user-started Connect resets logs as before.
+- Wired `InMemoryVpnConnectionRepository(appContext)` in `AppContainer`.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 22
+
+Plan:
+
+- Fix dark theme text/icons that render black inside custom glass surfaces.
+- Set explicit Material content colors for glass panels, navigation buttons, settings tiles, and settings sheet.
+- Remove transparency from the settings bottom sheet container.
+- Rebuild and rerun checks.
+
+Result:
+
+- Fixed dark theme contrast by setting explicit `contentColor`:
+  - glass panels now use `MaterialTheme.colorScheme.onSurface`;
+  - glass navigation buttons now use `onSurface`;
+  - theme selector tiles now use `onSurface`;
+  - settings sheet now uses `onSurface`.
+- Forced the main connect/disconnect button content color to white so icon/text stay visible.
+- Removed settings sheet container transparency by using opaque `MaterialTheme.colorScheme.surface`.
+- Kept the background scrim, but the settings menu surface itself is no longer translucent.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-06 - Before Block 21
+
+Plan:
+
+- Add persisted application settings backed by SharedPreferences:
+  - show connection diagnostics on the main screen, default `false`;
+  - app theme mode: system, light, dark, default `system`.
+- Wire settings into `AppContainer`, `MainActivity`, and `MainViewModel`.
+- Update `SshVpnTheme` with explicit black dark theme, white light theme, and system mode resolution.
+- Redesign the main screen in a restrained iOS liquid-glass direction:
+  - translucent glass-like panels with compact 8dp radius;
+  - settings button in the top bar;
+  - settings sheet with logs toggle and theme selector;
+  - diagnostics spoiler appears only when the persisted logs setting is enabled.
+- Add Compose animations for screen transitions, status changes, diagnostics visibility, and button press feedback.
+- Rebuild and rerun checks.
+
+Result:
+
+- Added persisted settings:
+  - `AppSettings` / `AppThemeMode`;
+  - `AppSettingsRepository`;
+  - `SharedPreferencesAppSettingsRepository`;
+  - defaults are `showLogsOnMain=false` and `themeMode=SYSTEM`.
+- Wired settings into `AppContainer`, `MainActivity`, `MainViewModel`, and `AppViewModelFactory`.
+- Updated theme handling:
+  - system mode follows Android system settings;
+  - light mode uses a white UI scheme;
+  - dark mode uses a black UI scheme.
+- Redesigned the main screen:
+  - added settings button in the top bar;
+  - added bottom settings sheet with logs toggle and theme selector;
+  - hid diagnostics from the main page unless the persisted logs toggle is enabled;
+  - kept diagnostics collapsed by default with copy button and scrollable expanded text.
+- Added animations:
+  - navigation transitions between screens;
+  - status text/color changes;
+  - diagnostics visibility;
+  - button/tile press scaling.
+- Updated common screen background and base button interactions.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
 ### 2026-06-06 - Before Block 20
 
 Plan:

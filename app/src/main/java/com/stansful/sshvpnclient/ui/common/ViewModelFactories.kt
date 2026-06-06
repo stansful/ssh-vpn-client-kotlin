@@ -18,6 +18,7 @@ class AppViewModelFactory(
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         return when {
             modelClass.isAssignableFrom(MainViewModel::class.java) -> MainViewModel(
+                appSettingsRepository = container.appSettingsRepository,
                 configRepository = container.sshConfigRepository,
                 keyRepository = container.sshPrivateKeyRepository,
                 vpnConnectionRepository = container.vpnConnectionRepository,
