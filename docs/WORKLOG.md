@@ -39,6 +39,74 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-07 - Before Block 34
+
+Plan:
+
+- Update the main-screen `Check tunnel` button visual states.
+- Make the button neutral gray after connection and before any check result.
+- Set the button to green with a check icon when the tunnel check succeeds.
+- Set the button to red with a close icon when the tunnel check fails.
+- Reset the result state when VPN leaves `Connected`.
+- Keep colors aligned with the existing app theme for both light and dark themes.
+- Rebuild debug/release and rerun checks.
+
+Result:
+
+- Added `TunnelCheckResult` state to the main UI state.
+- The `Check tunnel` button now:
+  - starts neutral gray after a successful VPN connection;
+  - resets to neutral while a check is running;
+  - turns green with a check icon after a successful tunnel check;
+  - turns red with a close icon after a failed tunnel check;
+  - resets to neutral when VPN leaves `Connected`.
+- Kept colors aligned with existing app semantics:
+  - neutral uses `surfaceVariant/onSurfaceVariant`;
+  - success uses the same green family as connected status;
+  - failure uses `colorScheme.error`.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/build-release.sh`: success.
+- Verified release APK signature with `apksigner verify --verbose`:
+  - v2 signature: true;
+  - signers: 1.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+- Updated signed release APK at `app/build/outputs/apk/release/app-release.apk`.
+
+### 2026-06-07 - Before Block 33
+
+Plan:
+
+- Add a user-facing tunnel health check button on the main screen.
+- Implement the check as an SSH `direct-tcpip` TCP probe to `youtube.com:443` through the active SSH session.
+- Avoid ICMP `ping` because the current tunnel supports TCP/DNS over SSH and does not proxy ICMP.
+- Log the check start/result/failure into connection diagnostics.
+- Disable the button unless the VPN is connected, and show a busy state while the check runs.
+- Rebuild debug/release and rerun checks.
+
+Result:
+
+- Added a main-screen `Check tunnel` button visible only while VPN status is `Connected`.
+- The button runs an SSH `direct-tcpip` TCP probe to `youtube.com:443` through the active SSH session.
+- The check writes diagnostics:
+  - start line with target host/port;
+  - success line with elapsed milliseconds;
+  - failure line with the error message.
+- The button has a busy state: `Checking youtube.com...`.
+- Avoided ICMP `ping` because current tunnel semantics are TCP/DNS over SSH, not ICMP forwarding.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/build-release.sh`: success.
+- Verified release APK signature with `apksigner verify --verbose`:
+  - v2 signature: true;
+  - signers: 1.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+- Updated signed release APK at `app/build/outputs/apk/release/app-release.apk`.
+
 ### 2026-06-07 - Before Block 32
 
 Plan:

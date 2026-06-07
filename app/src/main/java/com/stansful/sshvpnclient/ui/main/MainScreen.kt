@@ -34,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.ExpandLess
@@ -127,6 +128,7 @@ fun MainRoute(
             }
         },
         onDisconnect = viewModel::disconnect,
+        onCheckTunnel = viewModel::checkTunnel,
         openConfigs = openConfigs,
         openKeys = openKeys,
         openAppPicker = openAppPicker,
@@ -143,6 +145,7 @@ private fun MainScreen(
     state: MainUiState,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
+    onCheckTunnel: () -> Unit,
     openConfigs: () -> Unit,
     openKeys: () -> Unit,
     openAppPicker: () -> Unit,
@@ -169,6 +172,7 @@ private fun MainScreen(
                 state = state,
                 onConnect = onConnect,
                 onDisconnect = onDisconnect,
+                onCheckTunnel = onCheckTunnel,
             )
             SelectedConfigPanel(state)
             NavigationPanel(
@@ -220,6 +224,7 @@ private fun ConnectionPanel(
     state: MainUiState,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
+    onCheckTunnel: () -> Unit,
 ) {
     val statusText = state.vpnState.status.label()
     val statusColor by animateColorAsState(
@@ -261,7 +266,102 @@ private fun ConnectionPanel(
                 onConnect = onConnect,
                 onDisconnect = onDisconnect,
             )
+
+            AnimatedVisibility(
+                visible = state.isConnected,
+                enter = fadeIn(tween(180)) + slideInVertically(tween(180)) { it / 4 },
+                exit = fadeOut(tween(120)),
+            ) {
+                TunnelCheckButton(
+                    state = state,
+                    onCheckTunnel = onCheckTunnel,
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun TunnelCheckButton(
+    state: MainUiState,
+    onCheckTunnel: () -> Unit,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (pressed) 0.98f else 1f,
+        animationSpec = tween(120),
+        label = "tunnel-check-button-scale",
+    )
+    val containerColor by animateColorAsState(
+        targetValue = state.tunnelCheckResult.buttonContainerColor(),
+        animationSpec = tween(180),
+        label = "tunnel-check-button-container",
+    )
+    val contentColor by animateColorAsState(
+        targetValue = state.tunnelCheckResult.buttonContentColor(),
+        animationSpec = tween(180),
+        label = "tunnel-check-button-content",
+    )
+    val resultIcon = state.tunnelCheckResult.buttonIcon()
+    val textStartPadding = if (resultIcon == null) 0.dp else 8.dp
+
+    FilledTonalButton(
+        onClick = onCheckTunnel,
+        enabled = state.canCheckTunnel,
+        interactionSource = interactionSource,
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = containerColor,
+            contentColor = contentColor,
+            disabledContainerColor = containerColor.copy(alpha = 0.62f),
+            disabledContentColor = contentColor.copy(alpha = 0.72f),
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            },
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        resultIcon?.let { icon ->
+            Icon(icon, contentDescription = null)
+        }
+        Text(
+            text = if (state.isTunnelCheckRunning) {
+                "Checking youtube.com..."
+            } else {
+                "Check tunnel"
+            },
+            modifier = Modifier.padding(start = textStartPadding),
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
+private fun TunnelCheckResult.buttonContainerColor(): Color {
+    return when (this) {
+        TunnelCheckResult.IDLE -> MaterialTheme.colorScheme.surfaceVariant
+        TunnelCheckResult.SUCCESS -> Color(0xFF28C76F)
+        TunnelCheckResult.FAILURE -> MaterialTheme.colorScheme.error
+    }
+}
+
+@Composable
+private fun TunnelCheckResult.buttonContentColor(): Color {
+    return when (this) {
+        TunnelCheckResult.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
+        TunnelCheckResult.SUCCESS -> Color.White
+        TunnelCheckResult.FAILURE -> Color.White
+    }
+}
+
+private fun TunnelCheckResult.buttonIcon(): ImageVector? {
+    return when (this) {
+        TunnelCheckResult.IDLE -> null
+        TunnelCheckResult.SUCCESS -> Icons.Default.Check
+        TunnelCheckResult.FAILURE -> Icons.Default.Close
     }
 }
 

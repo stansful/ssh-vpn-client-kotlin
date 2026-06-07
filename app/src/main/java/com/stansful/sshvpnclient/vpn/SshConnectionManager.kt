@@ -1,5 +1,6 @@
 package com.stansful.sshvpnclient.vpn
 
+import com.jcraft.jsch.ChannelDirectTCPIP
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.KeyPair
@@ -83,6 +84,34 @@ class SshConnectionManager {
     fun disconnect() {
         activeSession?.takeIf { it.isConnected }?.disconnect()
         activeSession = null
+    }
+
+    suspend fun checkTcpForward(
+        host: String = DEFAULT_TUNNEL_CHECK_HOST,
+        port: Int = DEFAULT_TUNNEL_CHECK_PORT,
+        log: (String) -> Unit = {},
+    ) = withContext(Dispatchers.IO) {
+        val session = activeSession?.takeIf { it.isConnected }
+            ?: throw VpnConnectionException("Tunnel check failed: SSH session is not connected")
+        var channel: ChannelDirectTCPIP? = null
+        val startedAt = System.currentTimeMillis()
+        try {
+            log("Tunnel check: opening SSH direct TCP to $host:$port")
+            channel = session.openChannel("direct-tcpip") as ChannelDirectTCPIP
+            channel.setHost(host)
+            channel.setPort(port)
+            channel.setOrgIPAddress(LOOPBACK_ADDRESS)
+            channel.setOrgPort(0)
+            channel.connect(TUNNEL_CHECK_TIMEOUT_MS)
+            val elapsedMs = System.currentTimeMillis() - startedAt
+            log("Tunnel check succeeded: $host:$port reachable through SSH in ${elapsedMs}ms")
+        } catch (error: Exception) {
+            val message = error.message ?: error::class.java.simpleName
+            log("Tunnel check failed: $message")
+            throw VpnConnectionException("Tunnel check failed: $message", error)
+        } finally {
+            channel?.disconnect()
+        }
     }
 
     private fun addPrivateKeyIdentity(jsch: JSch, key: SshPrivateKey) {
@@ -242,6 +271,10 @@ class SshConnectionManager {
     private companion object {
         const val CONNECT_TIMEOUT_MS = 20_000
         const val SERVER_ALIVE_COUNT_MAX = 3
+        const val TUNNEL_CHECK_TIMEOUT_MS = 10_000
+        const val DEFAULT_TUNNEL_CHECK_HOST = "youtube.com"
+        const val DEFAULT_TUNNEL_CHECK_PORT = 443
+        const val LOOPBACK_ADDRESS = "127.0.0.1"
         val jschThreadLog = InheritableThreadLocal<((String) -> Unit)?>()
 
         @Volatile

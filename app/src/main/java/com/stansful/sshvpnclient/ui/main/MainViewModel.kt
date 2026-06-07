@@ -15,6 +15,7 @@ import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
+import com.stansful.sshvpnclient.vpn.SshConnectionManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -23,12 +24,20 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+enum class TunnelCheckResult {
+    IDLE,
+    SUCCESS,
+    FAILURE,
+}
+
 data class MainUiState(
     val vpnState: VpnConnectionState = VpnConnectionState(),
     val selectedConfig: SshConfig? = null,
     val selectedKeyName: String? = null,
     val appSettings: AppSettings = AppSettings(),
     val showNoSelectedAppsDialog: Boolean = false,
+    val isTunnelCheckRunning: Boolean = false,
+    val tunnelCheckResult: TunnelCheckResult = TunnelCheckResult.IDLE,
 ) {
     val isBusy: Boolean
         get() = vpnState.status == VpnConnectionStatus.DISCONNECTING
@@ -45,6 +54,9 @@ data class MainUiState(
         get() = selectedConfig != null &&
             (vpnState.status == VpnConnectionStatus.DISCONNECTED ||
                 vpnState.status == VpnConnectionStatus.ERROR)
+
+    val canCheckTunnel: Boolean
+        get() = vpnState.status == VpnConnectionStatus.CONNECTED && !isTunnelCheckRunning
 }
 
 class MainViewModel(
@@ -54,16 +66,19 @@ class MainViewModel(
     private val vpnConnectionRepository: VpnConnectionRepository,
     private val connectVpnUseCase: ConnectVpnUseCase,
     private val disconnectVpnUseCase: DisconnectVpnUseCase,
+    private val sshConnectionManager: SshConnectionManager,
     observeVpnConnectionStateUseCase: ObserveVpnConnectionStateUseCase,
 ) : ViewModel() {
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
+    private val isTunnelCheckRunning = MutableStateFlow(false)
+    private val tunnelCheckResult = MutableStateFlow(TunnelCheckResult.IDLE)
     private val vpnState = observeVpnConnectionStateUseCase().stateIn(
         scope = viewModelScope,
         started = SharingStarted.Eagerly,
         initialValue = VpnConnectionState(),
     )
 
-    val uiState = combine(
+    private val baseUiState = combine(
         vpnState,
         configRepository.observeSelectedConfig(),
         keyRepository.observeAll(),
@@ -78,6 +93,17 @@ class MainViewModel(
                 ?.let { keyId -> keys.firstOrNull { it.id == keyId }?.name },
             appSettings = appSettings,
             showNoSelectedAppsDialog = showNoSelectedAppsDialog,
+        )
+    }
+
+    val uiState = combine(
+        baseUiState,
+        isTunnelCheckRunning,
+        tunnelCheckResult,
+    ) { state, isTunnelCheckRunning, tunnelCheckResult ->
+        state.copy(
+            isTunnelCheckRunning = isTunnelCheckRunning,
+            tunnelCheckResult = tunnelCheckResult,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -97,6 +123,14 @@ class MainViewModel(
                     }
                     previousSplitTunnelSettings = nextSplitTunnelSettings
                 }
+        }
+        viewModelScope.launch {
+            vpnState.collect { state ->
+                if (state.status != VpnConnectionStatus.CONNECTED) {
+                    tunnelCheckResult.value = TunnelCheckResult.IDLE
+                    isTunnelCheckRunning.value = false
+                }
+            }
         }
     }
 
@@ -119,6 +153,29 @@ class MainViewModel(
 
     fun disconnect() {
         disconnectVpnUseCase()
+    }
+
+    fun checkTunnel() {
+        if (!uiState.value.canCheckTunnel) return
+        viewModelScope.launch {
+            isTunnelCheckRunning.value = true
+            tunnelCheckResult.value = TunnelCheckResult.IDLE
+            try {
+                sshConnectionManager.checkTcpForward(
+                    log = vpnConnectionRepository::appendDiagnostic,
+                )
+                if (vpnState.value.status == VpnConnectionStatus.CONNECTED) {
+                    tunnelCheckResult.value = TunnelCheckResult.SUCCESS
+                }
+            } catch (_: Exception) {
+                // Detailed failure is already written to diagnostics by SshConnectionManager.
+                if (vpnState.value.status == VpnConnectionStatus.CONNECTED) {
+                    tunnelCheckResult.value = TunnelCheckResult.FAILURE
+                }
+            } finally {
+                isTunnelCheckRunning.value = false
+            }
+        }
     }
 
     fun onVpnPermissionDenied() {

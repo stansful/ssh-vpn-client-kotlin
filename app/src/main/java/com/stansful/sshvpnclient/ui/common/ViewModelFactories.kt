@@ -25,6 +25,7 @@ class AppViewModelFactory(
                 vpnConnectionRepository = container.vpnConnectionRepository,
                 connectVpnUseCase = container.connectVpnUseCase,
                 disconnectVpnUseCase = container.disconnectVpnUseCase,
+                sshConnectionManager = container.sshConnectionManager,
                 observeVpnConnectionStateUseCase = container.observeVpnConnectionStateUseCase,
             )
 
