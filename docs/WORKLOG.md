@@ -39,6 +39,47 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-07 - Before Block 32
+
+Plan:
+
+- Add Android Quick Settings tile support for toggling the VPN from the notification shade.
+- Register a `TileService` in the manifest with `android.permission.BIND_QUICK_SETTINGS_TILE`.
+- Reuse existing connect/disconnect service intents instead of duplicating VPN connection logic.
+- Keep system limitations explicit:
+  - if VPN permission is not granted, open the main app screen to request it;
+  - if no selected config or selected-apps mode has no selected apps, open the main app screen so the existing UI can show/handle the issue.
+- Add tile label/subtitle/state updates for disconnected, connecting, connected, reconnecting, and error states.
+- Rebuild debug/release and rerun checks.
+
+Result:
+
+- Added `SshVpnTileService` as Android Quick Settings tile support.
+- Registered the tile service in `AndroidManifest.xml` with:
+  - `android.permission.BIND_QUICK_SETTINGS_TILE`;
+  - `android.service.quicksettings.action.QS_TILE`;
+  - `android.service.quicksettings.TOGGLEABLE_TILE`.
+- Tile behavior:
+  - connected/connecting/reconnecting/disconnecting -> sends Disconnect;
+  - disconnected/error -> attempts Connect;
+  - missing VPN permission, missing selected config, or selected-apps mode with no selected apps -> opens the main app screen.
+- Tile state updates from the existing `VpnConnectionRepository` flow:
+  - active for connected/connecting/reconnecting;
+  - inactive for disconnected/error;
+  - unavailable while disconnecting.
+- Added tile label/subtitle strings.
+- Updated README with Quick Settings tile usage and Android placement limitation.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/build-release.sh`: success.
+- Verified release APK signature with `apksigner verify --verbose`:
+  - v2 signature: true;
+  - signers: 1.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+- Updated signed release APK at `app/build/outputs/apk/release/app-release.apk`.
+
 ### 2026-06-06 - Before Block 31
 
 Plan:

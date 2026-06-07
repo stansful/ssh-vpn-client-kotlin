@@ -3,4 +3,15 @@
     <string name="vpn_notification_channel">VPN connection</string>
     <string name="vpn_notification_title">shadow-ssh is active</string>
     <string name="vpn_notification_text">Traffic is routed through the selected SSH configuration.</string>
+    <string name="qs_tile_label">shadow-ssh</string>
+    <string name="qs_tile_disconnected">Disconnected</string>
+    <string name="qs_tile_connecting">Connecting</string>
+    <string name="qs_tile_connected">Connected</string>
+    <string name="qs_tile_reconnecting">Reconnecting</string>
+    <string name="qs_tile_disconnecting">Disconnecting</string>
+    <string name="qs_tile_error">Check app</string>
+    <string name="qs_tile_no_config">No configuration selected</string>
+    <string name="qs_tile_no_selected_apps">Нет выбранных приложений</string>
+    <string name="qs_tile_permission_required">VPN permission required</string>
+    <string name="qs_tile_unknown_error">Unknown connection error</string>
 </resources>
