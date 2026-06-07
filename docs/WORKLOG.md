@@ -39,6 +39,38 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-07 - Before Block 35
+
+Plan:
+
+- Add a GitHub repository link to the Settings sheet.
+- Add a GitHub brand mark drawable and use it next to the link.
+- Open the provided repository URL in the external browser when tapped.
+- Keep the row styling aligned with the current light/dark app themes.
+- Rebuild debug/release and rerun checks.
+
+Result:
+
+- Added a GitHub row to the Settings sheet.
+- The row uses a GitHub mark drawable and opens:
+  `https://github.com/stansful/ssh-vpn-client-kotlin/tree/master`
+- Kept the row theme-aware:
+  - light theme uses the existing soft surface variant;
+  - dark theme uses the existing dark surface variant;
+  - press animation uses the same scale interaction pattern as other settings tiles.
+- Added `app/src/main/res/drawable/ic_github_mark.xml`.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/build-release.sh`: success.
+- Verified release APK signature with Android SDK `apksigner` and Android Studio JBR:
+  - v2 signature: true;
+  - signers: 1.
+- Verified scoped `git diff --check` for files changed in this block: success.
+- Full `git diff --check` still reports unrelated trailing whitespace in `README.md`; this file was not changed by this block.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+- Updated signed release APK at `app/build/outputs/apk/release/app-release.apk`.
+
 ### 2026-06-07 - Before Block 34
 
 Plan:

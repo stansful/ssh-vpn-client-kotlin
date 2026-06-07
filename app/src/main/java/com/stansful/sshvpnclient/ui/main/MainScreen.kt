@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -74,6 +75,8 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -81,6 +84,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.stansful.sshvpnclient.AppContainer
+import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.domain.model.AuthType
@@ -619,6 +623,8 @@ private fun SettingsSheet(
     onOpenAppPicker: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val uriHandler = LocalUriHandler.current
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = MaterialTheme.colorScheme.surface,
@@ -661,7 +667,79 @@ private fun SettingsSheet(
                 )
             }
 
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+
+            GitHubLinkRow(
+                onClick = { uriHandler.openUri(GITHUB_REPOSITORY_URL) },
+            )
+
             Box(modifier = Modifier.padding(bottom = 12.dp))
+        }
+    }
+}
+
+@Composable
+private fun GitHubLinkRow(
+    onClick: () -> Unit,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (pressed) 0.98f else 1f,
+        animationSpec = tween(120),
+        label = "github-link-scale",
+    )
+    val colorScheme = MaterialTheme.colorScheme
+    val darkTheme = colorScheme.background.luminance() < 0.5f
+
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = if (darkTheme) {
+            colorScheme.surfaceVariant.copy(alpha = 0.72f)
+        } else {
+            colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        },
+        contentColor = colorScheme.onSurface,
+        border = BorderStroke(1.dp, colorScheme.outline.copy(alpha = 0.28f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                role = Role.Button,
+                onClick = onClick,
+            ),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                painter = painterResource(id = R.drawable.ic_github_mark),
+                contentDescription = null,
+                modifier = Modifier.size(24.dp),
+                tint = colorScheme.onSurface,
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = "GitHub",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "stansful/ssh-vpn-client-kotlin",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -984,3 +1062,6 @@ private fun VpnMode.icon(): ImageVector {
         VpnMode.SELECTED_APPS -> Icons.Default.Apps
     }
 }
+
+private const val GITHUB_REPOSITORY_URL =
+    "https://github.com/stansful/ssh-vpn-client-kotlin/tree/master"
