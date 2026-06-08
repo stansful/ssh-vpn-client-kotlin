@@ -1,12 +1,12 @@
-# SSH VPN Client Android
+# shadow-ssh
 
-Native Android MVP на Kotlin + Jetpack Compose для VPN-клиента, который использует SSH как транспорт.
+Native Android VPN client на Kotlin + Jetpack Compose. Приложение поднимает Android `VpnService`, подключается к SSH-серверу и проксирует трафик приложений через SSH `direct-tcpip` каналы.
 
 ## setup / description / fast start
 1. Скачать [android studio](https://developer.android.com/studio?hl=ru), открыть проект, установить зависимости (ide по умолчанию это уже делает)
 2. Создать в корне файл local.properties пример содержимого находится в файле [local.properties.example](local.properties.example)
 3. Запустить скрипт [build-debug.sh](scripts/build-debug.sh), для [build-release.sh](scripts/build-release.sh) нужно в корне создать файлы из скриншота по пути docs/img.png (нейросеть в помощь)
-4. В проекте не было написано ни единой строчки кода разработчиком, всё делал codex в связке с chatgpt-5.5 с высоким reasoning 
+4. В проекте не было написано ни единой строчки кода разработчиком, всё делал codex в связке с chatgpt-5.5 с высоким reasoning
 5. На проект ушло примерно 6 часов, 4 из которых это просмотр youtube, остальные 2 часа потрачены написание простых запросов в стиле `Добавь кнопку с подключением / перекрась / сломалось это / давай добавим логи для дебага / нужен новый функционал Х` а также запуск на мобилке и ручное тестирование функционала
 6. Цель проекта была простая - создать vpn тунель через ssh соединение, а также убедится что программирование в том виде в котором мы знаем умерло С:
 7. Для создания базового функционала приложения потребовался вот такой промт:
@@ -19,58 +19,76 @@ Native Android MVP на Kotlin + Jetpack Compose для VPN-клиента, ко
 адрес порт пользователь закрытый ключ / пароль отпечаток keepalive udp-переадресация примечание(оно будет текcтом на ui)
 ```
 
-## Что реализовано
+## Что умеет
 
-- CRUD для SSH-конфигураций.
-- CRUD для SSH-ключей.
-- Переиспользование одного SSH-ключа в разных конфигурациях через `privateKeyId`.
-- Запрет удаления SSH-ключа, если он используется конфигурациями.
-- Выбор активной конфигурации.
-- Главный экран со статусом VPN и кнопкой Connect / Disconnect.
-- Room для обычных данных.
-- Tink AEAD + обычный private `SharedPreferences` для ciphertext секретов:
-  - пароль конфига;
-  - приватный ключ;
-  - passphrase приватного ключа.
-- Legacy migration из старого `EncryptedSharedPreferences` storage выполняется автоматически при первом запуске после обновления.
-- `VpnService`, `SshConnectionManager`, `VpnTunnelManager`, `Tun2SocksManager`.
-- SSH-подключение через password или private key.
-- Проверка fingerprint, если он указан.
-- KeepAlive interval для SSH-сессии.
-- Локальный Kotlin TUN forwarding без стороннего native `tun2socks`.
-- TCP из TUN проксируется через SSH `direct-tcpip` channels.
-- DNS из VPN обрабатывается как DNS-over-TCP через SSH.
-- Диагностические логи подключения: по умолчанию свёрнуты, есть копирование в clipboard.
-- Автоматическое переподключение при обрыве SSH-сессии до явного Disconnect.
-- Quick Settings плитка `shadow-ssh` для Connect / Disconnect из шторки Android.
+- SSH VPN через password или private key.
+- CRUD для SSH-конфигураций и приватных SSH-ключей.
+- Переиспользование одного SSH-ключа в нескольких конфигурациях.
+- Проверка SSH host fingerprint, если он указан в конфигурации.
+- SSH keepalive и автоматический reconnect при обрыве до явного Disconnect.
+- Split tunneling:
+  - `Proxy` - через туннель идут все приложения;
+  - `Selected apps` - через туннель идут только выбранные приложения.
+- Выбор приложений с поиском, чекбоксами и системными приложениями.
+- Quick Settings tile `shadow-ssh` для Connect / Disconnect из шторки Android.
+- Кнопка `Check tunnel`, которая проверяет доступность `youtube.com:443` через SSH-туннель.
+- Диагностические логи подключения:
+  - по умолчанию скрыты;
+  - включаются в Settings;
+  - раскрываются спойлером;
+  - копируются в clipboard;
+  - не ограничены 80 строками и сбрасываются при новом пользовательском Connect.
+- SSH terminal:
+  - доступен при активном подключении;
+  - открывает shell-channel на текущей SSH-сессии;
+  - команды отправляются с фонового IO-потока;
+  - команды и remote output не пишутся в diagnostics.
+- Темы:
+  - `System` по умолчанию;
+  - `Light`;
+  - `Dark` в black/orange стиле;
+  - `Custom` с RGB-настройкой цветов, которые сохраняются после перезапуска.
+- Ссылка на GitHub в Settings с кнопкой копирования.
+- Release APK собирается installable и локально подписанным, если production signing env не задан.
 
-## Сетевые ограничения
+## Сетевой поток
 
-- TCP-трафик из Android VPN идёт через SSH.
-- DNS-запросы из VPN идут через SSH как DNS-over-TCP к DNS-серверам из `VpnTunnelManager`.
-- Произвольный non-DNS UDP пока не проксируется через SSH и отбрасывается локальным forwarding layer.
-- `enableUdpForwarding` пока оставлен как experimental flag; текущая реализация явно пишет в diagnostics, что поддержаны TCP и DNS.
-- Если SSH-сессия обрывается, приложение закрывает текущие TUN/forwarding/SSH ресурсы и переподключается с backoff от 2 до 30 секунд.
-- Diagnostics не обрезаются по количеству строк в рамках текущего подключения и сбрасываются только при новом пользовательском Connect.
+```text
+Selected Android apps / all apps
+        |
+        v
+Android VpnService TUN interface
+        |
+        v
+In-app Kotlin TUN forwarder
+        |
+        v
+Protected SSH socket outside VPN routing
+        |
+        v
+SSH server
+        |
+        v
+Target websites / services
+```
 
-Точки интеграции:
+TCP-трафик из TUN проксируется через SSH `direct-tcpip`. DNS-запросы VPN обрабатываются как DNS-over-TCP через SSH. Произвольный non-DNS UDP сейчас не проксируется и отбрасывается локальным forwarding layer.
 
-- `app/src/main/java/com/stansful/sshvpnclient/vpn/Tun2SocksManager.kt`
-- `app/src/main/java/com/stansful/sshvpnclient/vpn/KotlinTunForwarder.kt`
-- `app/src/main/java/com/stansful/sshvpnclient/vpn/VpnProtectedSocketFactory.kt`
+## Ограничения
 
-Раньше TUN forwarding зависел от локального AAR `hevtunnel-1.0.1-kotlin19.aar`.
-Теперь эта зависимость удалена: приложение само читает IPv4-пакеты из Android `VpnService`,
-локально терминирует TCP-сессии приложений и открывает SSH `direct-tcpip` каналы до целевых адресов.
-DNS UDP/53 обрабатывается как DNS-over-TCP через SSH.
+- Поддержаны TCP и DNS UDP/53. Остальной UDP не туннелируется.
+- `enableUdpForwarding` оставлен как experimental flag, но текущий forwarding layer явно пишет в diagnostics, что поддержаны только TCP и DNS.
+- SSH terminal использует интерактивный PTY на сервере, поэтому поведение prompt/echo зависит от server shell.
+- Quick Settings tile нельзя автоматически поставить в конкретное место шторки: пользователь должен добавить плитку через редактирование быстрых настроек Android.
+- Release APK, подписанный локальным ignored keystore, подходит для установки на устройство, но не для production-дистрибуции.
 
-## Требования для локального запуска
+## Требования
 
-- macOS/Linux.
-- JDK 17+ или JBR из Android Studio.
-- Android Studio или Android SDK с установленным API 37.
-- Gradle 9.x или Gradle Wrapper.
-- Android emulator или физическое устройство с включённым USB debugging.
+- macOS или Linux.
+- Android Studio с JBR 17+ или отдельный JDK 17+.
+- Android SDK с API 37.
+- Gradle Wrapper из проекта.
+- Android emulator или физическое устройство с включенным USB debugging.
 
 Если Android SDK не найден автоматически, создай `local.properties` в корне проекта:
 
@@ -82,16 +100,19 @@ sdk.dir=/Users/<user>/Library/Android/sdk
 
 ```bash
 ./scripts/check-env.sh
-./scripts/create-gradle-wrapper.sh
 ./scripts/build-debug.sh
 ./scripts/install-debug.sh
 ```
 
-Если wrapper уже создан, `create-gradle-wrapper.sh` можно не запускать.
+Если Gradle intermediate state сломался после обновления SDK/AGP, сначала выполни:
+
+```bash
+./scripts/clean.sh
+```
 
 ## Release APK
 
-Для локальной установки можно собрать release APK с локальным keystore. Скрипт создаст его автоматически в `.local/signing/`; эта директория игнорируется git:
+Локально подписанный release APK:
 
 ```bash
 ./scripts/build-release.sh
@@ -103,9 +124,9 @@ sdk.dir=/Users/<user>/Library/Android/sdk
 app/build/outputs/apk/release/app-release.apk
 ```
 
-Этот APK можно устанавливать на телефон, но локальный keystore не подходит для production-дистрибуции.
+Если production signing переменные не заданы, скрипт автоматически создаёт локальный keystore в `.local/signing/`. Эта директория игнорируется git.
 
-Для production release APK передай свой keystore через переменные окружения:
+Production signing:
 
 ```bash
 export SSH_VPN_RELEASE_STORE_FILE=/absolute/path/release.keystore
@@ -115,26 +136,26 @@ export SSH_VPN_RELEASE_KEY_PASSWORD='key-password'
 ./scripts/build-release.sh
 ```
 
-Выходной файл:
+Release variant использует R8 minification и resource shrinking. Keep rules лежат в `app/proguard-rules.pro`.
 
-```text
-app/build/outputs/apk/release/app-release.apk
+Проверка подписи:
+
+```bash
+apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
 ```
-
-Production release-ключи и пароли нельзя хранить в репозитории.
 
 ## Скрипты
 
 - `./scripts/check-env.sh` - проверяет Java, Android SDK и Gradle/Wrapper.
 - `./scripts/create-gradle-wrapper.sh` - создаёт Gradle Wrapper через доступный Gradle или cached distribution.
 - `./scripts/build-debug.sh` - собирает debug APK.
-- `./scripts/build-release.sh` - собирает installable release APK; использует production signing переменные или локальный ignored keystore.
+- `./scripts/build-release.sh` - собирает installable release APK.
 - `./scripts/install-debug.sh` - устанавливает debug APK на подключённое устройство.
 - `./scripts/lint.sh` - запускает Android lint для debug variant.
 - `./scripts/test.sh` - запускает unit tests.
 - `./scripts/clean.sh` - очищает Gradle build outputs.
 
-## Ручные команды
+## Ручные Gradle-команды
 
 ```bash
 ./gradlew :app:assembleDebug
@@ -149,43 +170,93 @@ Production release-ключи и пароли нельзя хранить в р�
 ```text
 app/src/main/java/com/stansful/sshvpnclient/
   data/
-    config/
-    key/
-    local/
-    secret/
+    apps/       installed apps for split tunneling
+    config/     SSH config persistence
+    key/        SSH key persistence
+    local/      Room and VPN state repositories
+    secret/     Tink-backed secret storage
+    settings/   app settings persistence
   domain/
     model/
     repository/
     usecase/
   ui/
-    main/
+    main/       main screen, settings, diagnostics, terminal
+    apps/       selected-apps picker
     configs/
     configedit/
     keys/
     keyedit/
+    theme/
   vpn/
+    Android VpnService, SSH manager, Kotlin TUN forwarder, QS tile
 ```
 
-## Секреты
+Ключевые сетевые файлы:
 
-Секретные данные не хранятся в Room:
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/SshVpnService.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/SshConnectionManager.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/SshTerminalSession.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/KotlinTunForwarder.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/Tun2SocksManager.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/VpnProtectedSocketFactory.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/SshVpnTileService.kt`
+
+## Данные и секреты
+
+Room хранит обычные сущности и secret id. Секретные значения не хранятся в Room:
 
 - `SshConfig.password`
 - `SshPrivateKey.privateKey`
 - `SshPrivateKey.passphrase`
 
-Room хранит только secret id, а значения лежат в encrypted preferences.
+Активное secret storage решение:
 
-## Проверка VPN-разрешения
+- Tink AEAD шифрует значения;
+- ciphertext хранится в обычном private `SharedPreferences` как Base64;
+- associated data привязана к secret id;
+- Tink keyset хранится через Android Keystore-backed `AndroidKeysetManager`.
 
-При нажатии Connect приложение вызывает `VpnService.prepare(...)`. Если Android требует подтверждение пользователя, откроется системный permission dialog.
+Есть idempotent legacy migration из старого `EncryptedSharedPreferences` storage. Deprecated storage используется только для чтения старых данных во время миграции, если старый файл реально существует.
+
+## Split tunneling
+
+Режим хранится в app settings и переживает перезапуск приложения:
+
+- `Proxy` - Android VPN builder не ограничивает приложения, через туннель идут все приложения.
+- `Selected apps` - в VPN builder добавляются только выбранные package names.
+
+Если выбран `Selected apps`, но список пустой, Connect запрещён и приложение показывает сообщение `нет выбранных приложений`.
+
+Если split-tunnel settings меняются при активном VPN, приложение делает controlled reconnect с сохранением diagnostics.
 
 ## Quick Settings Tile
 
-Приложение предоставляет плитку `shadow-ssh` для шторки Android. Добавление плитки в конкретное место шторки Android не разрешает делать без действия пользователя, поэтому её нужно один раз добавить через редактирование быстрых настроек.
+Плитка `shadow-ssh` регистрируется через `SshVpnTileService`.
 
-Поведение плитки:
+Поведение:
 
-- если VPN подключён, подключается или переподключается - нажатие отправляет Disconnect;
-- если VPN отключён - нажатие запускает текущую выбранную конфигурацию;
-- если VPN permission ещё не выдан, нет выбранной конфигурации или в режиме `selected-apps` нет выбранных приложений - открывается главный экран приложения.
+- VPN подключён, подключается или переподключается - тап отправляет Disconnect.
+- VPN отключён - тап запускает текущую выбранную конфигурацию.
+- Нет VPN permission, нет выбранной конфигурации или `Selected apps` пустой - открывается главный экран приложения.
+
+## Diagnostics и debug
+
+Diagnostics предназначены для пользовательского debug без adb:
+
+- SSH auth method, key fingerprint, network capabilities, socket protection, reconnect attempts.
+- Tunnel check lifecycle.
+- Terminal lifecycle and write/close failures.
+- Ошибки forwarding layer.
+
+Diagnostics не должны содержать приватные ключи, пароли, passphrase, SSH terminal commands или remote terminal output.
+
+## Последняя проверенная сборка
+
+На 2026-06-08:
+
+- `./scripts/build-debug.sh`: success после `./scripts/clean.sh`.
+- `./scripts/build-release.sh`: success.
+- `apksigner verify --verbose app/build/outputs/apk/release/app-release.apk`: success, APK Signature Scheme v2, 1 signer.
+- Debug APK: `app/build/outputs/apk/debug/app-debug.apk` около 23M.
+- Release APK: `app/build/outputs/apk/release/app-release.apk` около 3.7M.

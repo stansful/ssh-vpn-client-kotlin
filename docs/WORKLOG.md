@@ -39,6 +39,42 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-08 - Before Block 42
+
+Plan:
+
+- Refresh root README so it matches the current app name, setup, build scripts, release signing, UI features, split tunneling, diagnostics, SSH terminal, secret storage, and network limits.
+- Add missing `README_SA.md` for a system analyst:
+  - explain the app/server/third-party-site traffic flow;
+  - describe VPN modes, connection lifecycle, storage, diagnostics, and limitations;
+  - document operational checks and artifacts.
+- Keep documentation changes only; no Kotlin/code behavior changes.
+
+Result:
+
+- Rewrote root `README.md` for the current `shadow-ssh` app state:
+  - current features;
+  - network flow;
+  - split tunneling;
+  - diagnostics;
+  - SSH terminal;
+  - themes including `Custom`;
+  - Tink secret storage;
+  - Quick Settings tile;
+  - release signing and R8/resource shrinking.
+- Added root-level `README_SA.md` for a system analyst:
+  - actors;
+  - traffic flow diagram;
+  - connection state diagram;
+  - main scenarios;
+  - data/storage model;
+  - operational checks and limitations.
+
+Verification:
+
+- `git diff --check`: clean.
+- Documentation-only change; Gradle build was not rerun.
+
 ### 2026-06-08 - Before Block 41
 
 Plan:
