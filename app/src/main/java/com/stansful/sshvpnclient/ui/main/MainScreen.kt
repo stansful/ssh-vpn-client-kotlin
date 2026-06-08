@@ -161,7 +161,7 @@ private fun MainScreen(
     var settingsVisible by remember { mutableStateOf(false) }
 
     AppScreen(
-        title = "SSH VPN",
+        title = "Shadow SSH vpn",
         actions = {
             IconButton(onClick = { settingsVisible = true }) {
                 Icon(Icons.Default.Settings, contentDescription = "Settings")
@@ -640,7 +640,7 @@ private fun SettingsSheet(
             Text("Settings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
 
             SettingsSwitchRow(
-                title = "Logs on main",
+                title = "Debug logs",
                 checked = settings.showLogsOnMain,
                 onCheckedChange = onShowLogsChange,
             )

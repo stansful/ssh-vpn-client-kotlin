@@ -24,7 +24,7 @@ fi
 cat >&2 <<'EOF'
 Gradle was not found.
 
-Install Gradle 8.x or run:
+Install Gradle 9.x or run:
   ./scripts/create-gradle-wrapper.sh
 
 That script also requires a local gradle command for the initial wrapper creation.

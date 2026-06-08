@@ -39,6 +39,66 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-08 - Before Block 37
+
+Plan:
+
+- Update Gradle wrapper from `9.5.0` to current stable `9.5.1`.
+- Update Android Gradle Plugin from `8.13.2` to latest stable `9.2.1`.
+- Migrate Compose compiler setup to the Kotlin 2.x Compose Compiler Gradle plugin.
+- Update Kotlin/KSP to the newest compatible stable pair, validating compatibility by build.
+- Update AndroidX, Compose BOM, Room, Security Crypto, JSch, BouncyCastle, Coroutines, and Android test dependencies to current stable releases from Google Maven/Maven Central metadata.
+- Update compile/target SDK if the installed Android SDK supports it.
+- Rebuild debug/release and rerun tests/lint.
+
+Result:
+
+- Updated Gradle wrapper from `9.5.0` to `9.5.1`.
+- Ran the Gradle `wrapper` task with Android Studio JBR so wrapper metadata matches `9.5.1`.
+- Updated Android Gradle Plugin from `8.13.2` to stable `9.2.1`.
+- Migrated the app module to AGP 9 built-in Kotlin:
+  - removed `org.jetbrains.kotlin.android`;
+  - removed legacy `android.kotlinOptions`;
+  - kept Java/Kotlin JVM target aligned through `compileOptions`;
+  - added `org.jetbrains.kotlin.plugin.compose` `2.4.0`.
+- Updated KSP from `1.9.24-1.0.20` to `2.3.9`.
+- Updated SDK values:
+  - `compileSdk`: `35` -> `37`;
+  - `targetSdk`: `35` -> `36`;
+  - `minSdk`: unchanged at `26`.
+- Updated dependencies:
+  - Compose BOM `2024.06.00` -> `2026.05.01`;
+  - Activity Compose `1.9.1` -> `1.13.0`;
+  - Core KTX `1.13.1` -> `1.19.0`;
+  - Lifecycle `2.8.4` -> `2.10.0`;
+  - Navigation Compose `2.7.7` -> `2.9.8`;
+  - Room `2.6.1` -> `2.8.4`;
+  - Security Crypto `1.1.0-alpha06` -> `1.1.0`;
+  - mwiede JSch `0.2.21` -> `2.28.2`;
+  - BouncyCastle `1.79` -> `1.84`;
+  - Coroutines Android `1.8.1` -> `1.11.0`;
+  - AndroidX Test JUnit `1.2.1` -> `1.3.0`;
+  - Espresso Core `3.6.1` -> `3.7.0`.
+- Updated README and wrapper helper scripts to say API 37 / Gradle 9.x / wrapper 9.5.1.
+- Gradle installed missing local SDK components during verification:
+  - Android SDK Platform 36;
+  - Android SDK Platform 37;
+  - Android SDK Build Tools 36.0.0.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/build-release.sh`: success.
+- Verified release APK signature with Android SDK `apksigner` and Android Studio JBR:
+  - v2 signature: true;
+  - signers: 1.
+- Verified `git diff --check`: success; Git still prints a non-failing CRLF warning for untouched `gradlew.bat`.
+- Remaining compile warnings are from deprecated APIs exposed by updated libraries:
+  - `EncryptedSharedPreferences` / `MasterKey`;
+  - `LocalClipboardManager`;
+  - JSch `setPassword`.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+- Updated signed release APK at `app/build/outputs/apk/release/app-release.apk`.
+
 ### 2026-06-08 - Before Block 36
 
 Plan:

@@ -67,8 +67,8 @@ DNS UDP/53 обрабатывается как DNS-over-TCP через SSH.
 
 - macOS/Linux.
 - JDK 17+ или JBR из Android Studio.
-- Android Studio или Android SDK с установленным API 35.
-- Gradle 8.x или Gradle Wrapper.
+- Android Studio или Android SDK с установленным API 37.
+- Gradle 9.x или Gradle Wrapper.
 - Android emulator или физическое устройство с включённым USB debugging.
 
 Если Android SDK не найден автоматически, создай `local.properties` в корне проекта:
