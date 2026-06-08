@@ -39,6 +39,50 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-08 - Before Block 38
+
+Plan:
+
+- Replace the active `EncryptedSharedPreferences` secret backend with a Tink-backed backend.
+- Store encrypted secret values in ordinary private `SharedPreferences` as Base64 ciphertext.
+- Use Tink AEAD with associated data bound to the secret id.
+- Keep Android Keystore-backed Tink keyset storage for the encryption keyset.
+- Add an idempotent legacy migration from the previous `EncryptedSharedPreferences` file.
+- Ensure normal app startup does not instantiate deprecated `EncryptedSharedPreferences` after migration is complete.
+- Keep old secret values untouched if migration cannot read them, and avoid logging secret contents.
+- Update README and dependency list.
+- Rebuild debug/release and rerun tests/lint.
+
+Result:
+
+- Replaced active `EncryptedSharedPreferences` usage with `TinkSecretStorage`.
+- Added `com.google.crypto.tink:tink-android:1.21.0`.
+- New secret storage behavior:
+  - Tink AEAD encrypts every secret value;
+  - associated data is bound to the secret id;
+  - ciphertext is stored as Base64 in ordinary private `SharedPreferences`;
+  - Tink keyset is stored through `AndroidKeysetManager` with Android Keystore master key URI.
+- Added idempotent legacy migration:
+  - if the old `ssh_vpn_secrets.xml` file does not exist, migration is marked complete without touching deprecated APIs;
+  - if the old file exists, legacy values are read through `EncryptedSharedPreferences`, encrypted into the new Tink store, and removed from the legacy store;
+  - migration failure is recorded in private migration prefs and does not delete old values;
+  - lazy fallback can still read a single legacy secret when migration was not completed.
+- Removed the old `EncryptedPreferencesSecretStorage` class from the active code path.
+- Kept `androidx.security:security-crypto` only for legacy migration compatibility.
+- Updated `AppContainer` to inject `TinkSecretStorage`.
+- Updated README secret-storage description.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/build-release.sh`: success.
+- Verified release APK signature with Android SDK `apksigner` and Android Studio JBR:
+  - v2 signature: true;
+  - signers: 1.
+- Verified `git diff --check`: success.
+- Deprecated compile warnings for `EncryptedSharedPreferences` / `MasterKey` are gone; remaining warning is unrelated `LocalClipboardManager`.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+- Updated signed release APK at `app/build/outputs/apk/release/app-release.apk`.
+
 ### 2026-06-08 - Before Block 37
 
 Plan:

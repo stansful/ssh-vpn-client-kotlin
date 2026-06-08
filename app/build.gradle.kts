@@ -101,6 +101,7 @@ dependencies {
     ksp("androidx.room:room-compiler:2.8.4")
 
     implementation("androidx.security:security-crypto:1.1.0")
+    implementation("com.google.crypto.tink:tink-android:1.21.0")
     implementation("com.github.mwiede:jsch:2.28.2")
     implementation("org.bouncycastle:bcprov-jdk18on:1.84")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")

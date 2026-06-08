@@ -28,10 +28,11 @@ Native Android MVP на Kotlin + Jetpack Compose для VPN-клиента, ко
 - Выбор активной конфигурации.
 - Главный экран со статусом VPN и кнопкой Connect / Disconnect.
 - Room для обычных данных.
-- `EncryptedSharedPreferences` для секретов:
+- Tink AEAD + обычный private `SharedPreferences` для ciphertext секретов:
   - пароль конфига;
   - приватный ключ;
   - passphrase приватного ключа.
+- Legacy migration из старого `EncryptedSharedPreferences` storage выполняется автоматически при первом запуске после обновления.
 - `VpnService`, `SshConnectionManager`, `VpnTunnelManager`, `Tun2SocksManager`.
 - SSH-подключение через password или private key.
 - Проверка fingerprint, если он указан.

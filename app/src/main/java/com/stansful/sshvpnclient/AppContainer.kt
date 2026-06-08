@@ -7,7 +7,7 @@ import com.stansful.sshvpnclient.data.config.RoomSshConfigRepository
 import com.stansful.sshvpnclient.data.key.RoomSshPrivateKeyRepository
 import com.stansful.sshvpnclient.data.local.AppDatabase
 import com.stansful.sshvpnclient.data.local.InMemoryVpnConnectionRepository
-import com.stansful.sshvpnclient.data.secret.EncryptedPreferencesSecretStorage
+import com.stansful.sshvpnclient.data.secret.TinkSecretStorage
 import com.stansful.sshvpnclient.data.settings.SharedPreferencesAppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.InstalledAppsRepository
@@ -44,7 +44,7 @@ class AppContainer(
         "ssh-vpn-client.db",
     ).build()
 
-    private val secretStorage = EncryptedPreferencesSecretStorage(appContext)
+    private val secretStorage = TinkSecretStorage(appContext)
 
     val sshConfigRepository: SshConfigRepository = RoomSshConfigRepository(
         dao = database.sshConfigDao(),
