@@ -138,8 +138,8 @@ fi
 
 "$GRADLE" -p "$ROOT_DIR" :app:assembleRelease
 
-signed_apk="$ROOT_DIR/app/build/outputs/apk/release/app-release.apk"
-unsigned_apk="$ROOT_DIR/app/build/outputs/apk/release/app-release-unsigned.apk"
+signed_apk="$ROOT_DIR/build/app/outputs/apk/release/app-release.apk"
+unsigned_apk="$ROOT_DIR/build/app/outputs/apk/release/app-release-unsigned.apk"
 
 if [[ -f "$signed_apk" ]]; then
   signed_output_exists=1
@@ -159,6 +159,6 @@ elif ((unsigned_output_exists == 1)); then
   echo "Unsigned release APK: $unsigned_apk"
   echo "This APK is not installable until it is signed." >&2
 else
-  echo "Release build completed, but APK output was not found in app/build/outputs/apk/release." >&2
+  echo "Release build completed, but APK output was not found in build/app/outputs/apk/release." >&2
   exit 1
 fi

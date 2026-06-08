@@ -39,6 +39,39 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-08 - Before Block 43
+
+Plan:
+
+- Explain why Gradle currently has root `build/` and module `app/build/`.
+- Reconfigure module build output so the `app` module writes under root `build/app/`.
+- Update scripts and documentation from `app/build/...` to `build/app/...`.
+- Remove the old generated `app/build/` directory after successful reconfiguration.
+- Rebuild debug/release and verify release APK signature.
+- Answer where the Tink keyset and Android Keystore master key are stored.
+
+Result:
+
+- Reconfigured Gradle module output:
+  - root project keeps `build/`;
+  - `:app` now writes to `build/app/`;
+  - old generated `app/build/` was removed.
+- Updated release script and current documentation paths from `app/build/...` to `build/app/...`.
+- Removed obsolete `app/build/` ignore entry from `.gitignore`.
+- Confirmed only one build directory remains in the workspace: `./build`.
+- Tink storage answer:
+  - encrypted secret values: app private SharedPreferences file `ssh_vpn_tink_secrets.xml`;
+  - Tink keyset: app private SharedPreferences file `ssh_vpn_tink_keyset.xml`, entry `ssh_vpn_secret_keyset`;
+  - master key: Android Keystore alias `ssh_vpn_secret_master_key`.
+
+Verification:
+
+- `./scripts/build-debug.sh`: success.
+- `./scripts/build-release.sh`: success.
+- `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, v2 signed, 1 signer.
+- `find . -maxdepth 3 -type d -name build -print`: only `./build`.
+- `git diff --check`: clean.
+
 ### 2026-06-08 - Before Block 42
 
 Plan:

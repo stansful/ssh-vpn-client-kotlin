@@ -218,13 +218,13 @@ Tile нельзя автоматически добавить в шторку и
 Debug APK:
 
 ```text
-app/build/outputs/apk/debug/app-debug.apk
+build/app/outputs/apk/debug/app-debug.apk
 ```
 
 Release APK:
 
 ```text
-app/build/outputs/apk/release/app-release.apk
+build/app/outputs/apk/release/app-release.apk
 ```
 
 Release APK:

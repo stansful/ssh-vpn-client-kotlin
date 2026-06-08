@@ -121,7 +121,7 @@ sdk.dir=/Users/<user>/Library/Android/sdk
 Выходной файл:
 
 ```text
-app/build/outputs/apk/release/app-release.apk
+build/app/outputs/apk/release/app-release.apk
 ```
 
 Если production signing переменные не заданы, скрипт автоматически создаёт локальный keystore в `.local/signing/`. Эта директория игнорируется git.
@@ -141,7 +141,7 @@ Release variant использует R8 minification и resource shrinking. Keep
 Проверка подписи:
 
 ```bash
-apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
+apksigner verify --verbose build/app/outputs/apk/release/app-release.apk
 ```
 
 ## Скрипты
@@ -257,6 +257,6 @@ Diagnostics не должны содержать приватные ключи, 
 
 - `./scripts/build-debug.sh`: success после `./scripts/clean.sh`.
 - `./scripts/build-release.sh`: success.
-- `apksigner verify --verbose app/build/outputs/apk/release/app-release.apk`: success, APK Signature Scheme v2, 1 signer.
-- Debug APK: `app/build/outputs/apk/debug/app-debug.apk` около 23M.
-- Release APK: `app/build/outputs/apk/release/app-release.apk` около 3.7M.
+- `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, APK Signature Scheme v2, 1 signer.
+- Debug APK: `build/app/outputs/apk/debug/app-debug.apk` около 23M.
+- Release APK: `build/app/outputs/apk/release/app-release.apk` около 3.7M.

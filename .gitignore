@@ -4,8 +4,6 @@
 build/
 local.properties
 
-app/build/
-
 *.apk
 *.aab
 *.iml
