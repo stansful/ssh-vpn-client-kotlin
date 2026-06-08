@@ -1,6 +1,7 @@
 package com.stansful.sshvpnclient.ui.main
 
 import android.app.Activity
+import android.content.ClipData
 import android.net.VpnService
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -64,6 +65,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -73,12 +75,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -93,6 +95,7 @@ import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
 import com.stansful.sshvpnclient.ui.common.ErrorMessage
+import kotlinx.coroutines.launch
 
 @Composable
 fun MainRoute(
@@ -555,7 +558,8 @@ private fun GlassNavButton(
 @Composable
 private fun DiagnosticsPanel(state: MainUiState) {
     var expanded by remember { mutableStateOf(false) }
-    val clipboardManager = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val coroutineScope = rememberCoroutineScope()
     val logText = state.vpnState.diagnostics.joinToString(separator = "\n")
 
     GlassPanel {
@@ -579,7 +583,15 @@ private fun DiagnosticsPanel(state: MainUiState) {
                     )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { clipboardManager.setText(AnnotatedString(logText)) }) {
+                    IconButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                clipboard.setClipEntry(
+                                    ClipEntry(ClipData.newPlainText("Connection diagnostics", logText)),
+                                )
+                            }
+                        },
+                    ) {
                         Icon(Icons.Default.ContentCopy, contentDescription = "Copy diagnostics")
                     }
                     IconButton(onClick = { expanded = !expanded }) {
@@ -624,6 +636,8 @@ private fun SettingsSheet(
     onDismiss: () -> Unit,
 ) {
     val uriHandler = LocalUriHandler.current
+    val clipboard = LocalClipboard.current
+    val coroutineScope = rememberCoroutineScope()
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -671,6 +685,13 @@ private fun SettingsSheet(
 
             GitHubLinkRow(
                 onClick = { uriHandler.openUri(GITHUB_REPOSITORY_URL) },
+                onCopyClick = {
+                    coroutineScope.launch {
+                        clipboard.setClipEntry(
+                            ClipEntry(ClipData.newPlainText("GitHub repository", GITHUB_REPOSITORY_URL)),
+                        )
+                    }
+                },
             )
 
             Box(modifier = Modifier.padding(bottom = 12.dp))
@@ -681,6 +702,7 @@ private fun SettingsSheet(
 @Composable
 private fun GitHubLinkRow(
     onClick: () -> Unit,
+    onCopyClick: () -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
@@ -738,6 +760,16 @@ private fun GitHubLinkRow(
                     text = "stansful/ssh-vpn-client-kotlin",
                     style = MaterialTheme.typography.bodySmall,
                     color = colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(
+                onClick = onCopyClick,
+                modifier = Modifier.size(44.dp),
+            ) {
+                Icon(
+                    Icons.Default.ContentCopy,
+                    contentDescription = "Copy GitHub link",
+                    tint = colorScheme.onSurfaceVariant,
                 )
             }
         }

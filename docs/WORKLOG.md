@@ -39,6 +39,32 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-08 - Before Block 39
+
+Plan:
+
+- Add a copy button to the right side of the GitHub row in Settings.
+- Keep tapping the row itself as external repository navigation.
+- Copy the full repository URL to clipboard without changing stored settings.
+- Rebuild debug/release and rerun checks.
+
+Result:
+
+- Added a copy icon button on the right side of the Settings GitHub row.
+- Kept row tap behavior unchanged: tapping the row opens the GitHub repository externally.
+- The copy button writes the full repository URL to clipboard.
+- Migrated both GitHub copy and diagnostics copy from deprecated `LocalClipboardManager` to Compose `LocalClipboard`.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/build-release.sh`: success.
+- Verified release APK signature with Android SDK `apksigner` and Android Studio JBR:
+  - v2 signature: true;
+  - signers: 1.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+- Updated signed release APK at `app/build/outputs/apk/release/app-release.apk`.
+
 ### 2026-06-08 - Before Block 38
 
 Plan:
