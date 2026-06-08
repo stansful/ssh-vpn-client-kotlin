@@ -39,6 +39,105 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-08 - Before Block 41
+
+Plan:
+
+- Fix terminal command submission after device logs showed `NetworkOnMainThreadException`.
+- Move all terminal writes off the Compose/UI thread.
+- Avoid terminal close/write failures bringing down the main VPN connection where possible.
+- Keep diagnostics focused on terminal lifecycle/failures without logging command text.
+- Rebuild debug/release and rerun lint/unit tests/signature checks.
+
+Progress:
+
+- Confirmed terminal command submission called `SshTerminalSession.sendLine()` from the UI callback.
+- Moved command writes to `Dispatchers.IO`.
+- Moved terminal channel close off the UI thread and removed direct stream close/flush from terminal cleanup.
+
+Result:
+
+- Terminal command submission no longer performs SSH writes on the Compose/UI thread.
+- Terminal writes are serialized by `SshTerminalSession.sendLine()` and executed from `Dispatchers.IO`.
+- Terminal cleanup now disconnects only the shell channel, without manually closing JSch streams or flushing from UI callbacks.
+- Terminal write failures are reported to the terminal panel and diagnostics as lifecycle errors without logging command text.
+
+Verification:
+
+- `env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home ./gradlew lintDebug testDebugUnitTest assembleDebug`: success.
+- `./scripts/build-release.sh`: success.
+- `apksigner verify --verbose app/build/outputs/apk/release/app-release.apk`: success, v2 signed, 1 signer.
+- Final APK sizes:
+  - debug: `app/build/outputs/apk/debug/app-debug.apk` - 23M;
+  - release: `app/build/outputs/apk/release/app-release.apk` - 3.7M.
+
+### 2026-06-08 - Before Block 40
+
+Plan:
+
+- Run a technical-debt pass before feature work:
+  - remove remaining compile/lint warnings where practical;
+  - refactor only where it reduces feature complexity or UI coupling.
+- Add custom UI theme support:
+  - extend settings model with `CUSTOM`;
+  - persist configurable RGB/HEX colors;
+  - add theme picker controls and a dedicated color selection UI;
+  - default custom colors to the light theme palette.
+- Add an SSH terminal panel on the main screen:
+  - available during active SSH connection;
+  - persistent shell channel for current connection;
+  - expandable UI similar to connection diagnostics;
+  - text input opens soft keyboard and sends commands to the server.
+- Tune connection diagnostics:
+  - add terminal lifecycle logs;
+  - keep useful VPN/SSH logs and avoid secret output.
+- Optimize release APK size:
+  - enable minification/resource shrinking;
+  - add keep rules required by reflection-heavy libraries;
+  - verify signed release APK.
+- Repeat technical-debt/warnings/refactor/logging pass after implementation.
+- Rebuild debug/release and rerun tests/lint/signature checks.
+
+Progress:
+
+- Starting with the settings/domain/theme changes so the custom theme has a stable model and persistent storage before UI controls are added.
+- Added the custom-theme model, persistent RGB storage, Material color-scheme mapping, system-bar contrast handling, and a dedicated Compose RGB editor.
+- Next implementation block: SSH terminal lifecycle through the active SSH session, with ViewModel-owned UI state.
+
+Result:
+
+- Added `Custom` theme mode:
+  - persisted custom RGB colors in app settings;
+  - default custom colors match the light palette;
+  - system bars choose icon contrast from the custom background;
+  - settings sheet now shows an RGB editor only when `Custom` is selected.
+- Added an expandable SSH terminal panel:
+  - opens a shell channel on the active SSH session;
+  - keeps command input/output in ViewModel state;
+  - closes automatically on VPN disconnect;
+  - logs only terminal lifecycle messages, not terminal commands or remote output.
+- Refactored new UI into separate `CustomThemeControls.kt` and `TerminalPanel.kt`.
+- Reduced release APK size by enabling R8 minification and resource shrinking with required keep rules.
+- Cleaned technical debt found during the pass:
+  - replaced remaining enum `values()` usage in touched theme selectors with `entries`;
+  - switched password auth to byte-array `setPassword`;
+  - made diagnostic timestamp formatting thread-safe;
+  - marked the active terminal session reference volatile for reader-thread callbacks.
+
+Verification:
+
+- `env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home ./gradlew lintDebug testDebugUnitTest assembleDebug`: success.
+- `./scripts/build-release.sh`: success.
+- `apksigner verify --verbose app/build/outputs/apk/release/app-release.apk`: success, v2 signed, 1 signer.
+- `git diff --check`: clean.
+- Final APK sizes:
+  - debug: `app/build/outputs/apk/debug/app-debug.apk` - 23M;
+  - release: `app/build/outputs/apk/release/app-release.apk` - 3.7M.
+
+Limits:
+
+- SSH terminal behavior is compile/build verified; it still needs device testing against a real server because interactive PTY behavior depends on server shell defaults.
+
 ### 2026-06-08 - Before Block 39
 
 Plan:

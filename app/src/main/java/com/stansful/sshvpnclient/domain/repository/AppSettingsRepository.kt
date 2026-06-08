@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.domain.repository
 
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
+import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import kotlinx.coroutines.flow.StateFlow
 
@@ -11,6 +12,8 @@ interface AppSettingsRepository {
     fun setShowLogsOnMain(show: Boolean)
 
     fun setThemeMode(themeMode: AppThemeMode)
+
+    fun setCustomThemeColors(colors: CustomThemeColors)
 
     fun setVpnMode(vpnMode: VpnMode)
 

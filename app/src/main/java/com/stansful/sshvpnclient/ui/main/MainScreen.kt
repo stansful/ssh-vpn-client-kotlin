@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -90,6 +91,7 @@ import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.domain.model.AuthType
+import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.ui.common.AppScreen
@@ -141,8 +143,12 @@ fun MainRoute(
         openAppPicker = openAppPicker,
         onShowLogsChange = viewModel::setShowLogsOnMain,
         onThemeModeChange = viewModel::setThemeMode,
+        onCustomThemeColorsChange = viewModel::setCustomThemeColors,
         onVpnModeChange = viewModel::setVpnMode,
         onDismissNoSelectedApps = viewModel::dismissNoSelectedAppsDialog,
+        onOpenTerminal = viewModel::openTerminal,
+        onTerminalInputChange = viewModel::setTerminalInput,
+        onSubmitTerminalInput = viewModel::submitTerminalInput,
     )
 }
 
@@ -158,13 +164,17 @@ private fun MainScreen(
     openAppPicker: () -> Unit,
     onShowLogsChange: (Boolean) -> Unit,
     onThemeModeChange: (AppThemeMode) -> Unit,
+    onCustomThemeColorsChange: (CustomThemeColors) -> Unit,
     onVpnModeChange: (VpnMode) -> Unit,
     onDismissNoSelectedApps: () -> Unit,
+    onOpenTerminal: () -> Unit,
+    onTerminalInputChange: (String) -> Unit,
+    onSubmitTerminalInput: () -> Unit,
 ) {
     var settingsVisible by remember { mutableStateOf(false) }
 
     AppScreen(
-        title = "Shadow SSH vpn",
+        title = "Shadow SSH VPN",
         actions = {
             IconButton(onClick = { settingsVisible = true }) {
                 Icon(Icons.Default.Settings, contentDescription = "Settings")
@@ -195,6 +205,22 @@ private fun MainScreen(
             ) {
                 DiagnosticsPanel(state)
             }
+
+            AnimatedVisibility(
+                visible = state.isConnected ||
+                    state.terminalState.isOpen ||
+                    state.terminalState.isConnecting ||
+                    state.terminalState.output.isNotBlank(),
+                enter = fadeIn(tween(180)) + slideInVertically(tween(180)) { it / 4 },
+                exit = fadeOut(tween(140)) + slideOutVertically(tween(140)) { it / 4 },
+            ) {
+                TerminalPanel(
+                    state = state,
+                    onOpenTerminal = onOpenTerminal,
+                    onTerminalInputChange = onTerminalInputChange,
+                    onSubmitTerminalInput = onSubmitTerminalInput,
+                )
+            }
         }
     }
 
@@ -203,6 +229,7 @@ private fun MainScreen(
             settings = state.appSettings,
             onShowLogsChange = onShowLogsChange,
             onThemeModeChange = onThemeModeChange,
+            onCustomThemeColorsChange = onCustomThemeColorsChange,
             onVpnModeChange = onVpnModeChange,
             onOpenAppPicker = {
                 settingsVisible = false
@@ -350,7 +377,7 @@ private fun TunnelCheckButton(
 private fun TunnelCheckResult.buttonContainerColor(): Color {
     return when (this) {
         TunnelCheckResult.IDLE -> MaterialTheme.colorScheme.surfaceVariant
-        TunnelCheckResult.SUCCESS -> Color(0xFF28C76F)
+        TunnelCheckResult.SUCCESS -> MaterialTheme.colorScheme.secondary
         TunnelCheckResult.FAILURE -> MaterialTheme.colorScheme.error
     }
 }
@@ -359,8 +386,8 @@ private fun TunnelCheckResult.buttonContainerColor(): Color {
 private fun TunnelCheckResult.buttonContentColor(): Color {
     return when (this) {
         TunnelCheckResult.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
-        TunnelCheckResult.SUCCESS -> Color.White
-        TunnelCheckResult.FAILURE -> Color.White
+        TunnelCheckResult.SUCCESS -> MaterialTheme.colorScheme.onSecondary
+        TunnelCheckResult.FAILURE -> MaterialTheme.colorScheme.onError
     }
 }
 
@@ -406,7 +433,11 @@ private fun ConnectionActionButton(
             } else {
                 MaterialTheme.colorScheme.primary
             },
-            contentColor = Color.White,
+            contentColor = if (state.canDisconnect) {
+                MaterialTheme.colorScheme.onError
+            } else {
+                MaterialTheme.colorScheme.onPrimary
+            },
         ),
         shape = RoundedCornerShape(8.dp),
     ) {
@@ -631,6 +662,7 @@ private fun SettingsSheet(
     settings: AppSettings,
     onShowLogsChange: (Boolean) -> Unit,
     onThemeModeChange: (AppThemeMode) -> Unit,
+    onCustomThemeColorsChange: (CustomThemeColors) -> Unit,
     onVpnModeChange: (VpnMode) -> Unit,
     onOpenAppPicker: () -> Unit,
     onDismiss: () -> Unit,
@@ -648,7 +680,9 @@ private fun SettingsSheet(
         shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            modifier = Modifier
+                .padding(horizontal = 20.dp, vertical = 8.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
             Text("Settings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
@@ -679,6 +713,12 @@ private fun SettingsSheet(
                     selected = settings.themeMode,
                     onSelected = onThemeModeChange,
                 )
+                AnimatedVisibility(visible = settings.themeMode == AppThemeMode.CUSTOM) {
+                    CustomThemeColorsEditor(
+                        colors = settings.customThemeColors,
+                        onColorsChange = onCustomThemeColorsChange,
+                    )
+                }
             }
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
@@ -790,7 +830,7 @@ private fun VpnModeSelector(
                 .selectableGroup(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            VpnMode.values().forEach { mode ->
+            VpnMode.entries.forEach { mode ->
                 VpnModeTile(
                     mode = mode,
                     selected = mode == selected,
@@ -915,19 +955,29 @@ private fun ThemeModeSelector(
     selected: AppThemeMode,
     onSelected: (AppThemeMode) -> Unit,
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .selectableGroup(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        AppThemeMode.values().forEach { mode ->
-            ThemeModeTile(
-                mode = mode,
-                selected = mode == selected,
-                onSelected = { onSelected(mode) },
-                modifier = Modifier.weight(1f),
-            )
+        AppThemeMode.entries.chunked(THEME_TILE_COLUMNS).forEach { rowModes ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                rowModes.forEach { mode ->
+                    ThemeModeTile(
+                        mode = mode,
+                        selected = mode == selected,
+                        onSelected = { onSelected(mode) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                repeat(THEME_TILE_COLUMNS - rowModes.size) {
+                    Box(modifier = Modifier.weight(1f))
+                }
+            }
         }
     }
 }
@@ -1008,7 +1058,7 @@ private fun ThemeModeTile(
 }
 
 @Composable
-private fun GlassPanel(
+internal fun GlassPanel(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
@@ -1070,7 +1120,7 @@ private fun VpnConnectionStatus.label(): String {
 @Composable
 private fun VpnConnectionStatus.statusColor(): Color {
     return when (this) {
-        VpnConnectionStatus.CONNECTED -> Color(0xFF28C76F)
+        VpnConnectionStatus.CONNECTED -> MaterialTheme.colorScheme.secondary
         VpnConnectionStatus.CONNECTING,
         VpnConnectionStatus.RECONNECTING
         -> MaterialTheme.colorScheme.primary
@@ -1085,6 +1135,7 @@ private fun AppThemeMode.icon(): ImageVector {
         AppThemeMode.SYSTEM -> Icons.Default.Settings
         AppThemeMode.LIGHT -> Icons.Default.LightMode
         AppThemeMode.DARK -> Icons.Default.DarkMode
+        AppThemeMode.CUSTOM -> Icons.Default.Palette
     }
 }
 
@@ -1097,3 +1148,4 @@ private fun VpnMode.icon(): ImageVector {
 
 private const val GITHUB_REPOSITORY_URL =
     "https://github.com/stansful/ssh-vpn-client-kotlin/tree/master"
+private const val THEME_TILE_COLUMNS = 2

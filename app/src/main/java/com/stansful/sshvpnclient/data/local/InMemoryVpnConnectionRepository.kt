@@ -74,7 +74,7 @@ class InMemoryVpnConnectionRepository(
     }
 
     override fun appendDiagnostic(message: String) {
-        val line = "${timeFormat.format(Date())} $message"
+        val line = "${formattedCurrentTime()} $message"
         val diagnostics = mutableState.value.diagnostics + line
         persistDiagnostics(diagnostics)
         mutableState.value = mutableState.value.copy(
@@ -98,6 +98,12 @@ class InMemoryVpnConnectionRepository(
             }.filter { it.isNotBlank() }
         }.getOrElse {
             emptyList()
+        }
+    }
+
+    private fun formattedCurrentTime(): String {
+        return synchronized(timeFormat) {
+            timeFormat.format(Date())
         }
     }
 

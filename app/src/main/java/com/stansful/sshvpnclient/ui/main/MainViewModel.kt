@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
+import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.SshConfig
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
@@ -16,12 +17,15 @@ import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
+import com.stansful.sshvpnclient.vpn.SshTerminalSession
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 enum class TunnelCheckResult {
@@ -38,6 +42,7 @@ data class MainUiState(
     val showNoSelectedAppsDialog: Boolean = false,
     val isTunnelCheckRunning: Boolean = false,
     val tunnelCheckResult: TunnelCheckResult = TunnelCheckResult.IDLE,
+    val terminalState: TerminalUiState = TerminalUiState(),
 ) {
     val isBusy: Boolean
         get() = vpnState.status == VpnConnectionStatus.DISCONNECTING
@@ -59,6 +64,14 @@ data class MainUiState(
         get() = vpnState.status == VpnConnectionStatus.CONNECTED && !isTunnelCheckRunning
 }
 
+data class TerminalUiState(
+    val isOpen: Boolean = false,
+    val isConnecting: Boolean = false,
+    val output: String = "",
+    val input: String = "",
+    val errorMessage: String? = null,
+)
+
 class MainViewModel(
     private val appSettingsRepository: AppSettingsRepository,
     configRepository: SshConfigRepository,
@@ -72,6 +85,9 @@ class MainViewModel(
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
     private val isTunnelCheckRunning = MutableStateFlow(false)
     private val tunnelCheckResult = MutableStateFlow(TunnelCheckResult.IDLE)
+    private val terminalState = MutableStateFlow(TerminalUiState())
+    @Volatile
+    private var terminalSession: SshTerminalSession? = null
     private val vpnState = observeVpnConnectionStateUseCase().stateIn(
         scope = viewModelScope,
         started = SharingStarted.Eagerly,
@@ -100,10 +116,12 @@ class MainViewModel(
         baseUiState,
         isTunnelCheckRunning,
         tunnelCheckResult,
-    ) { state, isTunnelCheckRunning, tunnelCheckResult ->
+        terminalState,
+    ) { state, isTunnelCheckRunning, tunnelCheckResult, terminalState ->
         state.copy(
             isTunnelCheckRunning = isTunnelCheckRunning,
             tunnelCheckResult = tunnelCheckResult,
+            terminalState = terminalState,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -129,6 +147,7 @@ class MainViewModel(
                 if (state.status != VpnConnectionStatus.CONNECTED) {
                     tunnelCheckResult.value = TunnelCheckResult.IDLE
                     isTunnelCheckRunning.value = false
+                    closeTerminalSession(resetState = true)
                 }
             }
         }
@@ -152,6 +171,7 @@ class MainViewModel(
     }
 
     fun disconnect() {
+        closeTerminalSession(resetState = true)
         disconnectVpnUseCase()
     }
 
@@ -190,6 +210,80 @@ class MainViewModel(
         appSettingsRepository.setThemeMode(themeMode)
     }
 
+    fun setCustomThemeColors(colors: CustomThemeColors) {
+        appSettingsRepository.setCustomThemeColors(colors)
+    }
+
+    fun openTerminal() {
+        if (!uiState.value.isConnected || terminalSession?.isActive == true) return
+        if (terminalState.value.isConnecting) return
+
+        terminalState.update {
+            it.copy(
+                isOpen = true,
+                isConnecting = true,
+                errorMessage = null,
+            )
+        }
+
+        viewModelScope.launch {
+            runCatching {
+                sshConnectionManager.openTerminal(
+                    log = vpnConnectionRepository::appendDiagnostic,
+                    onOutput = ::appendTerminalOutput,
+                    onClosed = ::handleTerminalClosed,
+                )
+            }.onSuccess { session ->
+                if (session.isActive) {
+                    terminalSession = session
+                    terminalState.update {
+                        it.copy(
+                            isOpen = true,
+                            isConnecting = false,
+                            errorMessage = null,
+                        )
+                    }
+                } else {
+                    session.close()
+                }
+            }.onFailure { error ->
+                val message = error.message ?: "Terminal connection failed"
+                vpnConnectionRepository.appendDiagnostic("SSH terminal unavailable: $message")
+                terminalState.update {
+                    it.copy(
+                        isOpen = false,
+                        isConnecting = false,
+                        errorMessage = message,
+                    )
+                }
+            }
+        }
+    }
+
+    fun setTerminalInput(input: String) {
+        terminalState.update { it.copy(input = input) }
+    }
+
+    fun submitTerminalInput() {
+        val command = terminalState.value.input
+        if (command.isBlank()) return
+
+        val session = terminalSession
+        if (session == null || !session.isActive) {
+            terminalState.update { it.copy(errorMessage = "Terminal is not connected") }
+            return
+        }
+
+        terminalState.update { it.copy(input = "", errorMessage = null) }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                session.sendLine(command)
+            }.onFailure { error ->
+                handleTerminalWriteFailed(error)
+            }
+        }
+    }
+
     fun setVpnMode(vpnMode: VpnMode) {
         appSettingsRepository.setVpnMode(vpnMode)
     }
@@ -200,6 +294,11 @@ class MainViewModel(
 
     fun dismissNoSelectedAppsDialog() {
         showNoSelectedAppsDialog.value = false
+    }
+
+    override fun onCleared() {
+        closeTerminalSessionAfterScopeCancel()
+        super.onCleared()
     }
 
     private fun applyVpnSettingsChange(settings: AppSettings) {
@@ -244,8 +343,86 @@ class MainViewModel(
             status == VpnConnectionStatus.RECONNECTING
     }
 
+    private fun appendTerminalOutput(output: String) {
+        terminalState.update { state ->
+            state.copy(
+                isOpen = true,
+                isConnecting = false,
+                output = (state.output + output).takeLast(MAX_TERMINAL_OUTPUT_CHARS),
+                errorMessage = null,
+            )
+        }
+    }
+
+    private fun handleTerminalClosed(reason: String) {
+        terminalSession = null
+        terminalState.update {
+            it.copy(
+                isOpen = false,
+                isConnecting = false,
+                input = "",
+                errorMessage = reason,
+            )
+        }
+        viewModelScope.launch {
+            vpnConnectionRepository.appendDiagnostic("SSH terminal closed: $reason")
+        }
+    }
+
+    private fun handleTerminalWriteFailed(error: Throwable) {
+        val message = error.message ?: "Terminal command failed"
+        terminalState.update { it.copy(errorMessage = message) }
+        vpnConnectionRepository.appendDiagnostic("SSH terminal write failed: $message")
+    }
+
+    private fun closeTerminalSession(resetState: Boolean) {
+        val session = terminalSession
+        terminalSession = null
+        terminalState.update { state ->
+            if (resetState) {
+                TerminalUiState()
+            } else {
+                state.copy(
+                    isOpen = false,
+                    isConnecting = false,
+                    input = "",
+                    errorMessage = null,
+                )
+            }
+        }
+        if (session == null) return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                session.close()
+            }.onFailure { error ->
+                val message = error.message ?: error::class.java.simpleName
+                vpnConnectionRepository.appendDiagnostic("SSH terminal close failed: $message")
+            }
+        }
+    }
+
+    private fun closeTerminalSessionAfterScopeCancel() {
+        val session = terminalSession
+        terminalSession = null
+        terminalState.value = TerminalUiState()
+        if (session == null) return
+        Thread(
+            {
+                runCatching {
+                    session.close()
+                }
+            },
+            TERMINAL_CLOSE_THREAD_NAME,
+        ).apply {
+            isDaemon = true
+            start()
+        }
+    }
+
     private companion object {
         const val SETTINGS_RECONNECT_DELAY_MS = 450L
+        const val MAX_TERMINAL_OUTPUT_CHARS = 120_000
+        const val TERMINAL_CLOSE_THREAD_NAME = "ssh-terminal-close"
     }
 }
 

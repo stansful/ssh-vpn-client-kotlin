@@ -1,6 +1,7 @@
 package com.stansful.sshvpnclient.vpn
 
 import com.jcraft.jsch.ChannelDirectTCPIP
+import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.KeyPair
@@ -58,7 +59,8 @@ class SshConnectionManager {
 
             if (config.authType == AuthType.PASSWORD) {
                 session.setPassword(
-                    config.password ?: throw VpnConnectionException("Authentication failed"),
+                    (config.password ?: throw VpnConnectionException("Authentication failed"))
+                        .toByteArray(Charsets.UTF_8),
                 )
             }
 
@@ -84,6 +86,43 @@ class SshConnectionManager {
     fun disconnect() {
         activeSession?.takeIf { it.isConnected }?.disconnect()
         activeSession = null
+    }
+
+    suspend fun openTerminal(
+        log: (String) -> Unit = {},
+        onOutput: (String) -> Unit,
+        onClosed: (String) -> Unit,
+    ): SshTerminalSession = withContext(Dispatchers.IO) {
+        val session = activeSession?.takeIf { it.isConnected }
+            ?: throw VpnConnectionException("Terminal unavailable: SSH session is not connected")
+        var channel: ChannelShell? = null
+
+        try {
+            log("SSH terminal: opening shell channel")
+            channel = session.openChannel("shell") as ChannelShell
+            channel.setPty(true)
+            channel.setPtyType(TERMINAL_PTY_TYPE)
+
+            val inputStream = channel.inputStream
+            val outputStream = channel.outputStream
+            channel.connect(TERMINAL_CONNECT_TIMEOUT_MS)
+
+            SshTerminalSession(
+                channel = channel,
+                inputStream = inputStream,
+                outputStream = outputStream,
+                onOutput = onOutput,
+                onClosed = onClosed,
+            ).also { terminal ->
+                terminal.start()
+                log("SSH terminal connected")
+            }
+        } catch (error: Exception) {
+            channel?.disconnect()
+            val message = error.message ?: error::class.java.simpleName
+            log("SSH terminal failed: $message")
+            throw VpnConnectionException("SSH terminal failed: $message", error)
+        }
     }
 
     suspend fun checkTcpForward(
@@ -271,6 +310,8 @@ class SshConnectionManager {
     private companion object {
         const val CONNECT_TIMEOUT_MS = 20_000
         const val SERVER_ALIVE_COUNT_MAX = 3
+        const val TERMINAL_CONNECT_TIMEOUT_MS = 10_000
+        const val TERMINAL_PTY_TYPE = "xterm"
         const val TUNNEL_CHECK_TIMEOUT_MS = 10_000
         const val DEFAULT_TUNNEL_CHECK_HOST = "youtube.com"
         const val DEFAULT_TUNNEL_CHECK_PORT = 443

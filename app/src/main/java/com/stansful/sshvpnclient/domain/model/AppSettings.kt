@@ -3,9 +3,36 @@ package com.stansful.sshvpnclient.domain.model
 data class AppSettings(
     val showLogsOnMain: Boolean = false,
     val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
+    val customThemeColors: CustomThemeColors = CustomThemeColors.defaultLight(),
     val vpnMode: VpnMode = VpnMode.PROXY,
     val selectedAppPackages: Set<String> = emptySet(),
 )
+
+data class CustomThemeColors(
+    val primary: Int,
+    val secondary: Int,
+    val background: Int,
+    val surface: Int,
+    val surfaceVariant: Int,
+    val onSurface: Int,
+    val outline: Int,
+    val error: Int,
+) {
+    companion object {
+        fun defaultLight(): CustomThemeColors {
+            return CustomThemeColors(
+                primary = 0xFF007AFF.toInt(),
+                secondary = 0xFF26A69A.toInt(),
+                background = 0xFFFFFFFF.toInt(),
+                surface = 0xFFFFFFFF.toInt(),
+                surfaceVariant = 0xFFE8EDF3.toInt(),
+                onSurface = 0xFF101214.toInt(),
+                outline = 0xFFCBD3DC.toInt(),
+                error = 0xFFBA1A1A.toInt(),
+            )
+        }
+    }
+}
 
 enum class AppThemeMode(
     val storageValue: String,
@@ -13,11 +40,12 @@ enum class AppThemeMode(
 ) {
     SYSTEM("system", "System"),
     LIGHT("light", "Light"),
-    DARK("dark", "Dark");
+    DARK("dark", "Dark"),
+    CUSTOM("custom", "Custom");
 
     companion object {
         fun fromStorageValue(value: String?): AppThemeMode {
-            return values().firstOrNull { it.storageValue == value } ?: SYSTEM
+            return entries.firstOrNull { it.storageValue == value } ?: SYSTEM
         }
     }
 }
@@ -31,7 +59,7 @@ enum class VpnMode(
 
     companion object {
         fun fromStorageValue(value: String?): VpnMode {
-            return values().firstOrNull { it.storageValue == value } ?: PROXY
+            return entries.firstOrNull { it.storageValue == value } ?: PROXY
         }
     }
 }
