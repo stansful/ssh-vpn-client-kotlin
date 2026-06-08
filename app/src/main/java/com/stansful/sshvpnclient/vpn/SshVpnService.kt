@@ -211,7 +211,6 @@ class SshVpnService : android.net.VpnService() {
         ensureConnectionStillWanted(runId)
         connectionRepository.appendDiagnostic("Starting local TUN forwarding layer")
         appContainer.tun2SocksManager.start(
-            context = this@SshVpnService,
             vpnInterface = vpnInterface,
             sshSession = sshSession,
             enableUdpForwarding = config.enableUdpForwarding,
@@ -379,5 +378,5 @@ private fun VpnConnectionException.isRecoverableBeforeFirstConnection(): Boolean
     return value.contains("timeout", ignoreCase = true) ||
         value.contains("Host unreachable", ignoreCase = true) ||
         value.contains("Unknown connection error", ignoreCase = true) ||
-        value.contains("Could not start local SSH SOCKS bridge", ignoreCase = true)
+        value.contains("TUN forwarding", ignoreCase = true)
 }

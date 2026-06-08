@@ -36,8 +36,8 @@ Native Android MVP на Kotlin + Jetpack Compose для VPN-клиента, ко
 - SSH-подключение через password или private key.
 - Проверка fingerprint, если он указан.
 - KeepAlive interval для SSH-сессии.
-- Локальный TUN-to-SOCKS forwarding через native `hev-socks5-tunnel`.
-- Локальный SOCKS5 bridge поверх SSH `direct-tcpip` channels.
+- Локальный Kotlin TUN forwarding без стороннего native `tun2socks`.
+- TCP из TUN проксируется через SSH `direct-tcpip` channels.
 - DNS из VPN обрабатывается как DNS-over-TCP через SSH.
 - Диагностические логи подключения: по умолчанию свёрнуты, есть копирование в clipboard.
 - Автоматическое переподключение при обрыве SSH-сессии до явного Disconnect.
@@ -47,22 +47,21 @@ Native Android MVP на Kotlin + Jetpack Compose для VPN-клиента, ко
 
 - TCP-трафик из Android VPN идёт через SSH.
 - DNS-запросы из VPN идут через SSH как DNS-over-TCP к DNS-серверам из `VpnTunnelManager`.
-- Произвольный non-DNS UDP пока не проксируется через SSH и отбрасывается локальным SOCKS bridge.
+- Произвольный non-DNS UDP пока не проксируется через SSH и отбрасывается локальным forwarding layer.
 - `enableUdpForwarding` пока оставлен как experimental flag; текущая реализация явно пишет в diagnostics, что поддержаны TCP и DNS.
-- Если SSH-сессия обрывается, приложение закрывает текущие TUN/SOCKS/SSH ресурсы и переподключается с backoff от 2 до 30 секунд.
+- Если SSH-сессия обрывается, приложение закрывает текущие TUN/forwarding/SSH ресурсы и переподключается с backoff от 2 до 30 секунд.
 - Diagnostics не обрезаются по количеству строк в рамках текущего подключения и сбрасываются только при новом пользовательском Connect.
 
 Точки интеграции:
 
 - `app/src/main/java/com/stansful/sshvpnclient/vpn/Tun2SocksManager.kt`
-- `app/src/main/java/com/stansful/sshvpnclient/vpn/SshSocks5Server.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/KotlinTunForwarder.kt`
 - `app/src/main/java/com/stansful/sshvpnclient/vpn/VpnProtectedSocketFactory.kt`
 
-`hev-socks5-tunnel` подключён как локальный AAR:
-
-`app/libs/hevtunnel-1.0.1-kotlin19.aar`
-
-В AAR удалён Kotlin module metadata, потому что upstream `com.zaneschepke:hevtunnel:1.0.1` опубликован Kotlin 2.2, а проект сейчас использует Kotlin 1.9. Native `.so` и Java class bridge сохранены.
+Раньше TUN forwarding зависел от локального AAR `hevtunnel-1.0.1-kotlin19.aar`.
+Теперь эта зависимость удалена: приложение само читает IPv4-пакеты из Android `VpnService`,
+локально терминирует TCP-сессии приложений и открывает SSH `direct-tcpip` каналы до целевых адресов.
+DNS UDP/53 обрабатывается как DNS-over-TCP через SSH.
 
 ## Требования для локального запуска
 

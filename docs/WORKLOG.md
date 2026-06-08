@@ -32,12 +32,51 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Known Limits For This Pass
 
-- SSH-over-TUN forwarding now has a native tun2socks engine, but still requires platform/device testing for production confidence.
+- SSH-over-TUN forwarding now has an in-project Kotlin forwarding engine, but still requires platform/device testing for production confidence.
 - TCP and DNS are routed through SSH; arbitrary non-DNS UDP is still not proxied.
 - UDP forwarding is still represented as an experimental configuration flag.
 - Secrets must not be logged or stored in plain config/key records.
 
 ## Change Log
+
+### 2026-06-08 - Before Block 36
+
+Plan:
+
+- Remove the vendored `hevtunnel-1.0.1-kotlin19.aar` dependency.
+- Replace the reflective `hev-socks5-tunnel` launch path with an in-project Kotlin TUN forwarding engine.
+- Terminate app TCP connections from the Android VPN interface locally and proxy them through SSH `direct-tcpip` channels.
+- Handle DNS UDP port 53 through DNS-over-TCP over SSH.
+- Keep arbitrary non-DNS UDP unsupported and logged, matching the previous product limitation.
+- Update README to remove `hev-socks5-tunnel` setup notes.
+- Rebuild debug/release and rerun checks.
+
+Result:
+
+- Removed Gradle dependency on `app/libs/hevtunnel-1.0.1-kotlin19.aar`.
+- Deleted vendored `app/libs/hevtunnel-1.0.1-kotlin19.aar`.
+- Deleted the old unused `SshSocks5Server` bridge.
+- Replaced the reflective `TProxyService`/`hev-socks5-tunnel` manager path with `KotlinTunForwarder`.
+- `KotlinTunForwarder` now:
+  - reads IPv4 packets directly from the Android VPN interface;
+  - terminates app-side TCP sessions locally;
+  - opens SSH `direct-tcpip` channels to destination IP/port;
+  - relays TCP payloads between Android apps and the SSH channel;
+  - answers DNS UDP/53 by sending DNS-over-TCP requests through SSH;
+  - logs and drops arbitrary non-DNS UDP.
+- Updated reconnect recoverability wording away from the old SOCKS bridge message.
+- Updated README to document the in-project Kotlin forwarding layer.
+- Important limit: this is a new custom userspace forwarding engine and still needs physical-device testing with real browser/app traffic; it is not yet as battle-tested as a mature native `tun2socks` implementation.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/build-release.sh`: success.
+- Verified release APK signature with Android SDK `apksigner` and Android Studio JBR:
+  - v2 signature: true;
+  - signers: 1.
+- Verified `git diff --check`: success.
+- Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+- Updated signed release APK at `app/build/outputs/apk/release/app-release.apk`.
 
 ### 2026-06-07 - Before Block 35
 
