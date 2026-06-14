@@ -12,8 +12,9 @@ import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadFactory
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -26,7 +27,15 @@ internal class KotlinTunForwarder(
     private val running = AtomicBoolean(false)
     private val stoppedLatch = CountDownLatch(1)
     private val sessions = ConcurrentHashMap<TcpKey, TcpProxySession>()
-    private val executor = Executors.newCachedThreadPool(NamedThreadFactory(WORKER_THREAD_PREFIX))
+    private val diagnostics = ForwarderDiagnostics(log)
+    private val executor = ThreadPoolExecutor(
+        MIN_WORKER_THREADS,
+        MAX_WORKER_THREADS,
+        WORKER_KEEP_ALIVE_MS,
+        TimeUnit.MILLISECONDS,
+        SynchronousQueue(),
+        NamedThreadFactory(WORKER_THREAD_PREFIX),
+    ) { _, _ -> diagnostics.logWorkerRejected() }
     private val packetId = AtomicInteger(1)
     private val writeLock = Any()
 
@@ -90,7 +99,10 @@ internal class KotlinTunForwarder(
         while (running.get()) {
             val read = input.read(buffer)
             if (read < 0) break
-            if (read == 0) continue
+            if (read == 0) {
+                sleepAfterEmptyRead()
+                continue
+            }
             handleIpv4Packet(buffer, read)
         }
     }
@@ -128,7 +140,7 @@ internal class KotlinTunForwarder(
                     key = key,
                     sshSession = sshSession,
                     executor = executor,
-                    log = log,
+                    diagnostics = diagnostics,
                     packetSender = ::sendTcpPacket,
                     onClosed = sessions::remove,
                 )
@@ -205,7 +217,7 @@ internal class KotlinTunForwarder(
                 payload = response,
             )
         } catch (error: Exception) {
-            log("DNS over SSH failed: ${error.message ?: error::class.java.simpleName}")
+            diagnostics.logDnsFailure(error.message ?: error::class.java.simpleName)
         } finally {
             channel?.disconnect()
         }
@@ -318,7 +330,7 @@ internal class KotlinTunForwarder(
         private val key: TcpKey,
         private val sshSession: Session,
         private val executor: ExecutorService,
-        private val log: (String) -> Unit,
+        private val diagnostics: ForwarderDiagnostics,
         private val packetSender: TcpPacketSender,
         private val onClosed: (TcpKey) -> Unit,
     ) {
@@ -457,9 +469,9 @@ internal class KotlinTunForwarder(
 
         private fun connectRemote() {
             var nextChannel: ChannelDirectTCPIP? = null
+            val host = addressToString(key.remoteAddress)
             try {
-                val host = addressToString(key.remoteAddress)
-                log("TUN TCP: opening SSH direct TCP to $host:${key.remotePort}")
+                diagnostics.logTcpOpen(host, key.remotePort)
                 nextChannel = sshSession.openChannel("direct-tcpip") as ChannelDirectTCPIP
                 nextChannel.setHost(host)
                 nextChannel.setPort(key.remotePort)
@@ -484,9 +496,10 @@ internal class KotlinTunForwarder(
                     connecting = false
                 }
                 nextChannel?.disconnect()
-                log(
-                    "TUN TCP failed: ${addressToString(key.remoteAddress)}:${key.remotePort}: " +
-                        (error.message ?: error::class.java.simpleName),
+                diagnostics.logTcpFailure(
+                    host = host,
+                    port = key.remotePort,
+                    message = error.message ?: error::class.java.simpleName,
                 )
                 sendResetAndClose()
             }
@@ -527,7 +540,7 @@ internal class KotlinTunForwarder(
                     output.write(nextPayload)
                     output.flush()
                 } catch (error: Exception) {
-                    log("TUN TCP write failed: ${error.message ?: error::class.java.simpleName}")
+                    diagnostics.logTcpWriteFailure(error.message ?: error::class.java.simpleName)
                     sendResetAndClose()
                     return
                 }
@@ -540,7 +553,10 @@ internal class KotlinTunForwarder(
                 while (true) {
                     val read = input.read(buffer)
                     if (read < 0) break
-                    if (read == 0) continue
+                    if (read == 0) {
+                        sleepAfterEmptyRead()
+                        continue
+                    }
                     var offset = 0
                     while (offset < read) {
                         val chunkSize = minOf(MAX_TCP_PAYLOAD_SIZE, read - offset)
@@ -621,6 +637,67 @@ internal class KotlinTunForwarder(
                 flags,
                 payload,
             )
+        }
+    }
+
+    private class ForwarderDiagnostics(
+        private val log: (String) -> Unit,
+    ) {
+        private val tcpOpenCount = AtomicInteger(0)
+        private val tcpFailureCount = AtomicInteger(0)
+        private val tcpWriteFailureCount = AtomicInteger(0)
+        private val dnsFailureCount = AtomicInteger(0)
+        private val workerRejectedCount = AtomicInteger(0)
+
+        fun logTcpOpen(host: String, port: Int) {
+            logLimited(
+                counter = tcpOpenCount,
+                message = "TUN TCP: opening SSH direct TCP to $host:$port",
+                suppressedMessage = "TUN TCP: further per-connection open logs suppressed",
+            )
+        }
+
+        fun logTcpFailure(host: String, port: Int, message: String) {
+            logLimited(
+                counter = tcpFailureCount,
+                message = "TUN TCP failed: $host:$port: $message",
+                suppressedMessage = "TUN TCP: further per-connection failure logs suppressed",
+            )
+        }
+
+        fun logTcpWriteFailure(message: String) {
+            logLimited(
+                counter = tcpWriteFailureCount,
+                message = "TUN TCP write failed: $message",
+                suppressedMessage = "TUN TCP: further write failure logs suppressed",
+            )
+        }
+
+        fun logDnsFailure(message: String) {
+            logLimited(
+                counter = dnsFailureCount,
+                message = "DNS over SSH failed: $message",
+                suppressedMessage = "DNS over SSH: further failure logs suppressed",
+            )
+        }
+
+        fun logWorkerRejected() {
+            logLimited(
+                counter = workerRejectedCount,
+                message = "Kotlin TUN forwarding worker pool is saturated; dropping background task",
+                suppressedMessage = "Kotlin TUN forwarding worker saturation logs suppressed",
+            )
+        }
+
+        private fun logLimited(
+            counter: AtomicInteger,
+            message: String,
+            suppressedMessage: String,
+        ) {
+            when (counter.incrementAndGet()) {
+                in 1..MAX_DETAILED_FORWARDER_LOGS -> log(message)
+                MAX_DETAILED_FORWARDER_LOGS + 1 -> log(suppressedMessage)
+            }
         }
     }
 
@@ -880,6 +957,10 @@ internal class KotlinTunForwarder(
     private companion object {
         const val READ_THREAD_NAME = "kotlin-tun-forwarder"
         const val WORKER_THREAD_PREFIX = "kotlin-tun-worker"
+        const val MIN_WORKER_THREADS = 0
+        const val MAX_WORKER_THREADS = 64
+        const val WORKER_KEEP_ALIVE_MS = 15_000L
+        const val MAX_DETAILED_FORWARDER_LOGS = 5
         const val TUN_BUFFER_SIZE = 32 * 1024
         const val REMOTE_READ_BUFFER_SIZE = 16 * 1024
         const val MAX_TCP_PAYLOAD_SIZE = 1_320
@@ -906,6 +987,12 @@ internal class KotlinTunForwarder(
         const val UINT_MASK = 0xFFFF_FFFFL
         val TCP_SYN_OPTIONS = byteArrayOf(2, 4, ((TCP_MSS ushr 8) and 0xFF).toByte(), (TCP_MSS and 0xFF).toByte())
         val EMPTY_BYTES = ByteArray(0)
+    }
+}
+
+private fun sleepAfterEmptyRead() {
+    runCatching {
+        Thread.sleep(EMPTY_READ_BACKOFF_MS)
     }
 }
 
@@ -951,3 +1038,5 @@ private fun readFully(input: InputStream, buffer: ByteArray) {
         offset += read
     }
 }
+
+private const val EMPTY_READ_BACKOFF_MS = 5L

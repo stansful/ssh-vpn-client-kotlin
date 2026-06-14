@@ -1,6 +1,7 @@
 package com.stansful.sshvpnclient.data.local
 
 import android.content.Context
+import android.os.SystemClock
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
@@ -19,18 +20,22 @@ class InMemoryVpnConnectionRepository(
         PREFERENCES_NAME,
         Context.MODE_PRIVATE,
     )
+    private val diagnosticsLock = Any()
     private val mutableState = MutableStateFlow(
         VpnConnectionState(diagnostics = readDiagnostics()),
     )
+    private var lastDiagnosticsPersistElapsedMs = 0L
 
     override val state: Flow<VpnConnectionState> = mutableState.asStateFlow()
 
     override fun setConnecting(configId: String?) {
-        persistDiagnostics(emptyList())
-        mutableState.value = VpnConnectionState(
-            status = VpnConnectionStatus.CONNECTING,
-            activeConfigId = configId,
-        )
+        synchronized(diagnosticsLock) {
+            persistDiagnosticsNow(emptyList())
+            mutableState.value = VpnConnectionState(
+                status = VpnConnectionStatus.CONNECTING,
+                activeConfigId = configId,
+            )
+        }
     }
 
     override fun setConnected(configId: String) {
@@ -58,33 +63,45 @@ class InMemoryVpnConnectionRepository(
     }
 
     override fun setDisconnected() {
-        mutableState.value = mutableState.value.copy(
-            status = VpnConnectionStatus.DISCONNECTED,
-            activeConfigId = null,
-            errorMessage = null,
-        )
+        synchronized(diagnosticsLock) {
+            val nextState = mutableState.value.copy(
+                status = VpnConnectionStatus.DISCONNECTED,
+                activeConfigId = null,
+                errorMessage = null,
+            )
+            mutableState.value = nextState
+            persistDiagnosticsNow(nextState.diagnostics)
+        }
     }
 
     override fun setError(configId: String?, message: String) {
-        mutableState.value = mutableState.value.copy(
-            status = VpnConnectionStatus.ERROR,
-            activeConfigId = configId,
-            errorMessage = message,
-        )
+        synchronized(diagnosticsLock) {
+            val nextState = mutableState.value.copy(
+                status = VpnConnectionStatus.ERROR,
+                activeConfigId = configId,
+                errorMessage = message,
+            )
+            mutableState.value = nextState
+            persistDiagnosticsNow(nextState.diagnostics)
+        }
     }
 
     override fun appendDiagnostic(message: String) {
         val line = "${formattedCurrentTime()} $message"
-        val diagnostics = mutableState.value.diagnostics + line
-        persistDiagnostics(diagnostics)
-        mutableState.value = mutableState.value.copy(
-            diagnostics = diagnostics,
-        )
+        synchronized(diagnosticsLock) {
+            val diagnostics = mutableState.value.diagnostics + line
+            mutableState.value = mutableState.value.copy(
+                diagnostics = diagnostics,
+            )
+            persistDiagnosticsIfDue(diagnostics)
+        }
     }
 
     override fun clearDiagnostics() {
-        persistDiagnostics(emptyList())
-        mutableState.value = mutableState.value.copy(diagnostics = emptyList())
+        synchronized(diagnosticsLock) {
+            persistDiagnosticsNow(emptyList())
+            mutableState.value = mutableState.value.copy(diagnostics = emptyList())
+        }
     }
 
     private fun readDiagnostics(): List<String> {
@@ -115,9 +132,21 @@ class InMemoryVpnConnectionRepository(
             .apply()
     }
 
+    private fun persistDiagnosticsIfDue(diagnostics: List<String>) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastDiagnosticsPersistElapsedMs < DIAGNOSTICS_PERSIST_INTERVAL_MS) return
+        persistDiagnosticsNow(diagnostics)
+    }
+
+    private fun persistDiagnosticsNow(diagnostics: List<String>) {
+        persistDiagnostics(diagnostics)
+        lastDiagnosticsPersistElapsedMs = SystemClock.elapsedRealtime()
+    }
+
     private companion object {
         const val PREFERENCES_NAME = "ssh-vpn-connection-state"
         const val KEY_DIAGNOSTICS = "diagnostics"
+        const val DIAGNOSTICS_PERSIST_INTERVAL_MS = 5_000L
         val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
     }
 }

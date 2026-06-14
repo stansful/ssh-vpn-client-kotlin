@@ -39,6 +39,46 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-15 - Before Block 44
+
+Plan:
+
+- Investigate heavy battery usage and device heating from the VPN service.
+- Reduce high-frequency diagnostics churn from TUN forwarding.
+- Avoid persisting the full diagnostics JSON on every log append.
+- Bound forwarding worker threads and reduce periodic monitor wakeups.
+- Rebuild debug/release and verify release APK signature.
+
+Result:
+
+- Reduced diagnostics disk churn:
+  - diagnostics are still visible immediately in memory;
+  - SharedPreferences persistence is throttled to at most once every 5 seconds;
+  - disconnect/error/clear still force a final persist.
+- Reduced high-frequency TUN diagnostics:
+  - per-connection TCP open/failure/write-failure logs are now limited to the first 5 events per connection run;
+  - DNS failure logs are limited the same way;
+  - suppression messages are logged once when detail logging is capped.
+- Bounded forwarding worker threads:
+  - replaced unbounded cached pool with capped `ThreadPoolExecutor`;
+  - worker saturation is logged in a limited way instead of allowing unbounded thread growth.
+- Added empty-read backoff in TUN and SSH channel read loops to prevent tight CPU loops if a stream returns `0`.
+- Reduced service connection monitor wakeup interval from 5 seconds to 15 seconds. SSH keepalive still remains configured by the user config.
+
+Verification:
+
+- `./scripts/build-debug.sh`: success.
+- `env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home ./gradlew lintDebug testDebugUnitTest`: success.
+- `./scripts/build-release.sh`: success.
+- `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, v2 signed, 1 signer.
+- Final APK sizes:
+  - debug: `build/app/outputs/apk/debug/app-debug.apk` - 23M;
+  - release: `build/app/outputs/apk/release/app-release.apk` - 3.7M.
+
+Follow-up:
+
+- Needs real-device battery validation over at least 1-2 hours of the same selected-apps workload, because VPN radio usage still depends on traffic volume and network quality.
+
 ### 2026-06-08 - Before Block 43
 
 Plan:

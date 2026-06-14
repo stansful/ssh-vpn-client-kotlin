@@ -354,7 +354,7 @@ class SshVpnService : android.net.VpnService() {
             "com.stansful.sshvpnclient.extra.PRESERVE_DIAGNOSTICS"
         private const val CHANNEL_ID = "ssh_vpn_connection"
         private const val NOTIFICATION_ID = 3001
-        private const val CONNECTION_MONITOR_INTERVAL_MS = 5_000L
+        private const val CONNECTION_MONITOR_INTERVAL_MS = 15_000L
         private const val INITIAL_RECONNECT_DELAY_MS = 2_000L
         private const val MAX_RECONNECT_DELAY_MS = 30_000L
 
