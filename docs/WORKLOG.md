@@ -39,6 +39,109 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-15 - Before Block 47
+
+Plan:
+
+- Diagnose the remaining `remote-read worker pool is saturated` log after client-FIN cleanup.
+- Add idle session cleanup for silent browser/Google keep-alive TCP channels that never send FIN.
+- Track TCP session activity on ACK, payload, remote reads, and writes so active live traffic remains open.
+- Rebuild debug/release and rerun lint/unit checks.
+
+Result:
+
+- Diagnosed the new log:
+  - there were still no stale client-finished cleanup diagnostics;
+  - `remote-read` saturation therefore likely came from idle keep-alive TCP channels that stayed open without FIN.
+- Added per-session idle cleanup:
+  - each TCP proxy session tracks last activity using Android elapsed realtime;
+  - activity is refreshed on SYN, ACK/window updates, client payload, client FIN, SSH channel connect, remote reads, and client writes;
+  - idle non-closed sessions are reset and closed after 20 seconds of silence;
+  - active live/streaming flows remain open because remote reads and ACKs refresh the activity timestamp.
+- Added limited diagnostics:
+  - `TUN TCP closed idle session after ...`;
+  - remote-read saturation failure now includes `activeSessions=...` for follow-up debugging.
+
+Verification:
+
+- `./scripts/build-debug.sh`: success.
+- `env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home ./gradlew lintDebug testDebugUnitTest`: success.
+- `./scripts/build-release.sh`: success.
+- `env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home /Users/stansful/Library/Android/sdk/build-tools/37.0.0/apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, v2 signed, 1 signer.
+- `git diff --check`: success.
+- APK outputs:
+  - debug: `build/app/outputs/apk/debug/app-debug.apk` - 23M;
+  - release: `build/app/outputs/apk/release/app-release.apk` - 3.7M.
+
+### 2026-06-15 - Before Block 46
+
+Plan:
+
+- Diagnose the new log where the forwarding layer reaches `remote-read worker pool is saturated`.
+- Fix TCP session lifecycle so client-closed browser connections release SSH direct TCP reader threads.
+- Preserve the split control/read executor design from Block 45.
+- Rebuild debug/release and rerun lint/unit checks.
+
+Result:
+
+- Diagnosed the new log:
+  - SSH transport and VPN interface were healthy;
+  - the remaining stall came from `remote-read worker pool is saturated`;
+  - this points to stale SSH direct TCP reader tasks staying alive after browser-side TCP FIN.
+- Fixed TCP session lifecycle:
+  - client FIN now marks the session as client-finished;
+  - pending client writes are cleared after FIN;
+  - the SSH channel output stream is closed to send JSch `channel.eof()` without disconnecting the channel;
+  - if the remote side does not finish after client FIN, a scheduled cleanup closes that stale session after 10 seconds;
+  - added limited diagnostics for stale client-finished session cleanup.
+- Verified JSch source behavior locally: `Channel.getOutputStream().close()` sends `channel.eof()` rather than disconnecting the full channel.
+
+Verification:
+
+- `./scripts/build-debug.sh`: success.
+- `env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home ./gradlew lintDebug testDebugUnitTest`: success.
+- `./scripts/build-release.sh`: success.
+- `env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home /Users/stansful/Library/Android/sdk/build-tools/37.0.0/apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, v2 signed, 1 signer.
+- `git diff --check`: success.
+- APK outputs:
+  - debug: `build/app/outputs/apk/debug/app-debug.apk` - 23M;
+  - release: `build/app/outputs/apk/release/app-release.apk` - 3.7M.
+
+### 2026-06-15 - Before Block 45
+
+Plan:
+
+- Diagnose the browsing hang reported after Google search results open one or two sites.
+- Use the attached diagnostics to identify whether SSH, DNS, TCP forwarding, or worker scheduling stalls.
+- Fix the Kotlin TUN forwarder so browser connection bursts do not block the TUN read loop.
+- Keep the Twitch live-stream TCP-window fix intact.
+- Rebuild debug/release and run lint/unit checks.
+
+Result:
+
+- Diagnosed the attached log:
+  - SSH transport and Android VPN setup succeeded;
+  - browser traffic opened multiple TCP channels through the Kotlin TUN forwarder;
+  - the hang coincided with `Kotlin TUN forwarding worker pool is saturated` diagnostics.
+- Reworked `KotlinTunForwarder` scheduling:
+  - removed the shared worker pool with caller-thread fallback;
+  - added a queued control pool for DNS, SSH channel connect, and client-write tasks;
+  - added a separate remote-read pool for long-lived SSH direct TCP readers;
+  - moved delayed FIN cleanup to a scheduled cleanup executor instead of sleeping inside forwarding workers;
+  - if a pool is genuinely saturated, only the affected flow is reset/rejected instead of blocking the TUN read loop.
+- Kept the existing Twitch live-stream TCP receive-window behavior unchanged.
+
+Verification:
+
+- `./scripts/build-debug.sh`: success.
+- `env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home ./gradlew lintDebug testDebugUnitTest`: success.
+- `./scripts/build-release.sh`: success.
+- `env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home /Users/stansful/Library/Android/sdk/build-tools/37.0.0/apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, v2 signed, 1 signer.
+- `git diff --check`: success.
+- APK outputs:
+  - debug: `build/app/outputs/apk/debug/app-debug.apk` - 23M;
+  - release: `build/app/outputs/apk/release/app-release.apk` - 3.7M.
+
 ### 2026-06-15 - Before Block 44
 
 Plan:

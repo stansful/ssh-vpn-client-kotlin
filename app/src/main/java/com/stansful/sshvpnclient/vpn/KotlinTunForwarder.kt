@@ -1,6 +1,7 @@
 package com.stansful.sshvpnclient.vpn
 
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import com.jcraft.jsch.ChannelDirectTCPIP
 import com.jcraft.jsch.Session
 import java.io.EOFException
@@ -11,7 +12,9 @@ import java.io.OutputStream
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.ExecutorService
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
@@ -30,19 +33,7 @@ internal class KotlinTunForwarder(
     private val stoppedLatch = CountDownLatch(1)
     private val sessions = ConcurrentHashMap<TcpKey, TcpProxySession>()
     private val diagnostics = ForwarderDiagnostics(log)
-    private val executor = ThreadPoolExecutor(
-        MIN_WORKER_THREADS,
-        MAX_WORKER_THREADS,
-        WORKER_KEEP_ALIVE_MS,
-        TimeUnit.MILLISECONDS,
-        SynchronousQueue(),
-        NamedThreadFactory(WORKER_THREAD_PREFIX),
-    ) { runnable, executor ->
-        diagnostics.logWorkerRejected()
-        if (!executor.isShutdown) {
-            runnable.run()
-        }
-    }
+    private val executors = ForwarderExecutors(diagnostics)
     private val packetId = AtomicInteger(1)
     private val writeLock = Any()
 
@@ -74,7 +65,7 @@ internal class KotlinTunForwarder(
                 } finally {
                     running.set(false)
                     closeSessions()
-                    executor.shutdownNow()
+                    executors.shutdownNow()
                     runCatching { input.close() }
                     runCatching { output?.close() }
                     stoppedLatch.countDown()
@@ -94,7 +85,7 @@ internal class KotlinTunForwarder(
         if (!running.getAndSet(false)) return
         closeSessions()
         runCatching { vpnInterface.close() }
-        executor.shutdownNow()
+        executors.shutdownNow()
     }
 
     fun awaitStopped(timeoutMs: Long) {
@@ -146,9 +137,10 @@ internal class KotlinTunForwarder(
                 TcpProxySession(
                     key = key,
                     sshSession = sshSession,
-                    executor = executor,
+                    executors = executors,
                     diagnostics = diagnostics,
                     packetSender = ::sendTcpPacket,
+                    activeSessionCount = sessions::size,
                     onClosed = sessions::remove,
                 )
             }.also { it.onSyn(tcp.sequence) }
@@ -186,13 +178,16 @@ internal class KotlinTunForwarder(
             return
         }
         val payload = buffer.copyOfRange(udp.payloadOffset, udp.payloadOffset + udp.payloadLength)
-        executor.execute {
+        val scheduled = executors.executeControl {
             forwardDnsQuery(
                 query = payload,
                 clientAddress = packet.source,
                 clientPort = udp.sourcePort,
                 dnsServerAddress = packet.destination,
             )
+        }
+        if (!scheduled) {
+            diagnostics.logDnsFailure("forwarder control queue is saturated")
         }
     }
 
@@ -361,12 +356,83 @@ internal class KotlinTunForwarder(
         sessions.clear()
     }
 
+    private class ForwarderExecutors(
+        private val diagnostics: ForwarderDiagnostics,
+    ) {
+        private val controlExecutor = ThreadPoolExecutor(
+            CONTROL_WORKER_THREADS,
+            CONTROL_WORKER_THREADS,
+            WORKER_KEEP_ALIVE_MS,
+            TimeUnit.MILLISECONDS,
+            LinkedBlockingQueue(MAX_CONTROL_QUEUE_SIZE),
+            NamedThreadFactory(CONTROL_THREAD_PREFIX),
+            ThreadPoolExecutor.AbortPolicy(),
+        )
+        private val remoteReadExecutor = ThreadPoolExecutor(
+            MIN_REMOTE_READ_THREADS,
+            MAX_REMOTE_READ_THREADS,
+            WORKER_KEEP_ALIVE_MS,
+            TimeUnit.MILLISECONDS,
+            SynchronousQueue(),
+            NamedThreadFactory(REMOTE_READ_THREAD_PREFIX),
+            ThreadPoolExecutor.AbortPolicy(),
+        )
+        private val cleanupExecutor = ScheduledThreadPoolExecutor(
+            CLEANUP_WORKER_THREADS,
+            NamedThreadFactory(CLEANUP_THREAD_PREFIX),
+        ).apply {
+            removeOnCancelPolicy = true
+        }
+
+        fun executeControl(task: () -> Unit): Boolean {
+            return execute(CONTROL_POOL_NAME, controlExecutor, task)
+        }
+
+        fun executeRemoteRead(task: () -> Unit): Boolean {
+            return execute(REMOTE_READ_POOL_NAME, remoteReadExecutor, task)
+        }
+
+        fun scheduleCleanup(
+            delayMs: Long,
+            task: () -> Unit,
+        ): Boolean {
+            return try {
+                cleanupExecutor.schedule({ task() }, delayMs, TimeUnit.MILLISECONDS)
+                true
+            } catch (_: RejectedExecutionException) {
+                diagnostics.logWorkerRejected(CLEANUP_POOL_NAME)
+                false
+            }
+        }
+
+        fun shutdownNow() {
+            controlExecutor.shutdownNow()
+            remoteReadExecutor.shutdownNow()
+            cleanupExecutor.shutdownNow()
+        }
+
+        private fun execute(
+            poolName: String,
+            executor: ThreadPoolExecutor,
+            task: () -> Unit,
+        ): Boolean {
+            return try {
+                executor.execute { task() }
+                true
+            } catch (_: RejectedExecutionException) {
+                diagnostics.logWorkerRejected(poolName)
+                false
+            }
+        }
+    }
+
     private class TcpProxySession(
         private val key: TcpKey,
         private val sshSession: Session,
-        private val executor: ExecutorService,
+        private val executors: ForwarderExecutors,
         private val diagnostics: ForwarderDiagnostics,
         private val packetSender: TcpPacketSender,
+        private val activeSessionCount: () -> Int,
         private val onClosed: (TcpKey) -> Unit,
     ) {
         private val lock = ReentrantLock()
@@ -380,10 +446,20 @@ internal class KotlinTunForwarder(
         private var clientWindow = DEFAULT_TCP_WINDOW
         private var connecting = false
         private var writeScheduled = false
+        private var clientFinReceived = false
+        private var clientFinCleanupScheduled = false
         private var channel: ChannelDirectTCPIP? = null
         private var remoteOutput: OutputStream? = null
 
+        @Volatile
+        private var lastActivityAtMs = elapsedRealtimeMs()
+
+        init {
+            scheduleIdleCleanup(TCP_IDLE_SESSION_TTL_MS)
+        }
+
         fun onSyn(clientSequence: Long) {
+            markActivity()
             val responseSequence: Long
             val responseAcknowledgement: Long
             lock.withLock {
@@ -405,6 +481,7 @@ internal class KotlinTunForwarder(
             acknowledgement: Long,
             window: Int,
         ) {
+            markActivity()
             var shouldConnect = false
             var shouldClose = false
             lock.withLock {
@@ -430,12 +507,13 @@ internal class KotlinTunForwarder(
             sequence: Long,
             payload: ByteArray,
         ) {
+            markActivity()
             var shouldConnect = false
             var shouldScheduleWrite = false
             var acknowledgement: Long
             var responseSequence: Long
             lock.withLock {
-                if (state == TcpState.CLOSED || state == TcpState.REMOTE_FIN_SENT) return
+                if (state == TcpState.CLOSED || state == TcpState.REMOTE_FIN_SENT || clientFinReceived) return
                 if (state == TcpState.SYN_RECEIVED) {
                     state = TcpState.ESTABLISHED
                     shouldConnect = true
@@ -462,21 +540,34 @@ internal class KotlinTunForwarder(
         }
 
         fun onClientFin(finSequence: Long) {
+            markActivity()
             val responseSequence: Long
             val responseAcknowledgement: Long
+            val remoteOutputToClose: OutputStream?
+            val shouldScheduleClientFinCleanup: Boolean
             val shouldClose: Boolean
             lock.withLock {
                 if (state == TcpState.CLOSED) return
                 if (finSequence == clientNextSequence) {
                     clientNextSequence = seqPlus(clientNextSequence, 1)
                 }
+                remoteOutputToClose = if (!clientFinReceived) remoteOutput else null
+                if (!clientFinReceived) {
+                    clientFinReceived = true
+                    pendingClientWrites.clear()
+                    remoteOutput = null
+                }
                 responseSequence = serverNextSequence
                 responseAcknowledgement = clientNextSequence
                 shouldClose = state == TcpState.REMOTE_FIN_SENT
+                shouldScheduleClientFinCleanup = clientFinReceived && !shouldClose
             }
             sendTcp(responseSequence, responseAcknowledgement, TCP_ACK, EMPTY_BYTES)
+            runCatching { remoteOutputToClose?.close() }
             if (shouldClose) {
                 close()
+            } else if (shouldScheduleClientFinCleanup) {
+                scheduleClientFinCleanup()
             }
         }
 
@@ -504,7 +595,13 @@ internal class KotlinTunForwarder(
                 }
             }
             if (shouldStart) {
-                executor.execute { connectRemote() }
+                val scheduled = executors.executeControl { connectRemote() }
+                if (!scheduled) {
+                    lock.withLock {
+                        connecting = false
+                    }
+                    sendResetAndClose()
+                }
             }
         }
 
@@ -521,17 +618,33 @@ internal class KotlinTunForwarder(
                 val input = nextChannel.inputStream
                 val output = nextChannel.outputStream
                 nextChannel.connect(SSH_CHANNEL_CONNECT_TIMEOUT_MS)
+                markActivity()
+                val closeRemoteOutput: Boolean
                 lock.withLock {
                     if (state == TcpState.CLOSED) {
                         nextChannel.disconnect()
                         return
                     }
                     channel = nextChannel
-                    remoteOutput = output
+                    closeRemoteOutput = clientFinReceived
+                    remoteOutput = if (clientFinReceived) null else output
                     connecting = false
                     sendWindowChanged.signalAll()
                 }
-                executor.execute { readRemote(input) }
+                if (closeRemoteOutput) {
+                    runCatching { output.close() }
+                    scheduleClientFinCleanup()
+                }
+                val readScheduled = executors.executeRemoteRead { readRemote(input) }
+                if (!readScheduled) {
+                    diagnostics.logTcpFailure(
+                        host = host,
+                        port = key.remotePort,
+                        message = "remote read worker pool is saturated; activeSessions=${activeSessionCount()}",
+                    )
+                    sendResetAndClose()
+                    return
+                }
                 scheduleClientFlush()
             } catch (error: Exception) {
                 lock.withLock {
@@ -556,7 +669,13 @@ internal class KotlinTunForwarder(
                 }
             }
             if (shouldSchedule) {
-                executor.execute { flushClientWrites() }
+                val scheduled = executors.executeControl { flushClientWrites() }
+                if (!scheduled) {
+                    lock.withLock {
+                        writeScheduled = false
+                    }
+                    sendResetAndClose()
+                }
             }
         }
 
@@ -581,6 +700,7 @@ internal class KotlinTunForwarder(
                 try {
                     output.write(nextPayload)
                     output.flush()
+                    markActivity()
                 } catch (error: Exception) {
                     diagnostics.logTcpWriteFailure(error.message ?: error::class.java.simpleName)
                     sendResetAndClose()
@@ -599,6 +719,7 @@ internal class KotlinTunForwarder(
                         sleepAfterEmptyRead()
                         continue
                     }
+                    markActivity()
                     var offset = 0
                     while (offset < read) {
                         val chunkSize = minOf(MAX_TCP_PAYLOAD_SIZE, read - offset)
@@ -611,6 +732,60 @@ internal class KotlinTunForwarder(
             } catch (_: Exception) {
                 sendResetAndClose()
             }
+        }
+
+        private fun scheduleClientFinCleanup() {
+            var shouldSchedule = false
+            lock.withLock {
+                if (!clientFinCleanupScheduled && state != TcpState.CLOSED && state != TcpState.REMOTE_FIN_SENT) {
+                    clientFinCleanupScheduled = true
+                    shouldSchedule = true
+                }
+            }
+            if (!shouldSchedule) return
+
+            val scheduled = executors.scheduleCleanup(CLIENT_FIN_SESSION_TTL_MS) {
+                val shouldClose: Boolean
+                lock.withLock {
+                    shouldClose = state != TcpState.CLOSED && state != TcpState.REMOTE_FIN_SENT && clientFinReceived
+                }
+                if (shouldClose) {
+                    diagnostics.logClientFinTimeout(addressToString(key.remoteAddress), key.remotePort)
+                    sendResetAndClose()
+                }
+            }
+            if (!scheduled) {
+                close()
+            }
+        }
+
+        private fun scheduleIdleCleanup(delayMs: Long) {
+            val scheduled = executors.scheduleCleanup(delayMs.coerceAtLeast(TCP_IDLE_SESSION_MIN_CHECK_MS)) {
+                cleanupIdleSession()
+            }
+            if (!scheduled) {
+                close()
+            }
+        }
+
+        private fun cleanupIdleSession() {
+            val idleForMs = elapsedRealtimeMs() - lastActivityAtMs
+            if (idleForMs < TCP_IDLE_SESSION_TTL_MS) {
+                scheduleIdleCleanup(TCP_IDLE_SESSION_TTL_MS - idleForMs)
+                return
+            }
+
+            val shouldClose = lock.withLock {
+                state != TcpState.CLOSED && state != TcpState.REMOTE_FIN_SENT
+            }
+            if (shouldClose) {
+                diagnostics.logIdleTimeout(addressToString(key.remoteAddress), key.remotePort, idleForMs)
+                sendResetAndClose()
+            }
+        }
+
+        private fun markActivity() {
+            lastActivityAtMs = elapsedRealtimeMs()
         }
 
         private fun sendRemoteData(payload: ByteArray): Boolean {
@@ -661,12 +836,13 @@ internal class KotlinTunForwarder(
             }
             activeChannel?.disconnect()
             sendTcp(sequence, acknowledgement, TCP_FIN or TCP_ACK, EMPTY_BYTES)
-            executor.execute {
-                runCatching { Thread.sleep(REMOTE_FIN_SESSION_TTL_MS) }
-                    .onFailure { return@execute }
+            val scheduled = executors.scheduleCleanup(REMOTE_FIN_SESSION_TTL_MS) {
                 lock.withLock {
-                    if (state != TcpState.REMOTE_FIN_SENT) return@execute
+                    if (state != TcpState.REMOTE_FIN_SENT) return@scheduleCleanup
                 }
+                close()
+            }
+            if (!scheduled) {
                 close()
             }
         }
@@ -723,6 +899,8 @@ internal class KotlinTunForwarder(
         private val tcpOpenCount = AtomicInteger(0)
         private val tcpFailureCount = AtomicInteger(0)
         private val tcpWriteFailureCount = AtomicInteger(0)
+        private val tcpClientFinTimeoutCount = AtomicInteger(0)
+        private val tcpIdleTimeoutCount = AtomicInteger(0)
         private val dnsFailureCount = AtomicInteger(0)
         private val workerRejectedCount = AtomicInteger(0)
 
@@ -750,6 +928,22 @@ internal class KotlinTunForwarder(
             )
         }
 
+        fun logClientFinTimeout(host: String, port: Int) {
+            logLimited(
+                counter = tcpClientFinTimeoutCount,
+                message = "TUN TCP closed stale client-finished session: $host:$port",
+                suppressedMessage = "TUN TCP: further stale client-finished session logs suppressed",
+            )
+        }
+
+        fun logIdleTimeout(host: String, port: Int, idleForMs: Long) {
+            logLimited(
+                counter = tcpIdleTimeoutCount,
+                message = "TUN TCP closed idle session after ${idleForMs / 1_000}s: $host:$port",
+                suppressedMessage = "TUN TCP: further idle session cleanup logs suppressed",
+            )
+        }
+
         fun logDnsFailure(message: String) {
             logLimited(
                 counter = dnsFailureCount,
@@ -758,10 +952,10 @@ internal class KotlinTunForwarder(
             )
         }
 
-        fun logWorkerRejected() {
+        fun logWorkerRejected(poolName: String) {
             logLimited(
                 counter = workerRejectedCount,
-                message = "Kotlin TUN forwarding worker pool is saturated; dropping background task",
+                message = "Kotlin TUN forwarding $poolName worker pool is saturated; rejecting background task",
                 suppressedMessage = "Kotlin TUN forwarding worker saturation logs suppressed",
             )
         }
@@ -1046,9 +1240,17 @@ internal class KotlinTunForwarder(
 
     private companion object {
         const val READ_THREAD_NAME = "kotlin-tun-forwarder"
-        const val WORKER_THREAD_PREFIX = "kotlin-tun-worker"
-        const val MIN_WORKER_THREADS = 0
-        const val MAX_WORKER_THREADS = 64
+        const val CONTROL_THREAD_PREFIX = "kotlin-tun-control"
+        const val REMOTE_READ_THREAD_PREFIX = "kotlin-tun-read"
+        const val CLEANUP_THREAD_PREFIX = "kotlin-tun-cleanup"
+        const val CONTROL_POOL_NAME = "control"
+        const val REMOTE_READ_POOL_NAME = "remote-read"
+        const val CLEANUP_POOL_NAME = "cleanup"
+        const val CONTROL_WORKER_THREADS = 8
+        const val MAX_CONTROL_QUEUE_SIZE = 1_024
+        const val MIN_REMOTE_READ_THREADS = 0
+        const val MAX_REMOTE_READ_THREADS = 128
+        const val CLEANUP_WORKER_THREADS = 1
         const val WORKER_KEEP_ALIVE_MS = 15_000L
         const val MAX_DETAILED_FORWARDER_LOGS = 5
         const val TUN_BUFFER_SIZE = 32 * 1024
@@ -1059,6 +1261,9 @@ internal class KotlinTunForwarder(
         const val DNS_TCP_LENGTH_SIZE = 2
         const val DNS_MAX_RESPONSE_SIZE = 4_096
         const val REMOTE_FIN_SESSION_TTL_MS = 30_000L
+        const val CLIENT_FIN_SESSION_TTL_MS = 10_000L
+        const val TCP_IDLE_SESSION_TTL_MS = 20_000L
+        const val TCP_IDLE_SESSION_MIN_CHECK_MS = 1_000L
         const val IPV4_VERSION = 4
         const val IPV4_MIN_HEADER_SIZE = 20
         const val IPV4_DONT_FRAGMENT = 0x4000
@@ -1091,6 +1296,8 @@ private fun sleepAfterEmptyRead() {
         Thread.sleep(EMPTY_READ_BACKOFF_MS)
     }
 }
+
+private fun elapsedRealtimeMs(): Long = SystemClock.elapsedRealtime()
 
 private typealias TcpPacketSender = (
     sourceAddress: Int,
