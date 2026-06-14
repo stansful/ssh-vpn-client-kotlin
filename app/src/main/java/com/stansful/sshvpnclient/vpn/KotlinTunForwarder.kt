@@ -79,6 +79,7 @@ internal class KotlinTunForwarder(
             isDaemon = true
             start()
         }
+        scheduleSessionMaintenance()
     }
 
     fun stop() {
@@ -90,6 +91,42 @@ internal class KotlinTunForwarder(
 
     fun awaitStopped(timeoutMs: Long) {
         stoppedLatch.await(timeoutMs, TimeUnit.MILLISECONDS)
+    }
+
+    private fun scheduleSessionMaintenance() {
+        if (!running.get()) return
+        executors.scheduleCleanup(SESSION_MAINTENANCE_INTERVAL_MS) {
+            if (!running.get()) return@scheduleCleanup
+            try {
+                runSessionMaintenance()
+            } finally {
+                scheduleSessionMaintenance()
+            }
+        }
+    }
+
+    private fun runSessionMaintenance() {
+        val now = elapsedRealtimeMs()
+        sessions.values.forEach { session ->
+            session.closeClientFinishedIfExpired(now)
+        }
+
+        val activeCount = sessions.size
+        if (activeCount <= IDLE_CLEANUP_SESSION_PRESSURE_THRESHOLD) return
+
+        val maxToClose = activeCount - IDLE_CLEANUP_SESSION_TARGET
+        var closedCount = 0
+        sessions.values
+            .asSequence()
+            .map { session -> session to session.idleForMs(now) }
+            .filter { (_, idleForMs) -> idleForMs >= PRESSURE_IDLE_SESSION_TTL_MS }
+            .sortedByDescending { (_, idleForMs) -> idleForMs }
+            .forEach { (session, _) ->
+                if (closedCount >= maxToClose) return@forEach
+                if (session.closeIdleUnderPressure(now)) {
+                    closedCount += 1
+                }
+            }
     }
 
     private fun readTunLoop(input: FileInputStream) {
@@ -447,16 +484,12 @@ internal class KotlinTunForwarder(
         private var connecting = false
         private var writeScheduled = false
         private var clientFinReceived = false
-        private var clientFinCleanupScheduled = false
+        private var clientFinReceivedAtMs = 0L
         private var channel: ChannelDirectTCPIP? = null
         private var remoteOutput: OutputStream? = null
 
         @Volatile
         private var lastActivityAtMs = elapsedRealtimeMs()
-
-        init {
-            scheduleIdleCleanup(TCP_IDLE_SESSION_TTL_MS)
-        }
 
         fun onSyn(clientSequence: Long) {
             markActivity()
@@ -540,11 +573,11 @@ internal class KotlinTunForwarder(
         }
 
         fun onClientFin(finSequence: Long) {
-            markActivity()
+            val now = elapsedRealtimeMs()
+            markActivity(now)
             val responseSequence: Long
             val responseAcknowledgement: Long
             val remoteOutputToClose: OutputStream?
-            val shouldScheduleClientFinCleanup: Boolean
             val shouldClose: Boolean
             lock.withLock {
                 if (state == TcpState.CLOSED) return
@@ -554,20 +587,18 @@ internal class KotlinTunForwarder(
                 remoteOutputToClose = if (!clientFinReceived) remoteOutput else null
                 if (!clientFinReceived) {
                     clientFinReceived = true
+                    clientFinReceivedAtMs = now
                     pendingClientWrites.clear()
                     remoteOutput = null
                 }
                 responseSequence = serverNextSequence
                 responseAcknowledgement = clientNextSequence
                 shouldClose = state == TcpState.REMOTE_FIN_SENT
-                shouldScheduleClientFinCleanup = clientFinReceived && !shouldClose
             }
             sendTcp(responseSequence, responseAcknowledgement, TCP_ACK, EMPTY_BYTES)
             runCatching { remoteOutputToClose?.close() }
             if (shouldClose) {
                 close()
-            } else if (shouldScheduleClientFinCleanup) {
-                scheduleClientFinCleanup()
             }
         }
 
@@ -633,7 +664,6 @@ internal class KotlinTunForwarder(
                 }
                 if (closeRemoteOutput) {
                     runCatching { output.close() }
-                    scheduleClientFinCleanup()
                 }
                 val readScheduled = executors.executeRemoteRead { readRemote(input) }
                 if (!readScheduled) {
@@ -734,58 +764,43 @@ internal class KotlinTunForwarder(
             }
         }
 
-        private fun scheduleClientFinCleanup() {
-            var shouldSchedule = false
-            lock.withLock {
-                if (!clientFinCleanupScheduled && state != TcpState.CLOSED && state != TcpState.REMOTE_FIN_SENT) {
-                    clientFinCleanupScheduled = true
-                    shouldSchedule = true
-                }
-            }
-            if (!shouldSchedule) return
+        fun idleForMs(now: Long): Long = now - lastActivityAtMs
 
-            val scheduled = executors.scheduleCleanup(CLIENT_FIN_SESSION_TTL_MS) {
-                val shouldClose: Boolean
-                lock.withLock {
-                    shouldClose = state != TcpState.CLOSED && state != TcpState.REMOTE_FIN_SENT && clientFinReceived
-                }
-                if (shouldClose) {
-                    diagnostics.logClientFinTimeout(addressToString(key.remoteAddress), key.remotePort)
-                    sendResetAndClose()
-                }
-            }
-            if (!scheduled) {
-                close()
-            }
-        }
-
-        private fun scheduleIdleCleanup(delayMs: Long) {
-            val scheduled = executors.scheduleCleanup(delayMs.coerceAtLeast(TCP_IDLE_SESSION_MIN_CHECK_MS)) {
-                cleanupIdleSession()
-            }
-            if (!scheduled) {
-                close()
-            }
-        }
-
-        private fun cleanupIdleSession() {
-            val idleForMs = elapsedRealtimeMs() - lastActivityAtMs
-            if (idleForMs < TCP_IDLE_SESSION_TTL_MS) {
-                scheduleIdleCleanup(TCP_IDLE_SESSION_TTL_MS - idleForMs)
-                return
-            }
-
+        fun closeClientFinishedIfExpired(now: Long): Boolean {
+            val idleAfterFinMs = now - clientFinReceivedAtMs
             val shouldClose = lock.withLock {
-                state != TcpState.CLOSED && state != TcpState.REMOTE_FIN_SENT
+                state != TcpState.CLOSED &&
+                    state != TcpState.REMOTE_FIN_SENT &&
+                    clientFinReceived &&
+                    clientFinReceivedAtMs > 0L &&
+                    idleAfterFinMs >= CLIENT_FIN_SESSION_TTL_MS
+            }
+            if (shouldClose) {
+                diagnostics.logClientFinTimeout(addressToString(key.remoteAddress), key.remotePort)
+                sendResetAndClose()
+                return true
+            }
+            return false
+        }
+
+        fun closeIdleUnderPressure(now: Long): Boolean {
+            val idleForMs = idleForMs(now)
+            val shouldClose = lock.withLock {
+                state != TcpState.CLOSED &&
+                    state != TcpState.REMOTE_FIN_SENT &&
+                    !clientFinReceived &&
+                    idleForMs >= PRESSURE_IDLE_SESSION_TTL_MS
             }
             if (shouldClose) {
                 diagnostics.logIdleTimeout(addressToString(key.remoteAddress), key.remotePort, idleForMs)
                 sendResetAndClose()
+                return true
             }
+            return false
         }
 
-        private fun markActivity() {
-            lastActivityAtMs = elapsedRealtimeMs()
+        private fun markActivity(now: Long = elapsedRealtimeMs()) {
+            lastActivityAtMs = now
         }
 
         private fun sendRemoteData(payload: ByteArray): Boolean {
@@ -1260,10 +1275,12 @@ internal class KotlinTunForwarder(
         const val DNS_PORT = 53
         const val DNS_TCP_LENGTH_SIZE = 2
         const val DNS_MAX_RESPONSE_SIZE = 4_096
+        const val SESSION_MAINTENANCE_INTERVAL_MS = 10_000L
         const val REMOTE_FIN_SESSION_TTL_MS = 30_000L
         const val CLIENT_FIN_SESSION_TTL_MS = 10_000L
-        const val TCP_IDLE_SESSION_TTL_MS = 20_000L
-        const val TCP_IDLE_SESSION_MIN_CHECK_MS = 1_000L
+        const val PRESSURE_IDLE_SESSION_TTL_MS = 35_000L
+        const val IDLE_CLEANUP_SESSION_PRESSURE_THRESHOLD = 96
+        const val IDLE_CLEANUP_SESSION_TARGET = 72
         const val IPV4_VERSION = 4
         const val IPV4_MIN_HEADER_SIZE = 20
         const val IPV4_DONT_FRAGMENT = 0x4000

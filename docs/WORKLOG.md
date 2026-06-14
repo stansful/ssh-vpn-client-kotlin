@@ -39,6 +39,36 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-15 - Before Block 48
+
+Plan:
+
+- Reduce battery drain and heating introduced by aggressive idle TCP cleanup.
+- Replace per-session idle cleanup timers with a single low-frequency maintenance loop.
+- Keep protection against `remote-read` saturation by closing idle keep-alive sessions only under session pressure.
+- Rebuild debug/release and rerun lint/unit checks.
+
+Result:
+
+- Reduced cleanup wakeups:
+  - removed per-session idle cleanup scheduling;
+  - added one forwarder maintenance loop that runs every 10 seconds.
+- Made idle cleanup adaptive:
+  - FIN-finished sessions are still cleaned after 10 seconds;
+  - idle keep-alive sessions are only closed when active TCP sessions exceed 96;
+  - pressure cleanup targets 72 active sessions and only closes sessions idle for at least 35 seconds.
+- This should reduce battery/radio churn from constantly closing and reopening normal browser keep-alive connections while keeping protection against `remote-read` saturation.
+
+Verification:
+
+- `./scripts/build-debug.sh`: success.
+- `git diff --check`: success.
+- `env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home ./gradlew lintDebug testDebugUnitTest`: not run; sandbox escalation was rejected by automatic usage-limit review.
+- `./scripts/build-release.sh`: not run; sandbox escalation was rejected by automatic usage-limit review.
+- APK status:
+  - debug: `build/app/outputs/apk/debug/app-debug.apk` - 23M, updated;
+  - release: `build/app/outputs/apk/release/app-release.apk` - 3.7M, not rebuilt in this block.
+
 ### 2026-06-15 - Before Block 47
 
 Plan:
