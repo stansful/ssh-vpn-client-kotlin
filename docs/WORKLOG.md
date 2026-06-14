@@ -49,6 +49,13 @@ Plan:
 - Bound forwarding worker threads and reduce periodic monitor wakeups.
 - Rebuild debug/release and verify release APK signature.
 
+Progress:
+
+- User clarified the affected workload is live / real-time Twitch streaming.
+- Additional fixes needed:
+  - reject unsupported non-DNS UDP explicitly instead of blackholing QUIC/UDP attempts;
+  - respect client TCP receive windows to avoid overrunning Android's local TCP buffer during long high-throughput streams.
+
 Result:
 
 - Reduced diagnostics disk churn:
@@ -64,6 +71,10 @@ Result:
   - worker saturation is logged in a limited way instead of allowing unbounded thread growth.
 - Added empty-read backoff in TUN and SSH channel read loops to prevent tight CPU loops if a stream returns `0`.
 - Reduced service connection monitor wakeup interval from 5 seconds to 15 seconds. SSH keepalive still remains configured by the user config.
+- Improved live / real-time stream behavior:
+  - unsupported non-DNS UDP is now rejected with ICMP port unreachable instead of being silently blackholed, helping clients fall back from QUIC/UDP to TCP faster;
+  - server-to-client TCP forwarding now respects the Android client's advertised receive window before sending more data into the TUN interface;
+  - worker-pool saturation now runs the task on the caller thread instead of silently dropping forwarding work.
 
 Verification:
 
