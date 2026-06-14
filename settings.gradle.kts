@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "SshVpnClientAndroid"
+rootProject.name = "ssh-vpn-client-android"
 include(":app")
