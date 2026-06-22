@@ -204,6 +204,13 @@ class MainViewModel(
         appSettingsRepository.setShowLogsOnMain(show)
     }
 
+    fun setShowTerminalOnMain(show: Boolean) {
+        appSettingsRepository.setShowTerminalOnMain(show)
+        if (!show) {
+            closeTerminalSession(resetState = true)
+        }
+    }
+
     fun setThemeMode(themeMode: AppThemeMode) {
         appSettingsRepository.setThemeMode(themeMode)
     }
@@ -213,6 +220,7 @@ class MainViewModel(
     }
 
     fun openTerminal() {
+        if (!appSettingsRepository.settings.value.showTerminalOnMain) return
         if (!uiState.value.isConnected || terminalSession?.isActive == true) return
         if (terminalState.value.isConnecting) return
 

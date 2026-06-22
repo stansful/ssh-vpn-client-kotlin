@@ -23,7 +23,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -34,6 +33,7 @@ import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
 import com.stansful.sshvpnclient.ui.common.ErrorMessage
 import com.stansful.sshvpnclient.ui.common.FormField
 import com.stansful.sshvpnclient.ui.common.PrimaryActionButton
+import com.stansful.sshvpnclient.ui.common.SecretFormField
 import com.stansful.sshvpnclient.ui.common.SecondaryActionButton
 import com.stansful.sshvpnclient.ui.common.SwitchRow
 import com.stansful.sshvpnclient.ui.common.VerticalGap
@@ -89,18 +89,21 @@ private fun EditConfigScreen(
                 value = state.form.name,
                 onValueChange = { value -> onFormChange { it.copy(name = value) } },
                 label = "Name",
+                placeholder = "e.g. Netherlands SSH",
                 error = state.errors["name"],
             )
             FormField(
                 value = state.form.host,
                 onValueChange = { value -> onFormChange { it.copy(host = value) } },
                 label = "Host",
+                placeholder = "e.g. vpn.example.com or 203.0.113.10",
                 error = state.errors["host"],
             )
             FormField(
                 value = state.form.port,
                 onValueChange = { value -> onFormChange { it.copy(port = value) } },
                 label = "Port",
+                placeholder = "22",
                 error = state.errors["port"],
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             )
@@ -108,6 +111,7 @@ private fun EditConfigScreen(
                 value = state.form.username,
                 onValueChange = { value -> onFormChange { it.copy(username = value) } },
                 label = "Username",
+                placeholder = "e.g. root",
                 error = state.errors["username"],
             )
 
@@ -117,12 +121,12 @@ private fun EditConfigScreen(
             )
 
             if (state.form.authType == AuthType.PASSWORD) {
-                FormField(
+                SecretFormField(
                     value = state.form.password,
                     onValueChange = { value -> onFormChange { it.copy(password = value) } },
                     label = "Password",
+                    placeholder = "SSH account password",
                     error = state.errors["password"],
-                    visualTransformation = PasswordVisualTransformation(),
                 )
             } else {
                 PrivateKeySelector(
@@ -136,11 +140,13 @@ private fun EditConfigScreen(
                 value = state.form.fingerprint,
                 onValueChange = { value -> onFormChange { it.copy(fingerprint = value) } },
                 label = "Fingerprint",
+                placeholder = "e.g. SHA256:atzfmdcrqQzoXZfKHLarePDyMw/G5NYfJ3h1eHUVS9g",
             )
             FormField(
                 value = state.form.keepAliveIntervalSec,
                 onValueChange = { value -> onFormChange { it.copy(keepAliveIntervalSec = value) } },
                 label = "KeepAlive interval, sec",
+                placeholder = "30",
                 error = state.errors["keepAliveIntervalSec"],
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             )
@@ -156,6 +162,7 @@ private fun EditConfigScreen(
                 value = state.form.note,
                 onValueChange = { value -> onFormChange { it.copy(note = value) } },
                 label = "Note",
+                placeholder = "Optional connection description",
                 singleLine = false,
                 minLines = 3,
             )

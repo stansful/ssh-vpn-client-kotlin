@@ -22,6 +22,7 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
 ## Что умеет
 
 - SSH VPN через password или private key.
+- Password, private key content и passphrase скрыты звёздочками по умолчанию и раскрываются кнопкой глаза; private key/passphrase можно скопировать отдельной кнопкой.
 - CRUD для SSH-конфигураций и приватных SSH-ключей.
 - Переиспользование одного SSH-ключа в нескольких конфигурациях.
 - Проверка SSH host fingerprint, если он указан в конфигурации.
@@ -42,6 +43,7 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
   - копируются в clipboard;
   - не ограничены 80 строками и сбрасываются при новом пользовательском Connect.
 - SSH terminal:
+  - выключен по умолчанию и включается persisted-переключателем в Settings;
   - доступен при активном подключении;
   - открывает shell-channel на текущей SSH-сессии;
   - команды отправляются с фонового IO-потока;

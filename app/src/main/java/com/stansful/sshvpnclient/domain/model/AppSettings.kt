@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.domain.model
 
 data class AppSettings(
     val showLogsOnMain: Boolean = false,
+    val showTerminalOnMain: Boolean = false,
     val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
     val customThemeColors: CustomThemeColors = CustomThemeColors.defaultLight(),
     val vpnMode: VpnMode = VpnMode.PROXY,

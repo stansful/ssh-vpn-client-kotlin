@@ -11,6 +11,8 @@ interface AppSettingsRepository {
 
     fun setShowLogsOnMain(show: Boolean)
 
+    fun setShowTerminalOnMain(show: Boolean)
+
     fun setThemeMode(themeMode: AppThemeMode)
 
     fun setCustomThemeColors(colors: CustomThemeColors)

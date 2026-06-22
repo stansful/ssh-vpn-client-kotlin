@@ -145,6 +145,7 @@ fun MainRoute(
         openKeys = openKeys,
         openAppPicker = openAppPicker,
         onShowLogsChange = viewModel::setShowLogsOnMain,
+        onShowTerminalChange = viewModel::setShowTerminalOnMain,
         onThemeModeChange = viewModel::setThemeMode,
         onCustomThemeColorsChange = viewModel::setCustomThemeColors,
         onVpnModeChange = viewModel::setVpnMode,
@@ -166,6 +167,7 @@ private fun MainScreen(
     openKeys: () -> Unit,
     openAppPicker: () -> Unit,
     onShowLogsChange: (Boolean) -> Unit,
+    onShowTerminalChange: (Boolean) -> Unit,
     onThemeModeChange: (AppThemeMode) -> Unit,
     onCustomThemeColorsChange: (CustomThemeColors) -> Unit,
     onVpnModeChange: (VpnMode) -> Unit,
@@ -210,10 +212,11 @@ private fun MainScreen(
             }
 
             AnimatedVisibility(
-                visible = state.isConnected ||
-                    state.terminalState.isOpen ||
-                    state.terminalState.isConnecting ||
-                    state.terminalState.output.isNotBlank(),
+                visible = state.appSettings.showTerminalOnMain &&
+                    (state.isConnected ||
+                        state.terminalState.isOpen ||
+                        state.terminalState.isConnecting ||
+                        state.terminalState.output.isNotBlank()),
                 enter = fadeIn(tween(180)) + slideInVertically(tween(180)) { it / 4 },
                 exit = fadeOut(tween(140)) + slideOutVertically(tween(140)) { it / 4 },
             ) {
@@ -231,6 +234,7 @@ private fun MainScreen(
         SettingsSheet(
             settings = state.appSettings,
             onShowLogsChange = onShowLogsChange,
+            onShowTerminalChange = onShowTerminalChange,
             onThemeModeChange = onThemeModeChange,
             onCustomThemeColorsChange = onCustomThemeColorsChange,
             onVpnModeChange = onVpnModeChange,
@@ -669,6 +673,7 @@ private fun DiagnosticsPanel(state: MainUiState) {
 private fun SettingsSheet(
     settings: AppSettings,
     onShowLogsChange: (Boolean) -> Unit,
+    onShowTerminalChange: (Boolean) -> Unit,
     onThemeModeChange: (AppThemeMode) -> Unit,
     onCustomThemeColorsChange: (CustomThemeColors) -> Unit,
     onVpnModeChange: (VpnMode) -> Unit,
@@ -699,6 +704,11 @@ private fun SettingsSheet(
                 title = "Debug logs",
                 checked = settings.showLogsOnMain,
                 onCheckedChange = onShowLogsChange,
+            )
+            SettingsSwitchRow(
+                title = "SSH terminal",
+                checked = settings.showTerminalOnMain,
+                onCheckedChange = onShowTerminalChange,
             )
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))

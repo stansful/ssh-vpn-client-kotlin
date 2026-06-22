@@ -4,11 +4,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -18,6 +19,7 @@ import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
 import com.stansful.sshvpnclient.ui.common.ErrorMessage
 import com.stansful.sshvpnclient.ui.common.FormField
 import com.stansful.sshvpnclient.ui.common.PrimaryActionButton
+import com.stansful.sshvpnclient.ui.common.SecretFormField
 import com.stansful.sshvpnclient.ui.common.VerticalGap
 
 @Composable
@@ -64,26 +66,32 @@ private fun EditKeyScreen(
                 value = state.form.name,
                 onValueChange = { value -> onFormChange { it.copy(name = value) } },
                 label = "Key name",
+                placeholder = "e.g. production-ed25519",
                 error = state.errors["name"],
             )
-            FormField(
+            SecretFormField(
                 value = state.form.privateKey,
                 onValueChange = { value -> onFormChange { it.copy(privateKey = value) } },
                 label = "Private key",
+                placeholder = OPENSSH_PRIVATE_KEY_PLACEHOLDER,
                 error = state.errors["privateKey"],
                 singleLine = false,
                 minLines = 8,
+                copyLabel = "Private key",
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
             )
-            FormField(
+            SecretFormField(
                 value = state.form.passphrase,
                 onValueChange = { value -> onFormChange { it.copy(passphrase = value) } },
                 label = "Passphrase",
-                visualTransformation = PasswordVisualTransformation(),
+                placeholder = "Optional private key passphrase",
+                copyLabel = "Passphrase",
             )
             FormField(
                 value = state.form.note,
                 onValueChange = { value -> onFormChange { it.copy(note = value) } },
                 label = "Note",
+                placeholder = "Optional key description",
                 singleLine = false,
                 minLines = 3,
             )
@@ -93,3 +101,7 @@ private fun EditKeyScreen(
         }
     }
 }
+
+private const val OPENSSH_PRIVATE_KEY_PLACEHOLDER = """-----BEGIN OPENSSH PRIVATE KEY-----
+...
+-----END OPENSSH PRIVATE KEY-----"""

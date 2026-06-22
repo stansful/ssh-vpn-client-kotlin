@@ -39,6 +39,43 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-22 - Before Block 51
+
+Plan:
+
+- Add a reusable secret input with masked-by-default text and eye visibility toggle.
+- Use it for SSH password, private key content, and private-key passphrase.
+- Add copy actions for private key content and passphrase without logging their values.
+- Replace generic form placeholders with concrete SSH-oriented examples, including an OpenSSH private-key block.
+- Add a persisted `SSH terminal` setting, disabled by default, next to debug logs.
+- Do not compose the terminal panel or open a shell channel while the setting is disabled; close an existing terminal immediately when disabled.
+- Preserve SSH/VPN, storage, reconnect, and form-save behavior; run tests, lint, debug/release builds, and signature verification.
+
+Result:
+
+- Added `SecretFormField` with an exact `*` mask, eye visibility toggle, and optional clipboard action.
+- Password is hidden by default; private key content and passphrase are hidden and have copy buttons.
+- Multiline private-key masking preserves line breaks and the empty field shows a complete `BEGIN/END OPENSSH PRIVATE KEY` example.
+- Added SSH-oriented placeholders for config name, host, port, username, password, fingerprint, keepalive, notes, key name, private key, and passphrase.
+- Added persisted `showTerminalOnMain`, default `false`, with an `SSH terminal` switch in Settings.
+- Disabled terminal behavior is optimized:
+  - terminal UI is not composed;
+  - `openTerminal()` rejects calls while disabled;
+  - disabling the switch closes an existing shell channel and clears terminal UI state.
+- Secret values are copied directly to Android clipboard and are never appended to diagnostics; Android 13+ clipboard entries are marked sensitive to suppress system previews.
+
+Verification:
+
+- `./scripts/build-debug.sh`: success.
+- `./scripts/test.sh`: success.
+- `./scripts/lint.sh`: success; `No issues found`.
+- `./scripts/build-release.sh`: success with R8/resource shrinking.
+- `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, v2 signed, 1 signer.
+- `git diff --check`: success.
+- APK outputs:
+  - debug: `build/app/outputs/apk/debug/app-debug.apk` - 23 MiB;
+  - release: `build/app/outputs/apk/release/app-release.apk` - 3.7 MiB.
+
 ### 2026-06-22 - Before Block 50
 
 Plan:

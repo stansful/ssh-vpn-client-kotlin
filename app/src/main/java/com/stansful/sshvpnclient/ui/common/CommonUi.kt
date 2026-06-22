@@ -1,5 +1,9 @@
 package com.stansful.sshvpnclient.ui.common
 
+import android.content.ClipData
+import android.content.ClipDescription
+import android.os.Build
+import android.os.PersistableBundle
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -16,6 +20,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -30,7 +37,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.text.KeyboardOptions
@@ -38,8 +48,15 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -91,21 +108,111 @@ fun FormField(
     error: String? = null,
     singleLine: Boolean = true,
     minLines: Int = 1,
+    placeholder: String? = null,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     visualTransformation: VisualTransformation = VisualTransformation.None,
+    trailingIcon: @Composable (() -> Unit)? = null,
 ) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(label) },
+        placeholder = placeholder?.let { value -> { Text(value) } },
         isError = error != null,
         supportingText = error?.let { { Text(it) } },
         singleLine = singleLine,
         minLines = minLines,
         keyboardOptions = keyboardOptions,
         visualTransformation = visualTransformation,
+        trailingIcon = trailingIcon,
         modifier = modifier.fillMaxWidth(),
     )
+}
+
+@Composable
+fun SecretFormField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    error: String? = null,
+    placeholder: String? = null,
+    singleLine: Boolean = true,
+    minLines: Int = 1,
+    copyLabel: String? = null,
+    keyboardOptions: KeyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+) {
+    var visible by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboard.current
+    val coroutineScope = rememberCoroutineScope()
+
+    FormField(
+        value = value,
+        onValueChange = onValueChange,
+        label = label,
+        modifier = modifier,
+        error = error,
+        placeholder = placeholder,
+        singleLine = singleLine,
+        minLines = minLines,
+        keyboardOptions = keyboardOptions,
+        visualTransformation = if (visible) {
+            VisualTransformation.None
+        } else {
+            AsteriskVisualTransformation
+        },
+        trailingIcon = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (copyLabel != null) {
+                    IconButton(
+                        enabled = value.isNotEmpty(),
+                        onClick = {
+                            coroutineScope.launch {
+                                clipboard.setClipEntry(
+                                    ClipEntry(sensitiveClipData(copyLabel, value)),
+                                )
+                            }
+                        },
+                    ) {
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = "Copy $copyLabel",
+                        )
+                    }
+                }
+                IconButton(onClick = { visible = !visible }) {
+                    Icon(
+                        imageVector = if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        contentDescription = if (visible) "Hide $label" else "Show $label",
+                    )
+                }
+            }
+        },
+    )
+}
+
+private object AsteriskVisualTransformation : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val masked = buildString(text.length) {
+            text.text.forEach { character ->
+                append(if (character == '\n') '\n' else '*')
+            }
+        }
+        return TransformedText(
+            text = AnnotatedString(masked),
+            offsetMapping = OffsetMapping.Identity,
+        )
+    }
+}
+
+private fun sensitiveClipData(label: String, value: String): ClipData {
+    return ClipData.newPlainText(label, value).also { clipData ->
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            clipData.description.extras = PersistableBundle().apply {
+                putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+            }
+        }
+    }
 }
 
 @Composable

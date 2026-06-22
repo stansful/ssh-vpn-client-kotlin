@@ -147,6 +147,8 @@ youtube.com:443
 
 Terminal - дополнительный пользовательский инструмент, доступный при активном подключении.
 
+Функция выключена по умолчанию и включается persisted-переключателем `SSH terminal` в Settings. Когда она выключена, terminal panel не создаётся, shell-channel не открывается, а уже активная terminal session немедленно закрывается.
+
 Поведение:
 
 - открывает SSH shell-channel на текущей SSH-сессии;
@@ -186,11 +188,14 @@ Terminal - дополнительный пользовательский инс�
 
 Есть legacy migration из старого `EncryptedSharedPreferences`. Deprecated storage используется только как источник старых данных во время миграции.
 
+В формах password, private key content и passphrase маскируются звёздочками по умолчанию. Кнопка глаза меняет только отображение текущего UI-поля и не изменяет способ хранения. Копирование private key/passphrase выполняется напрямую в Android clipboard и не попадает в diagnostics.
+
 ## UI settings
 
 Настройки сохраняются после перезапуска приложения:
 
 - `Debug logs`;
+- `SSH terminal`;
 - theme mode:
   - `System`;
   - `Light`;

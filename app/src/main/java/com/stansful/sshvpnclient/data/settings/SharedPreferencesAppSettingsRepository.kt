@@ -30,6 +30,13 @@ class SharedPreferencesAppSettingsRepository(
         currentSettings.value = currentSettings.value.copy(showLogsOnMain = show)
     }
 
+    override fun setShowTerminalOnMain(show: Boolean) {
+        preferences.edit {
+            putBoolean(KEY_SHOW_TERMINAL_ON_MAIN, show)
+        }
+        currentSettings.value = currentSettings.value.copy(showTerminalOnMain = show)
+    }
+
     override fun setThemeMode(themeMode: AppThemeMode) {
         preferences.edit {
             putString(KEY_THEME_MODE, themeMode.storageValue)
@@ -69,6 +76,7 @@ class SharedPreferencesAppSettingsRepository(
     private fun readSettings(): AppSettings {
         return AppSettings(
             showLogsOnMain = preferences.getBoolean(KEY_SHOW_LOGS_ON_MAIN, false),
+            showTerminalOnMain = preferences.getBoolean(KEY_SHOW_TERMINAL_ON_MAIN, false),
             themeMode = AppThemeMode.fromStorageValue(preferences.getString(KEY_THEME_MODE, null)),
             customThemeColors = readCustomThemeColors(),
             vpnMode = VpnMode.fromStorageValue(preferences.getString(KEY_VPN_MODE, null)),
@@ -96,6 +104,7 @@ class SharedPreferencesAppSettingsRepository(
     private companion object {
         const val PREFERENCES_NAME = "ssh-vpn-client-settings"
         const val KEY_SHOW_LOGS_ON_MAIN = "show_logs_on_main"
+        const val KEY_SHOW_TERMINAL_ON_MAIN = "show_terminal_on_main"
         const val KEY_THEME_MODE = "theme_mode"
         const val KEY_CUSTOM_PRIMARY = "custom_primary"
         const val KEY_CUSTOM_SECONDARY = "custom_secondary"
