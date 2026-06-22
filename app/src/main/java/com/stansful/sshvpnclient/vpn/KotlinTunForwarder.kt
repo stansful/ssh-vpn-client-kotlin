@@ -111,6 +111,14 @@ internal class KotlinTunForwarder(
         }
     }
 
+    fun resetIdleClientConnections(minimumIdleMs: Long): Int {
+        if (!running.get()) return 0
+        val now = elapsedRealtimeMs()
+        return sessions.values.count { session ->
+            session.resetAfterDeviceWake(now, minimumIdleMs)
+        }
+    }
+
     private fun scheduleSessionMaintenance() {
         if (!running.get()) return
         executors.scheduleCleanup(SESSION_MAINTENANCE_INTERVAL_MS) {
@@ -839,6 +847,15 @@ internal class KotlinTunForwarder(
                 return true
             }
             return false
+        }
+
+        fun resetAfterDeviceWake(now: Long, minimumIdleMs: Long): Boolean {
+            val shouldReset = lock.withLock {
+                state != TcpState.CLOSED && idleForMs(now) >= minimumIdleMs
+            }
+            if (!shouldReset) return false
+            sendResetAndClose()
+            return true
         }
 
         private fun markActivity(now: Long = elapsedRealtimeMs()) {

@@ -3,11 +3,15 @@ package com.stansful.sshvpnclient.vpn
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.IBinder
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.jcraft.jsch.Session
 import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.SshVpnApplication
@@ -29,13 +33,56 @@ class SshVpnService : android.net.VpnService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile
     private var connectionJob: Job? = null
+    private var wakeRecoveryJob: Job? = null
     @Volatile
     private var connectionRunId: Long = 0L
     @Volatile
     private var userRequestedDisconnect: Boolean = true
+    private var screenOffAtMs: Long = NO_SCREEN_OFF_TIMESTAMP
+    private var screenReceiverRegistered = false
+    private val wakeRecoveryPolicy = WakeRecoveryPolicy(MINIMUM_SCREEN_OFF_RECOVERY_MS)
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    screenOffAtMs = SystemClock.elapsedRealtime()
+                }
+
+                Intent.ACTION_SCREEN_ON -> {
+                    val screenOnAtMs = SystemClock.elapsedRealtime()
+                    val durationMs = wakeRecoveryPolicy.recoveryDurationMs(
+                        screenOffAtMs = screenOffAtMs,
+                        screenOnAtMs = screenOnAtMs,
+                    )
+                    screenOffAtMs = NO_SCREEN_OFF_TIMESTAMP
+                    if (durationMs != null) {
+                        scheduleWakeRecovery(durationMs)
+                    }
+                }
+            }
+        }
+    }
 
     private val appContainer
         get() = (application as SshVpnApplication).container
+
+    override fun onCreate() {
+        super.onCreate()
+        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        if (!powerManager.isInteractive) {
+            screenOffAtMs = SystemClock.elapsedRealtime()
+        }
+        ContextCompat.registerReceiver(
+            this,
+            screenStateReceiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        screenReceiverRegistered = true
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -53,6 +100,11 @@ class SshVpnService : android.net.VpnService() {
         userRequestedDisconnect = true
         connectionRunId += 1
         connectionJob?.cancel()
+        wakeRecoveryJob?.cancel()
+        if (screenReceiverRegistered) {
+            runCatching { unregisterReceiver(screenStateReceiver) }
+            screenReceiverRegistered = false
+        }
         disconnectInternal(updateState = false)
         serviceScope.cancel()
         super.onDestroy()
@@ -64,6 +116,23 @@ class SshVpnService : android.net.VpnService() {
         connectionJob?.cancel()
         connectionJob = serviceScope.launch {
             runConnectionLoop(runId, preserveDiagnostics)
+        }
+    }
+
+    private fun scheduleWakeRecovery(screenOffDurationMs: Long) {
+        if (userRequestedDisconnect) return
+        wakeRecoveryJob?.cancel()
+        wakeRecoveryJob = serviceScope.launch {
+            if (userRequestedDisconnect || !canReuseVpnPipeline()) return@launch
+            val resetCount = appContainer.tun2SocksManager.resetIdleClientConnections(
+                minimumIdleMs = WAKE_STALE_CONNECTION_IDLE_MS,
+            )
+            if (resetCount > 0) {
+                appContainer.vpnConnectionRepository.appendDiagnostic(
+                    "Wake recovery: reset $resetCount stale TCP session(s) after " +
+                        "${screenOffDurationMs / 1_000L}s screen off",
+                )
+            }
         }
     }
 
@@ -453,6 +522,9 @@ class SshVpnService : android.net.VpnService() {
         private const val INITIAL_RECONNECT_DELAY_MS = 250L
         private const val MAX_RECONNECT_DELAY_MS = 5_000L
         private const val NETWORK_DIAGNOSTICS_RETRY_INTERVAL = 5
+        private const val MINIMUM_SCREEN_OFF_RECOVERY_MS = 60_000L
+        private const val WAKE_STALE_CONNECTION_IDLE_MS = 30_000L
+        private const val NO_SCREEN_OFF_TIMESTAMP = -1L
 
         fun connectIntent(
             context: Context,

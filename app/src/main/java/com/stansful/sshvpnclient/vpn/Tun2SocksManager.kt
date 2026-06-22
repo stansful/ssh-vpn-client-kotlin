@@ -71,6 +71,11 @@ class Tun2SocksManager {
         isTransportPaused = false
     }
 
+    fun resetIdleClientConnections(minimumIdleMs: Long): Int {
+        if (!isRunning || isTransportPaused) return 0
+        return forwarder?.resetIdleClientConnections(minimumIdleMs) ?: 0
+    }
+
     private companion object {
         const val STOP_WAIT_MS = 500L
     }

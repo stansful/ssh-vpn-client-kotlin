@@ -39,6 +39,62 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-22 - Before Block 52
+
+Problem:
+
+- After a long locked-screen/Doze interval, SSH remains healthy (`Check tunnel` succeeds) but apps and websites remain unavailable until a full VPN restart.
+- This points to stale per-app TCP proxy sessions in the Kotlin TUN forwarder rather than a failed SSH transport.
+
+Plan:
+
+- Add event-driven screen sleep/wake handling only while `SshVpnService` exists.
+- Record screen-off duration without wake locks or periodic network probes.
+- After a sufficiently long lock, reset only idle TUN TCP proxy sessions and send client-side RST so applications reconnect immediately.
+- Keep the Android VPN interface, SSH session, terminal, and recently active background streams intact.
+- Debounce duplicate wake events and perform cleanup on the service IO scope.
+- Add focused policy tests, diagnostics, documentation, and run test/lint/debug/release/signature verification.
+
+Result:
+
+- Confirmed the failure mode is compatible with stale TUN TCP/DoT/TLS sessions while SSH remains healthy; `Check tunnel` uses a fresh SSH channel and therefore cannot validate existing app sockets.
+- Added a service-lifetime dynamic `SCREEN_OFF/SCREEN_ON` receiver:
+  - no manifest receiver;
+  - no wake lock;
+  - no periodic ping or additional polling.
+- Wake recovery runs only after at least 60 seconds of screen-off time and on the service IO scope.
+- Added targeted forwarder recovery:
+  - only sessions idle for at least 30 seconds receive TCP RST and are closed;
+  - recently active background streams remain untouched;
+  - SSH session, Android VPN interface, routes, and terminal remain active;
+  - applications immediately create fresh TCP/TLS/DoT connections.
+- Duplicate wake events cancel the previous recovery job.
+- Added a single aggregate diagnostic only when sessions were actually reset.
+- Added `WakeRecoveryPolicyTest` for short, threshold, missing, and invalid timing cases.
+
+Energy behavior:
+
+- The receiver exists only while the foreground VPN service exists.
+- Android delivers the wake event; the app does not keep the CPU awake during screen-off time.
+- Recovery is one bounded pass over existing sessions and performs no network probe.
+
+Verification:
+
+- `./scripts/test.sh`: success.
+- `./scripts/lint.sh`: success; `No issues found`.
+- `./scripts/build-debug.sh`: success.
+- `./scripts/build-release.sh`: success with R8/resource shrinking.
+- `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, v2 signed, 1 signer.
+- `git diff --check`: success.
+- APK outputs:
+  - debug: `build/app/outputs/apk/debug/app-debug.apk`;
+  - release: `build/app/outputs/apk/release/app-release.apk`.
+
+Device validation:
+
+- Lock the device for more than 60 seconds with VPN connected, unlock it, and verify the `Wake recovery: reset ...` diagnostic appears when stale sessions existed.
+- Confirm websites/apps recover without Disconnect/Connect and that an intentionally active background stream is not interrupted.
+
 ### 2026-06-22 - Before Block 51
 
 Plan:
