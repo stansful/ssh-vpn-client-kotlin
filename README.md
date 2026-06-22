@@ -55,7 +55,7 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
   - `Custom` с RGB-настройкой цветов, которые сохраняются после перезапуска.
 - Ссылка на GitHub в Settings с кнопкой копирования.
 - Автоматическая проверка GitHub Releases не чаще раза в 24 часа и ручная кнопка `Check for updates`.
-- Обновление через системный DownloadManager и стандартный Android installer с проверкой SHA-256, package name, SemVer, versionCode и signing certificate.
+- Обновление через системный DownloadManager и стандартный Android installer с in-app прогрессом, восстановлением кнопки `Install` после перезапуска и проверкой SHA-256, package name, SemVer, versionCode и signing certificate.
 - Release APK собирается installable и локально подписанным, если production signing env не задан.
 
 ## Сетевой поток
@@ -191,9 +191,10 @@ https://api.github.com/repos/stansful/ssh-vpn-client-kotlin/releases/latest
 - Автопроверка запускается после старта UI и кешируется на 24 часа; ошибки автопроверки не мешают работе VPN.
 - Ручная проверка находится в Settings.
 - APK URL берётся только из `assets[].browser_download_url` и должен принадлежать release path этого репозитория.
-- DownloadManager сохраняет APK в app-specific Downloads и показывает системное уведомление.
+- DownloadManager сохраняет APK в app-specific Downloads, показывает системное уведомление и передаёт в UI процент/объём активной загрузки. Панель прогресса можно свернуть.
 - Перед установкой проверяются SHA-256 digest (если GitHub его вернул), package name, versionName, возрастающий versionCode и сертификат подписи.
-- После проверки открывается стандартный Android installer. Android может запросить разрешение `Install unknown apps` для shadow-ssh.
+- После проверки APK сохраняется как `Ready to install`, включая перезапуск приложения. Кнопка `Download` заменяется на `Install`.
+- Стандартный Android installer открывается только по явному нажатию `Install`. В этот момент Android может запросить разрешение `Install unknown apps` для shadow-ssh.
 
 `versionCode` автоматически вычисляется из `versionName` по формуле `major * 1_000_000 + minor * 1_000 + patch`. Для обновляемости все опубликованные APK должны быть подписаны одним постоянным production keystore. Потеря или замена ключа сделает обновление поверх установленной версии невозможным.
 

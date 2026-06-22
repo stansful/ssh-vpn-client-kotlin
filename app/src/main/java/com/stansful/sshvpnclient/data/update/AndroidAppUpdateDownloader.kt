@@ -24,6 +24,8 @@ import java.security.MessageDigest
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -40,6 +42,8 @@ class AndroidAppUpdateDownloader(
     private val packageManager = appContext.packageManager
     private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     private val mutableState = MutableStateFlow<AppUpdateDownloadState>(AppUpdateDownloadState.Idle)
+    private var enqueueJob: Job? = null
+    private var progressMonitorJob: Job? = null
     private val downloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
@@ -69,10 +73,12 @@ class AndroidAppUpdateDownloader(
     }
 
     override fun download(update: AppUpdateInfo) {
-        if (mutableState.value is AppUpdateDownloadState.Downloading) return
-        applicationScope.launch {
+        if (mutableState.value is AppUpdateDownloadState.Downloading || enqueueJob?.isActive == true) return
+        enqueueJob = applicationScope.launch {
             runCatching {
                 enqueueDownload(update)
+            }.onSuccess { downloadId ->
+                startProgressMonitor(downloadId)
             }.onFailure { error ->
                 mutableState.value = AppUpdateDownloadState.Failed(
                     error.message ?: "Unable to start update download",
@@ -81,14 +87,7 @@ class AndroidAppUpdateDownloader(
         }
     }
 
-    override fun consumeInstallerRequest() {
-        if (mutableState.value is AppUpdateDownloadState.ReadyToInstall) {
-            mutableState.value = AppUpdateDownloadState.Idle
-            applicationScope.launch(ioDispatcher) { clearPendingMetadata() }
-        }
-    }
-
-    private suspend fun enqueueDownload(update: AppUpdateInfo) = withContext(ioDispatcher) {
+    private suspend fun enqueueDownload(update: AppUpdateInfo): Long = withContext(ioDispatcher) {
         validateDownloadUrl(update.apkUrl)
         val updateDirectory = File(
             checkNotNull(appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)) {
@@ -124,6 +123,7 @@ class AndroidAppUpdateDownloader(
             putString(KEY_SHA256, update.sha256Digest)
         }
         mutableState.value = AppUpdateDownloadState.Downloading(version.toString())
+        downloadId
     }
 
     private suspend fun restorePendingDownload() {
@@ -131,16 +131,31 @@ class AndroidAppUpdateDownloader(
             preferences.getLong(KEY_DOWNLOAD_ID, INVALID_DOWNLOAD_ID)
         }
         if (downloadId != INVALID_DOWNLOAD_ID) {
-            inspectPendingDownload(downloadId)
+            if (inspectPendingDownload(downloadId)) {
+                startProgressMonitor(downloadId)
+            }
         }
     }
 
-    private suspend fun inspectPendingDownload(downloadId: Long) = withContext(ioDispatcher) {
+    private fun startProgressMonitor(downloadId: Long) {
+        progressMonitorJob?.cancel()
+        progressMonitorJob = applicationScope.launch {
+            while (inspectPendingDownload(downloadId)) {
+                val pollInterval = when ((mutableState.value as? AppUpdateDownloadState.Downloading)?.isPaused) {
+                    true -> PAUSED_PROGRESS_POLL_INTERVAL_MS
+                    else -> ACTIVE_PROGRESS_POLL_INTERVAL_MS
+                }
+                delay(pollInterval)
+            }
+        }
+    }
+
+    private suspend fun inspectPendingDownload(downloadId: Long): Boolean = withContext(ioDispatcher) {
         val query = DownloadManager.Query().setFilterById(downloadId)
         downloadManager.query(query)?.use { cursor ->
             if (!cursor.moveToFirst()) {
                 failAndClear("Downloaded update is no longer available")
-                return@withContext
+                return@use false
             }
             val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
             when (status) {
@@ -149,16 +164,37 @@ class AndroidAppUpdateDownloader(
                 DownloadManager.STATUS_PAUSED,
                 -> {
                     val version = preferences.getString(KEY_VERSION_NAME, null).orEmpty()
-                    mutableState.value = AppUpdateDownloadState.Downloading(version)
+                    val downloadedBytes = cursor.getLong(
+                        cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR),
+                    ).coerceAtLeast(0L)
+                    val rawTotalBytes = cursor.getLong(
+                        cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES),
+                    )
+                    mutableState.value = AppUpdateDownloadState.Downloading(
+                        versionName = version,
+                        downloadedBytes = downloadedBytes,
+                        totalBytes = rawTotalBytes.takeIf { it > 0L },
+                        isPaused = status == DownloadManager.STATUS_PAUSED,
+                    )
+                    true
                 }
 
-                DownloadManager.STATUS_SUCCESSFUL -> validateDownloadedApk()
+                DownloadManager.STATUS_SUCCESSFUL -> {
+                    validateDownloadedApk()
+                    false
+                }
                 DownloadManager.STATUS_FAILED -> {
                     val reason = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
                     failAndClear("Update download failed (reason $reason)")
+                    false
                 }
+
+                else -> false
             }
-        } ?: failAndClear("Android DownloadManager is unavailable")
+        } ?: run {
+            failAndClear("Android DownloadManager is unavailable")
+            false
+        }
     }
 
     private fun validateDownloadedApk() {
@@ -189,12 +225,11 @@ class AndroidAppUpdateDownloader(
             file.delete()
             return failAndClear("Downloaded APK version does not match the GitHub release")
         }
-        if (
-            PackageInfoCompat.getLongVersionCode(archiveInfo) <=
-            PackageInfoCompat.getLongVersionCode(installedInfo)
-        ) {
+        if (PackageInfoCompat.getLongVersionCode(archiveInfo) <= PackageInfoCompat.getLongVersionCode(installedInfo)) {
             file.delete()
-            return failAndClear("Downloaded APK versionCode must be greater than the installed version")
+            clearPendingMetadata()
+            mutableState.value = AppUpdateDownloadState.Idle
+            return
         }
         if (!signaturesMatch(installedInfo, archiveInfo)) {
             file.delete()
@@ -283,6 +318,8 @@ class AndroidAppUpdateDownloader(
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         const val INVALID_DOWNLOAD_ID = -1L
         const val HASH_BUFFER_SIZE = 32 * 1_024
+        const val ACTIVE_PROGRESS_POLL_INTERVAL_MS = 750L
+        const val PAUSED_PROGRESS_POLL_INTERVAL_MS = 3_000L
         val PACKAGE_INFO_FLAGS: Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             PackageManager.GET_SIGNING_CERTIFICATES
         } else {

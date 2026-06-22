@@ -174,11 +174,14 @@ class MainViewModel(
                     state.copy(
                         downloadState = downloadState,
                         statusMessage = when (downloadState) {
-                            is AppUpdateDownloadState.Downloading ->
-                                "Downloading shadow-ssh ${downloadState.versionName}"
+                            is AppUpdateDownloadState.Downloading -> {
+                                val progress = downloadState.progressPercent?.let { " · $it%" }.orEmpty()
+                                val paused = if (downloadState.isPaused) " · paused" else ""
+                                "Downloading shadow-ssh ${downloadState.versionName}$progress$paused"
+                            }
                             is AppUpdateDownloadState.Failed -> downloadState.message
                             is AppUpdateDownloadState.ReadyToInstall ->
-                                "Download verified. Opening Android installer"
+                                "shadow-ssh ${downloadState.versionName} is ready to install"
                             AppUpdateDownloadState.Idle -> {
                                 if (state.downloadState is AppUpdateDownloadState.Idle) {
                                     state.statusMessage
@@ -398,10 +401,6 @@ class MainViewModel(
         val update = appUpdateState.value.availableUpdate ?: return
         appUpdateDownloader.download(update)
         appUpdateState.update { it.copy(availableUpdate = null, statusMessage = null) }
-    }
-
-    fun onInstallerOpened() {
-        appUpdateDownloader.consumeInstallerRequest()
     }
 
     fun onUpdateActionFailed(message: String) {

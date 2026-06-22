@@ -39,6 +39,49 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-23 - Before Block 54
+
+Problem:
+
+- The updater exposes no in-app DownloadManager progress while an APK is downloading.
+- The manual update-check action is disabled during checking/downloading, hiding the current operation from the user.
+- The verified APK state is consumed as soon as the installer opens, so `Install` cannot be restored after returning to or restarting the app.
+
+Plan:
+
+- Extend the download state with transferred/total bytes and percentage-friendly progress data.
+- Poll DownloadManager only while a download is active, stop immediately at a terminal state, and keep the polling interval battery-conscious.
+- Keep the manual update-check button enabled and show its active state without allowing duplicate network jobs.
+- Add a collapsible progress section with percentage and byte counts.
+- Separate `Download` from `Install`: request unknown-source permission only for installation and open the installer only after an explicit user action.
+- Persist and restore a verified APK as `ReadyToInstall`; clear it silently only after the installed app is already the same/newer version.
+- Make the release modal and Settings action switch from `Download` to `Install` when the APK is ready.
+- Add focused tests, update documentation, and run test/lint/debug/release verification.
+
+Result:
+
+- Extended `AppUpdateDownloadState.Downloading` with downloaded bytes, total bytes, paused state, progress fraction, and percentage.
+- Added active DownloadManager progress monitoring:
+  - 750 ms polling only while bytes can change;
+  - slower 3-second polling while Android reports the download paused;
+  - immediate stop after success or failure.
+- Added a collapsible in-app progress panel with percentage, progress bar, and transferred/total size.
+- Kept `Check for updates` enabled while checking and downloading; the spinner and status text expose the current operation while duplicate network jobs remain guarded in the ViewModel/repository.
+- Separated download and installation permissions:
+  - `Download` immediately delegates to DownloadManager;
+  - `Install unknown apps` is requested only after explicit `Install`;
+  - the Android installer no longer opens automatically after download.
+- Preserved verified APK metadata after opening/cancelling the installer and restored `ReadyToInstall` after process restart.
+- Added `Install shadow-ssh <version>` in Settings and replaced modal `Download` with `Install` for the matching verified version.
+- Silently removes stale update metadata after the same/newer version has already been installed.
+- Added focused unit tests for determinate, clamped, and indeterminate download progress.
+- Updated `README.md` and `README_SA.md` with the revised lifecycle.
+
+Verification:
+
+- `git diff --check`: success.
+- Gradle test/lint/build verification is pending: the managed environment denied access to the existing `~/.gradle` cache after the sandboxed run failed on its wrapper lock file.
+
 ### 2026-06-23 - Before Block 53
 
 Plan:

@@ -233,13 +233,13 @@ Tile нельзя автоматически добавить в шторку и
 
 1. Выполняется публичный запрос `GET /repos/stansful/ssh-vpn-client-kotlin/releases/latest` без GitHub token.
 2. `tag_name` сравнивается с установленным `versionName` по SemVer; поддерживаются tags с префиксом `v` и без него.
-3. Если версия новее, показывается modal с release notes и действиями `Later`, `Open release`, `Download`.
+3. Если версия новее, показывается modal с release notes и действиями `Later`, `Open release`, `Download`; для уже проверенного APK действие меняется на `Install`.
 4. `Open release` использует полученный от GitHub `html_url`.
-5. `Download` запрашивает разрешение Android на установку unknown apps, если оно ещё не выдано, и передаёт `browser_download_url` системному DownloadManager.
-6. После скачивания проверяются digest, package name, versionName, versionCode и signing certificate.
-7. Валидный APK передаётся стандартному Android installer, где пользователь подтверждает обновление.
+5. `Download` передаёт `browser_download_url` системному DownloadManager. UI показывает процент и объём скачанных данных в сворачиваемой панели; системное скачивание продолжает работать независимо от открытого экрана.
+6. После скачивания проверяются digest, package name, versionName, versionCode и signing certificate. Валидный APK и metadata сохраняются как `ReadyToInstall` после пересоздания процесса.
+7. `Install` при необходимости направляет пользователя в системное разрешение `Install unknown apps`, затем передаёт APK стандартному Android installer, где пользователь подтверждает обновление.
 
-Metadata проверки и незавершённой загрузки сохраняются после пересоздания процесса. Одновременные проверки и повторные download jobs блокируются. Сетевые, JSON, hash и package операции выполняются вне Main thread.
+Metadata проверки, незавершённой загрузки и проверенного APK сохраняются после пересоздания процесса. Ручная кнопка проверки остаётся доступной во время скачивания и визуально показывает выполняемую проверку. Одновременные network checks и повторные download jobs не дублируются. Прогресс опрашивается только во время активной загрузки и с более редким интервалом в paused-состоянии. Сетевые, JSON, hash и package операции выполняются вне Main thread.
 
 Ограничения:
 

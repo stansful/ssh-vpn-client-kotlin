@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.ui.main
 
 import android.app.Activity
 import android.content.ClipData
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.provider.Settings
@@ -51,6 +52,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
@@ -61,6 +63,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
@@ -123,7 +126,7 @@ fun MainRoute(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
-    var pendingUpdateDownload by remember { mutableStateOf(false) }
+    var pendingUpdateInstallUri by remember { mutableStateOf<String?>(null) }
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -137,36 +140,28 @@ fun MainRoute(
         contract = ActivityResultContracts.StartActivityForResult(),
     ) {
         val canInstall = context.packageManager.canRequestPackageInstalls()
-        if (pendingUpdateDownload && canInstall) {
-            viewModel.downloadAvailableUpdate()
-        } else if (pendingUpdateDownload) {
+        val contentUri = pendingUpdateInstallUri
+        if (contentUri != null && canInstall) {
+            openUpdateInstaller(context, contentUri).onFailure { error ->
+                viewModel.onUpdateActionFailed(error.message ?: "Unable to open Android installer")
+            }
+        } else if (contentUri != null) {
             viewModel.onUpdateActionFailed("Allow shadow-ssh to install unknown apps")
         }
-        pendingUpdateDownload = false
+        pendingUpdateInstallUri = null
     }
 
-    val readyUpdate = state.updateState.downloadState as? AppUpdateDownloadState.ReadyToInstall
-    LaunchedEffect(readyUpdate?.contentUri) {
-        val update = readyUpdate ?: return@LaunchedEffect
-        runCatching {
-            context.startActivity(
-                Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(update.contentUri.toUri(), APK_MIME_TYPE)
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-            )
-        }.onSuccess {
-            viewModel.onInstallerOpened()
-        }.onFailure { error ->
-            viewModel.onUpdateActionFailed(error.message ?: "Unable to open Android installer")
-        }
-    }
-
-    val requestUpdateDownload = {
-        val canInstall = context.packageManager.canRequestPackageInstalls()
-        if (canInstall) {
-            viewModel.downloadAvailableUpdate()
+    val requestUpdateInstall = {
+        val update = state.updateState.downloadState as? AppUpdateDownloadState.ReadyToInstall
+        val contentUri = update?.contentUri
+        if (contentUri == null) {
+            viewModel.onUpdateActionFailed("Downloaded update is not ready to install")
+        } else if (context.packageManager.canRequestPackageInstalls()) {
+            openUpdateInstaller(context, contentUri).onFailure { error ->
+                viewModel.onUpdateActionFailed(error.message ?: "Unable to open Android installer")
+            }
         } else {
-            pendingUpdateDownload = true
+            pendingUpdateInstallUri = contentUri
             installPermissionLauncher.launch(
                 Intent(
                     Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
@@ -174,6 +169,10 @@ fun MainRoute(
                 ),
             )
         }
+    }
+
+    val requestUpdateDownload = {
+        viewModel.downloadAvailableUpdate()
     }
 
     MainScreen(
@@ -211,6 +210,7 @@ fun MainRoute(
         onDismissUpdate = viewModel::dismissAvailableUpdate,
         onOpenUpdateRelease = { update -> uriHandler.openUri(update.releaseUrl) },
         onDownloadUpdate = requestUpdateDownload,
+        onInstallUpdate = requestUpdateInstall,
     )
 }
 
@@ -237,6 +237,7 @@ private fun MainScreen(
     onDismissUpdate: () -> Unit,
     onOpenUpdateRelease: (AppUpdateInfo) -> Unit,
     onDownloadUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit,
 ) {
     var settingsVisible by remember { mutableStateOf(false) }
 
@@ -312,6 +313,7 @@ private fun MainScreen(
             },
             updateState = state.updateState,
             onCheckForUpdates = onCheckForUpdates,
+            onInstallUpdate = onInstallUpdate,
             onDismiss = { settingsVisible = false },
         )
     }
@@ -334,7 +336,12 @@ private fun MainScreen(
             update = update,
             onLater = onDismissUpdate,
             onOpenRelease = { onOpenUpdateRelease(update) },
-            onDownload = onDownloadUpdate,
+            downloadState = state.updateState.downloadState,
+            onDownload = {
+                onDownloadUpdate()
+                settingsVisible = true
+            },
+            onInstall = onInstallUpdate,
         )
     }
 }
@@ -759,6 +766,7 @@ private fun SettingsSheet(
     onOpenAppPicker: () -> Unit,
     updateState: AppUpdateUiState,
     onCheckForUpdates: () -> Unit,
+    onInstallUpdate: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val uriHandler = LocalUriHandler.current
@@ -826,8 +834,6 @@ private fun SettingsSheet(
                 Text("Updates", style = MaterialTheme.typography.labelLarge)
                 FilledTonalButton(
                     onClick = onCheckForUpdates,
-                    enabled = !updateState.isChecking &&
-                        updateState.downloadState !is AppUpdateDownloadState.Downloading,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(8.dp),
                 ) {
@@ -844,6 +850,10 @@ private fun SettingsSheet(
                         modifier = Modifier.padding(start = 8.dp),
                     )
                 }
+                UpdateDownloadStatus(
+                    downloadState = updateState.downloadState,
+                    onInstall = onInstallUpdate,
+                )
                 updateState.statusMessage?.let { message ->
                     Text(
                         text = message,
@@ -874,10 +884,16 @@ private fun SettingsSheet(
 @Composable
 private fun UpdateAvailableDialog(
     update: AppUpdateInfo,
+    downloadState: AppUpdateDownloadState,
     onLater: () -> Unit,
     onOpenRelease: () -> Unit,
     onDownload: () -> Unit,
+    onInstall: () -> Unit,
 ) {
+    val readyToInstall = (downloadState as? AppUpdateDownloadState.ReadyToInstall)
+        ?.takeIf { it.versionName == update.versionName }
+    val downloading = (downloadState as? AppUpdateDownloadState.Downloading)
+        ?.takeIf { it.versionName == update.versionName }
     AlertDialog(
         onDismissRequest = onLater,
         title = { Text("Update available: ${update.versionName}") },
@@ -900,6 +916,9 @@ private fun UpdateAvailableDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                downloading?.let { state ->
+                    DownloadProgressContent(state)
+                }
             }
         },
         confirmButton = {
@@ -907,9 +926,26 @@ private fun UpdateAvailableDialog(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.End,
             ) {
-                FilledTonalButton(onClick = onDownload) {
-                    Icon(Icons.Default.Download, contentDescription = null)
-                    Text("Download", modifier = Modifier.padding(start = 8.dp))
+                FilledTonalButton(
+                    onClick = if (readyToInstall != null) onInstall else onDownload,
+                    enabled = downloading == null,
+                ) {
+                    Icon(
+                        imageVector = if (readyToInstall != null) {
+                            Icons.Default.SystemUpdateAlt
+                        } else {
+                            Icons.Default.Download
+                        },
+                        contentDescription = null,
+                    )
+                    Text(
+                        text = when {
+                            readyToInstall != null -> "Install"
+                            downloading != null -> "Downloading"
+                            else -> "Download"
+                        },
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
                 }
                 Row {
                     TextButton(onClick = onOpenRelease) { Text("Open release") }
@@ -918,6 +954,101 @@ private fun UpdateAvailableDialog(
             }
         },
     )
+}
+
+@Composable
+private fun UpdateDownloadStatus(
+    downloadState: AppUpdateDownloadState,
+    onInstall: () -> Unit,
+) {
+    when (downloadState) {
+        is AppUpdateDownloadState.Downloading -> {
+            var expanded by remember(downloadState.versionName) { mutableStateOf(true) }
+            Surface(
+                onClick = { expanded = !expanded },
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null)
+                        Text(
+                            text = "Downloading ${downloadState.versionName}",
+                            modifier = Modifier
+                                .padding(start = 10.dp)
+                                .weight(1f),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        downloadState.progressPercent?.let { percent ->
+                            Text("$percent%", style = MaterialTheme.typography.labelLarge)
+                        }
+                        Icon(
+                            imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = if (expanded) "Collapse download progress" else "Expand download progress",
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                    AnimatedVisibility(visible = expanded) {
+                        DownloadProgressContent(downloadState)
+                    }
+                }
+            }
+        }
+
+        is AppUpdateDownloadState.ReadyToInstall -> {
+            FilledTonalButton(
+                onClick = onInstall,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Icon(Icons.Default.SystemUpdateAlt, contentDescription = null)
+                Text(
+                    text = "Install shadow-ssh ${downloadState.versionName}",
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
+        }
+
+        is AppUpdateDownloadState.Failed,
+        AppUpdateDownloadState.Idle,
+        -> Unit
+    }
+}
+
+@Composable
+private fun DownloadProgressContent(downloadState: AppUpdateDownloadState.Downloading) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        val progress = downloadState.progressFraction
+        if (progress != null) {
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        } else {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
+        val totalBytes = downloadState.totalBytes
+        Text(
+            text = when {
+                downloadState.isPaused -> "Download paused by Android"
+                totalBytes != null -> {
+                    "${formatFileSize(downloadState.downloadedBytes)} of ${formatFileSize(totalBytes)}"
+                }
+                else -> "Waiting for download size"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 @Composable
@@ -1330,6 +1461,14 @@ private fun VpnMode.icon(): ImageVector {
 private fun formatFileSize(sizeBytes: Long): String {
     val mebibytes = sizeBytes.toDouble() / (1_024.0 * 1_024.0)
     return String.format(Locale.US, "%.1f MiB", mebibytes)
+}
+
+private fun openUpdateInstaller(context: Context, contentUri: String): Result<Unit> = runCatching {
+    context.startActivity(
+        Intent(Intent.ACTION_VIEW)
+            .setDataAndType(contentUri.toUri(), APK_MIME_TYPE)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+    )
 }
 
 private const val GITHUB_REPOSITORY_URL =
