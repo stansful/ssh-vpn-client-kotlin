@@ -4,12 +4,17 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
+import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
+import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
+import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.SshConfigSummary
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
+import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
+import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
@@ -43,6 +48,7 @@ data class MainUiState(
     val isTunnelCheckRunning: Boolean = false,
     val tunnelCheckResult: TunnelCheckResult = TunnelCheckResult.IDLE,
     val terminalState: TerminalUiState = TerminalUiState(),
+    val updateState: AppUpdateUiState = AppUpdateUiState(),
 ) {
     val isBusy: Boolean
         get() = vpnState.status == VpnConnectionStatus.DISCONNECTING
@@ -72,6 +78,13 @@ data class TerminalUiState(
     val errorMessage: String? = null,
 )
 
+data class AppUpdateUiState(
+    val isChecking: Boolean = false,
+    val availableUpdate: AppUpdateInfo? = null,
+    val statusMessage: String? = null,
+    val downloadState: AppUpdateDownloadState = AppUpdateDownloadState.Idle,
+)
+
 class MainViewModel(
     private val appSettingsRepository: AppSettingsRepository,
     configRepository: SshConfigRepository,
@@ -80,14 +93,18 @@ class MainViewModel(
     private val disconnectVpnUseCase: DisconnectVpnUseCase,
     private val sshConnectionManager: SshConnectionManager,
     observeVpnConnectionStateUseCase: ObserveVpnConnectionStateUseCase,
+    private val appUpdateRepository: AppUpdateRepository,
+    private val appUpdateDownloader: AppUpdateDownloader,
 ) : ViewModel() {
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
     private val isTunnelCheckRunning = MutableStateFlow(false)
     private val tunnelCheckResult = MutableStateFlow(TunnelCheckResult.IDLE)
     private val terminalState = MutableStateFlow(TerminalUiState())
+    private val appUpdateState = MutableStateFlow(AppUpdateUiState())
     @Volatile
     private var terminalSession: SshTerminalSession? = null
     private var settingsReconnectJob: Job? = null
+    private var updateCheckJob: Job? = null
     private var settingsReconnectStarted = false
     private val vpnState = observeVpnConnectionStateUseCase().stateIn(
         scope = viewModelScope,
@@ -115,11 +132,13 @@ class MainViewModel(
         isTunnelCheckRunning,
         tunnelCheckResult,
         terminalState,
-    ) { state, isTunnelCheckRunning, tunnelCheckResult, terminalState ->
+        appUpdateState,
+    ) { state, isTunnelCheckRunning, tunnelCheckResult, terminalState, updateState ->
         state.copy(
             isTunnelCheckRunning = isTunnelCheckRunning,
             tunnelCheckResult = tunnelCheckResult,
             terminalState = terminalState,
+            updateState = updateState,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -148,6 +167,33 @@ class MainViewModel(
                     closeTerminalSession(resetState = true)
                 }
             }
+        }
+        viewModelScope.launch {
+            appUpdateDownloader.state.collect { downloadState ->
+                appUpdateState.update { state ->
+                    state.copy(
+                        downloadState = downloadState,
+                        statusMessage = when (downloadState) {
+                            is AppUpdateDownloadState.Downloading ->
+                                "Downloading shadow-ssh ${downloadState.versionName}"
+                            is AppUpdateDownloadState.Failed -> downloadState.message
+                            is AppUpdateDownloadState.ReadyToInstall ->
+                                "Download verified. Opening Android installer"
+                            AppUpdateDownloadState.Idle -> {
+                                if (state.downloadState is AppUpdateDownloadState.Idle) {
+                                    state.statusMessage
+                                } else {
+                                    null
+                                }
+                            }
+                        },
+                    )
+                }
+            }
+        }
+        viewModelScope.launch {
+            delay(AUTOMATIC_UPDATE_CHECK_DELAY_MS)
+            checkForUpdates(manual = false)
         }
     }
 
@@ -302,6 +348,66 @@ class MainViewModel(
         showNoSelectedAppsDialog.value = false
     }
 
+    fun checkForUpdates(manual: Boolean = true) {
+        if (updateCheckJob?.isActive == true) return
+        updateCheckJob = viewModelScope.launch {
+            appUpdateState.update {
+                it.copy(
+                    isChecking = true,
+                    statusMessage = if (manual) null else it.statusMessage,
+                )
+            }
+            runCatching {
+                appUpdateRepository.checkForUpdate(force = manual)
+            }.onSuccess { result ->
+                appUpdateState.update { state ->
+                    when (result) {
+                        is AppUpdateCheckResult.Available -> state.copy(
+                            isChecking = false,
+                            availableUpdate = result.update,
+                            statusMessage = null,
+                        )
+                        AppUpdateCheckResult.UpToDate -> state.copy(
+                            isChecking = false,
+                            availableUpdate = null,
+                            statusMessage = if (manual) "shadow-ssh is up to date" else null,
+                        )
+                        AppUpdateCheckResult.NotDue -> state.copy(isChecking = false)
+                    }
+                }
+            }.onFailure { error ->
+                appUpdateState.update { state ->
+                    state.copy(
+                        isChecking = false,
+                        statusMessage = if (manual) {
+                            error.message ?: "Unable to check for updates"
+                        } else {
+                            state.statusMessage
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissAvailableUpdate() {
+        appUpdateState.update { it.copy(availableUpdate = null) }
+    }
+
+    fun downloadAvailableUpdate() {
+        val update = appUpdateState.value.availableUpdate ?: return
+        appUpdateDownloader.download(update)
+        appUpdateState.update { it.copy(availableUpdate = null, statusMessage = null) }
+    }
+
+    fun onInstallerOpened() {
+        appUpdateDownloader.consumeInstallerRequest()
+    }
+
+    fun onUpdateActionFailed(message: String) {
+        appUpdateState.update { it.copy(statusMessage = message) }
+    }
+
     override fun onCleared() {
         terminalSession?.close()
         terminalSession = null
@@ -421,6 +527,7 @@ class MainViewModel(
     }
 
     private companion object {
+        const val AUTOMATIC_UPDATE_CHECK_DELAY_MS = 1_500L
         const val SETTINGS_CHANGE_DEBOUNCE_MS = 250L
         const val SETTINGS_RECONNECT_DELAY_MS = 450L
         const val MAX_TERMINAL_OUTPUT_CHARS = 120_000

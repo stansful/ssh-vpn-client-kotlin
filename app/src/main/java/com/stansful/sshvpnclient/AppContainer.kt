@@ -9,7 +9,11 @@ import com.stansful.sshvpnclient.data.local.AppDatabase
 import com.stansful.sshvpnclient.data.local.InMemoryVpnConnectionRepository
 import com.stansful.sshvpnclient.data.secret.TinkSecretStorage
 import com.stansful.sshvpnclient.data.settings.SharedPreferencesAppSettingsRepository
+import com.stansful.sshvpnclient.data.update.AndroidAppUpdateDownloader
+import com.stansful.sshvpnclient.data.update.GitHubAppUpdateRepository
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
+import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
+import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
 import com.stansful.sshvpnclient.domain.repository.InstalledAppsRepository
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.SshPrivateKeyRepository
@@ -73,6 +77,18 @@ class AppContainer(
     val appSettingsRepository: AppSettingsRepository = SharedPreferencesAppSettingsRepository(appContext)
     val installedAppsRepository: InstalledAppsRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         PackageManagerInstalledAppsRepository(appContext)
+    }
+    val appUpdateRepository: AppUpdateRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        GitHubAppUpdateRepository(
+            context = appContext,
+            currentVersionName = BuildConfig.VERSION_NAME,
+        )
+    }
+    val appUpdateDownloader: AppUpdateDownloader by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        AndroidAppUpdateDownloader(
+            context = appContext,
+            applicationScope = applicationScope,
+        )
     }
 
     val sshConnectionManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { SshConnectionManager() }

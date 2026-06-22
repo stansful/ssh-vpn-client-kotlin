@@ -2,7 +2,9 @@ package com.stansful.sshvpnclient.ui.main
 
 import android.app.Activity
 import android.content.ClipData
+import android.content.Intent
 import android.net.VpnService
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -40,17 +42,20 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
@@ -63,6 +68,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -86,11 +92,14 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.stansful.sshvpnclient.AppContainer
 import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
+import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
+import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
@@ -101,6 +110,7 @@ import com.stansful.sshvpnclient.ui.common.ErrorMessage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 @Composable
 fun MainRoute(
@@ -112,6 +122,8 @@ fun MainRoute(
     val viewModel: MainViewModel = viewModel(factory = AppViewModelFactory(container))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    var pendingUpdateDownload by remember { mutableStateOf(false) }
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -119,6 +131,48 @@ fun MainRoute(
             viewModel.connect()
         } else {
             viewModel.onVpnPermissionDenied()
+        }
+    }
+    val installPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) {
+        val canInstall = context.packageManager.canRequestPackageInstalls()
+        if (pendingUpdateDownload && canInstall) {
+            viewModel.downloadAvailableUpdate()
+        } else if (pendingUpdateDownload) {
+            viewModel.onUpdateActionFailed("Allow shadow-ssh to install unknown apps")
+        }
+        pendingUpdateDownload = false
+    }
+
+    val readyUpdate = state.updateState.downloadState as? AppUpdateDownloadState.ReadyToInstall
+    LaunchedEffect(readyUpdate?.contentUri) {
+        val update = readyUpdate ?: return@LaunchedEffect
+        runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(update.contentUri.toUri(), APK_MIME_TYPE)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+            )
+        }.onSuccess {
+            viewModel.onInstallerOpened()
+        }.onFailure { error ->
+            viewModel.onUpdateActionFailed(error.message ?: "Unable to open Android installer")
+        }
+    }
+
+    val requestUpdateDownload = {
+        val canInstall = context.packageManager.canRequestPackageInstalls()
+        if (canInstall) {
+            viewModel.downloadAvailableUpdate()
+        } else {
+            pendingUpdateDownload = true
+            installPermissionLauncher.launch(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    "package:${context.packageName}".toUri(),
+                ),
+            )
         }
     }
 
@@ -153,6 +207,10 @@ fun MainRoute(
         onOpenTerminal = viewModel::openTerminal,
         onTerminalInputChange = viewModel::setTerminalInput,
         onSubmitTerminalInput = viewModel::submitTerminalInput,
+        onCheckForUpdates = viewModel::checkForUpdates,
+        onDismissUpdate = viewModel::dismissAvailableUpdate,
+        onOpenUpdateRelease = { update -> uriHandler.openUri(update.releaseUrl) },
+        onDownloadUpdate = requestUpdateDownload,
     )
 }
 
@@ -175,8 +233,18 @@ private fun MainScreen(
     onOpenTerminal: () -> Unit,
     onTerminalInputChange: (String) -> Unit,
     onSubmitTerminalInput: () -> Unit,
+    onCheckForUpdates: () -> Unit,
+    onDismissUpdate: () -> Unit,
+    onOpenUpdateRelease: (AppUpdateInfo) -> Unit,
+    onDownloadUpdate: () -> Unit,
 ) {
     var settingsVisible by remember { mutableStateOf(false) }
+
+    LaunchedEffect(state.updateState.availableUpdate) {
+        if (state.updateState.availableUpdate != null) {
+            settingsVisible = false
+        }
+    }
 
     AppScreen(
         title = "Shadow SSH VPN",
@@ -242,6 +310,8 @@ private fun MainScreen(
                 settingsVisible = false
                 openAppPicker()
             },
+            updateState = state.updateState,
+            onCheckForUpdates = onCheckForUpdates,
             onDismiss = { settingsVisible = false },
         )
     }
@@ -256,6 +326,15 @@ private fun MainScreen(
             },
             title = { Text("VPN mode") },
             text = { Text("нет выбранных приложений") },
+        )
+    }
+
+    state.updateState.availableUpdate?.let { update ->
+        UpdateAvailableDialog(
+            update = update,
+            onLater = onDismissUpdate,
+            onOpenRelease = { onOpenUpdateRelease(update) },
+            onDownload = onDownloadUpdate,
         )
     }
 }
@@ -678,6 +757,8 @@ private fun SettingsSheet(
     onCustomThemeColorsChange: (CustomThemeColors) -> Unit,
     onVpnModeChange: (VpnMode) -> Unit,
     onOpenAppPicker: () -> Unit,
+    updateState: AppUpdateUiState,
+    onCheckForUpdates: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val uriHandler = LocalUriHandler.current
@@ -741,6 +822,39 @@ private fun SettingsSheet(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
 
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Updates", style = MaterialTheme.typography.labelLarge)
+                FilledTonalButton(
+                    onClick = onCheckForUpdates,
+                    enabled = !updateState.isChecking &&
+                        updateState.downloadState !is AppUpdateDownloadState.Downloading,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    if (updateState.isChecking) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Icon(Icons.Default.Refresh, contentDescription = null)
+                    }
+                    Text(
+                        text = if (updateState.isChecking) "Checking" else "Check for updates",
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
+                updateState.statusMessage?.let { message ->
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+
             GitHubLinkRow(
                 onClick = { uriHandler.openUri(GITHUB_REPOSITORY_URL) },
                 onCopyClick = {
@@ -755,6 +869,55 @@ private fun SettingsSheet(
             Box(modifier = Modifier.padding(bottom = 12.dp))
         }
     }
+}
+
+@Composable
+private fun UpdateAvailableDialog(
+    update: AppUpdateInfo,
+    onLater: () -> Unit,
+    onOpenRelease: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onLater,
+        title = { Text("Update available: ${update.versionName}") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 280.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(update.title, fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = update.releaseNotes.ifBlank { "Release notes are available on GitHub." },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                if (update.apkSizeBytes > 0L) {
+                    Text(
+                        text = "APK size: ${formatFileSize(update.apkSizeBytes)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.End,
+            ) {
+                FilledTonalButton(onClick = onDownload) {
+                    Icon(Icons.Default.Download, contentDescription = null)
+                    Text("Download", modifier = Modifier.padding(start = 8.dp))
+                }
+                Row {
+                    TextButton(onClick = onOpenRelease) { Text("Open release") }
+                    TextButton(onClick = onLater) { Text("Later") }
+                }
+            }
+        },
+    )
 }
 
 @Composable
@@ -1164,6 +1327,12 @@ private fun VpnMode.icon(): ImageVector {
     }
 }
 
+private fun formatFileSize(sizeBytes: Long): String {
+    val mebibytes = sizeBytes.toDouble() / (1_024.0 * 1_024.0)
+    return String.format(Locale.US, "%.1f MiB", mebibytes)
+}
+
 private const val GITHUB_REPOSITORY_URL =
     "https://github.com/stansful/ssh-vpn-client-kotlin/tree/master"
 private const val THEME_TILE_COLUMNS = 2
+private const val APK_MIME_TYPE = "application/vnd.android.package-archive"

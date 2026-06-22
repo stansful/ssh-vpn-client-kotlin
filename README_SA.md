@@ -225,6 +225,28 @@ Android Quick Settings tile называется `shadow-ssh`.
 
 Tile нельзя автоматически добавить в шторку или поставить в конкретную позицию. Это ограничение Android.
 
+## Обновление приложения
+
+При запуске главного экрана приложение автоматически проверяет GitHub Releases, но не чаще одного раза в 24 часа. В Settings также доступна ручная проверка.
+
+Сценарий:
+
+1. Выполняется публичный запрос `GET /repos/stansful/ssh-vpn-client-kotlin/releases/latest` без GitHub token.
+2. `tag_name` сравнивается с установленным `versionName` по SemVer; поддерживаются tags с префиксом `v` и без него.
+3. Если версия новее, показывается modal с release notes и действиями `Later`, `Open release`, `Download`.
+4. `Open release` использует полученный от GitHub `html_url`.
+5. `Download` запрашивает разрешение Android на установку unknown apps, если оно ещё не выдано, и передаёт `browser_download_url` системному DownloadManager.
+6. После скачивания проверяются digest, package name, versionName, versionCode и signing certificate.
+7. Валидный APK передаётся стандартному Android installer, где пользователь подтверждает обновление.
+
+Metadata проверки и незавершённой загрузки сохраняются после пересоздания процесса. Одновременные проверки и повторные download jobs блокируются. Сетевые, JSON, hash и package операции выполняются вне Main thread.
+
+Ограничения:
+
+- Android не разрешает обычному приложению полностью бесшумную установку; требуется системное пользовательское подтверждение.
+- Новый APK должен иметь больший `versionCode` и тот же signing certificate.
+- Все production releases должны подписываться одним постоянным keystore.
+
 ## Технические ограничения
 
 - Поддержаны TCP и DNS UDP/53.

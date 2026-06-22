@@ -39,6 +39,63 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-23 - Before Block 53
+
+Plan:
+
+- Add an isolated updater module backed by the public GitHub latest-release API.
+- Parse `2.1.0` and `v2.1.0` with strict SemVer comparison against the installed app version.
+- Check automatically after startup at most once per 24 hours and provide a manual Settings action.
+- Show a release modal with notes and `Later`, `Open release`, and `Download` actions.
+- Select the APK from `assets[].browser_download_url` rather than constructing release URLs.
+- Download through Android `DownloadManager` with system notification/progress.
+- Request Android unknown-source permission only after explicit user download action and hand the completed APK to the standard installer.
+- Validate downloaded package name, version, signing certificate, and GitHub SHA-256 digest when provided.
+- Persist check/download metadata across process recreation without storing credentials; public GitHub API uses no embedded token.
+- Keep all network, JSON, hashing, and package inspection work off Main and avoid duplicate checks/downloads.
+- Add unit tests, update user/analyst documentation, and run lint/debug/release/signature verification.
+
+Result:
+
+- Added strict SemVer parsing/comparison for plain and `v`-prefixed tags with unit coverage for patch/minor/major ordering and malformed values.
+- Added `GitHubAppUpdateRepository`:
+  - public latest-release endpoint, no embedded token;
+  - 8-second connect/read timeouts and 1 MiB response limit;
+  - 24-hour successful-check cache, ETag/304 support, and mutex-protected requests;
+  - automatic APK asset discovery from `browser_download_url`;
+  - JSON parsing on `Dispatchers.Default`, network/storage on `Dispatchers.IO`.
+- Added `AndroidAppUpdateDownloader`:
+  - app-specific DownloadManager destination and system notification;
+  - persisted download metadata and process-recreation recovery;
+  - strict GitHub repository download URL validation;
+  - optional GitHub SHA-256 digest verification;
+  - package name, SemVer, increasing versionCode, and SHA-256 signing-certificate verification;
+  - FileProvider content URI and standard Android installer handoff.
+- Added `REQUEST_INSTALL_PACKAGES` and a user-initiated unknown-source settings flow.
+- Added automatic startup check after 1.5 seconds, manual Settings check, status UI, and release modal with `Later`, `Open release`, and `Download`.
+- Automatic failures remain silent and do not affect VPN startup/connection.
+- Enabled BuildConfig and derived versionCode from SemVer (`major * 1,000,000 + minor * 1,000 + patch`) to guarantee monotonic Android update ordering.
+- Verified the live GitHub API response for release `2.1.0`, including release URL, APK asset, browser download URL, size, notes, and SHA-256 digest.
+
+Verification:
+
+- `./scripts/test.sh`: success.
+- `./scripts/lint.sh`: success; `No issues found`.
+- Live public GitHub latest-release request: success.
+- Live asset SHA-256 matches GitHub digest: `f37c091ea48a1443b5a0f75da366405b3ef2713bd0b53250c0e1fe6133e7b6fa`.
+- `./scripts/build-debug.sh`: success.
+- `./scripts/build-release.sh`: success with R8/resource shrinking/lintVital.
+- Local release APK signature: valid v2, 1 signer.
+- Published `2.1.0` APK signature: valid v2, 1 signer.
+- Local and published certificate SHA-256 match: `e5e85d97964a0fabdec4d738c0f129ca144ba48393d36b7fd79ec9624f4ff540`.
+- Release manifest: package `com.stansful.sshvpnclient`, versionName `2.1.0`, versionCode `2001000`, minSdk 26, targetSdk 37.
+- `git diff --check`: success.
+
+Device validation:
+
+- Automatic/manual check and same-version behavior are structurally verified; modal appearance requires a GitHub release newer than `2.1.0` or a test fixture.
+- Unknown-source permission UI, DownloadManager completion notification, and installer handoff require one physical-device pass because these are system/OEM surfaces.
+
 ### 2026-06-22 - Before Block 52
 
 Problem:
