@@ -22,7 +22,7 @@ val releaseSigningConfigured = listOf(
     releaseKeyAlias,
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
-val appVersionName = "2.1.0"
+val appVersionName = "2.2.0"
 val appVersionParts = appVersionName.split('.').map(String::toInt)
 require(appVersionParts.size == 3 && appVersionParts.drop(1).all { it in 0..999 }) {
     "versionName must be SemVer with minor/patch in 0..999"
