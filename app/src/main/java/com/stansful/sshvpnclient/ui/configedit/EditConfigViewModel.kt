@@ -4,7 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.SshConfig
-import com.stansful.sshvpnclient.domain.model.SshPrivateKey
+import com.stansful.sshvpnclient.domain.model.SshPrivateKeySummary
 import com.stansful.sshvpnclient.domain.model.ValidationException
 import com.stansful.sshvpnclient.domain.usecase.config.AddSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.GetSshConfigByIdUseCase
@@ -34,7 +34,7 @@ data class EditConfigForm(
 
 data class EditConfigUiState(
     val form: EditConfigForm = EditConfigForm(),
-    val keys: List<SshPrivateKey> = emptyList(),
+    val keys: List<SshPrivateKeySummary> = emptyList(),
     val errors: Map<String, String> = emptyMap(),
     val message: String? = null,
     val isSaved: Boolean = false,
@@ -165,7 +165,7 @@ class EditConfigViewModel(
         )
     }
 
-    private fun EditConfigForm.withDefaultPrivateKey(keys: List<SshPrivateKey>): EditConfigForm {
+    private fun EditConfigForm.withDefaultPrivateKey(keys: List<SshPrivateKeySummary>): EditConfigForm {
         if (authType != AuthType.PRIVATE_KEY || privateKeyId.isNotBlank()) return this
         return copy(privateKeyId = keys.firstOrNull()?.id.orEmpty())
     }

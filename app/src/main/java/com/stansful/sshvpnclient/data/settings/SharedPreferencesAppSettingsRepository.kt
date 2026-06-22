@@ -1,6 +1,7 @@
 package com.stansful.sshvpnclient.data.settings
 
 import android.content.Context
+import androidx.core.content.edit
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
@@ -23,45 +24,45 @@ class SharedPreferencesAppSettingsRepository(
     override val settings: StateFlow<AppSettings> = currentSettings.asStateFlow()
 
     override fun setShowLogsOnMain(show: Boolean) {
-        preferences.edit()
-            .putBoolean(KEY_SHOW_LOGS_ON_MAIN, show)
-            .apply()
+        preferences.edit {
+            putBoolean(KEY_SHOW_LOGS_ON_MAIN, show)
+        }
         currentSettings.value = currentSettings.value.copy(showLogsOnMain = show)
     }
 
     override fun setThemeMode(themeMode: AppThemeMode) {
-        preferences.edit()
-            .putString(KEY_THEME_MODE, themeMode.storageValue)
-            .apply()
+        preferences.edit {
+            putString(KEY_THEME_MODE, themeMode.storageValue)
+        }
         currentSettings.value = currentSettings.value.copy(themeMode = themeMode)
     }
 
     override fun setCustomThemeColors(colors: CustomThemeColors) {
-        preferences.edit()
-            .putInt(KEY_CUSTOM_PRIMARY, colors.primary)
-            .putInt(KEY_CUSTOM_SECONDARY, colors.secondary)
-            .putInt(KEY_CUSTOM_BACKGROUND, colors.background)
-            .putInt(KEY_CUSTOM_SURFACE, colors.surface)
-            .putInt(KEY_CUSTOM_SURFACE_VARIANT, colors.surfaceVariant)
-            .putInt(KEY_CUSTOM_ON_SURFACE, colors.onSurface)
-            .putInt(KEY_CUSTOM_OUTLINE, colors.outline)
-            .putInt(KEY_CUSTOM_ERROR, colors.error)
-            .apply()
+        preferences.edit {
+            putInt(KEY_CUSTOM_PRIMARY, colors.primary)
+            putInt(KEY_CUSTOM_SECONDARY, colors.secondary)
+            putInt(KEY_CUSTOM_BACKGROUND, colors.background)
+            putInt(KEY_CUSTOM_SURFACE, colors.surface)
+            putInt(KEY_CUSTOM_SURFACE_VARIANT, colors.surfaceVariant)
+            putInt(KEY_CUSTOM_ON_SURFACE, colors.onSurface)
+            putInt(KEY_CUSTOM_OUTLINE, colors.outline)
+            putInt(KEY_CUSTOM_ERROR, colors.error)
+        }
         currentSettings.value = currentSettings.value.copy(customThemeColors = colors)
     }
 
     override fun setVpnMode(vpnMode: VpnMode) {
-        preferences.edit()
-            .putString(KEY_VPN_MODE, vpnMode.storageValue)
-            .apply()
+        preferences.edit {
+            putString(KEY_VPN_MODE, vpnMode.storageValue)
+        }
         currentSettings.value = currentSettings.value.copy(vpnMode = vpnMode)
     }
 
     override fun setSelectedAppPackages(packageNames: Set<String>) {
         val sortedPackages = packageNames.toSortedSet()
-        preferences.edit()
-            .putStringSet(KEY_SELECTED_APP_PACKAGES, sortedPackages)
-            .apply()
+        preferences.edit {
+            putStringSet(KEY_SELECTED_APP_PACKAGES, sortedPackages)
+        }
         currentSettings.value = currentSettings.value.copy(selectedAppPackages = sortedPackages)
     }
 

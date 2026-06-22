@@ -17,14 +17,12 @@ import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.usecase.config.AddSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.DeleteSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.GetSshConfigByIdUseCase
-import com.stansful.sshvpnclient.domain.usecase.config.GetSshConfigListUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.SelectSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.UpdateSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.AddSshPrivateKeyUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.DeleteSshPrivateKeyUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyByIdUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyListUseCase
-import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyUsageCountUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.UpdateSshPrivateKeyUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
@@ -32,61 +30,78 @@ import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUse
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
 import com.stansful.sshvpnclient.vpn.Tun2SocksManager
 import com.stansful.sshvpnclient.vpn.VpnTunnelManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 
 class AppContainer(
     context: Context,
 ) {
     private val appContext = context.applicationContext
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    private val database: AppDatabase = Room.databaseBuilder(
-        appContext,
-        AppDatabase::class.java,
-        "ssh-vpn-client.db",
-    ).build()
+    private val database: AppDatabase by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        Room.databaseBuilder(
+            appContext,
+            AppDatabase::class.java,
+            "ssh-vpn-client.db",
+        ).build()
+    }
 
-    private val secretStorage = TinkSecretStorage(appContext)
+    private val secretStorage by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        TinkSecretStorage(appContext)
+    }
 
-    val sshConfigRepository: SshConfigRepository = RoomSshConfigRepository(
-        dao = database.sshConfigDao(),
-        secretStorage = secretStorage,
-    )
+    val sshConfigRepository: SshConfigRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RoomSshConfigRepository(
+            dao = database.sshConfigDao(),
+            secretStorage = secretStorage,
+        )
+    }
 
-    val sshPrivateKeyRepository: SshPrivateKeyRepository = RoomSshPrivateKeyRepository(
-        keyDao = database.sshPrivateKeyDao(),
-        configDao = database.sshConfigDao(),
-        secretStorage = secretStorage,
-    )
+    val sshPrivateKeyRepository: SshPrivateKeyRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RoomSshPrivateKeyRepository(
+            keyDao = database.sshPrivateKeyDao(),
+            configDao = database.sshConfigDao(),
+            secretStorage = secretStorage,
+        )
+    }
 
-    val vpnConnectionRepository: VpnConnectionRepository = InMemoryVpnConnectionRepository(appContext)
+    val vpnConnectionRepository: VpnConnectionRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        InMemoryVpnConnectionRepository(appContext, applicationScope)
+    }
     val appSettingsRepository: AppSettingsRepository = SharedPreferencesAppSettingsRepository(appContext)
-    val installedAppsRepository: InstalledAppsRepository = PackageManagerInstalledAppsRepository(appContext)
+    val installedAppsRepository: InstalledAppsRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        PackageManagerInstalledAppsRepository(appContext)
+    }
 
-    val sshConnectionManager = SshConnectionManager()
-    val vpnTunnelManager = VpnTunnelManager()
-    val tun2SocksManager = Tun2SocksManager()
+    val sshConnectionManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { SshConnectionManager() }
+    val vpnTunnelManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { VpnTunnelManager() }
+    val tun2SocksManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { Tun2SocksManager() }
 
-    val addSshConfigUseCase = AddSshConfigUseCase(sshConfigRepository)
-    val updateSshConfigUseCase = UpdateSshConfigUseCase(sshConfigRepository)
-    val deleteSshConfigUseCase = DeleteSshConfigUseCase(sshConfigRepository)
-    val getSshConfigByIdUseCase = GetSshConfigByIdUseCase(sshConfigRepository)
-    val getSshConfigListUseCase = GetSshConfigListUseCase(sshConfigRepository)
-    val selectSshConfigUseCase = SelectSshConfigUseCase(sshConfigRepository)
+    val addSshConfigUseCase by lazy { AddSshConfigUseCase(sshConfigRepository) }
+    val updateSshConfigUseCase by lazy { UpdateSshConfigUseCase(sshConfigRepository) }
+    val deleteSshConfigUseCase by lazy { DeleteSshConfigUseCase(sshConfigRepository) }
+    val getSshConfigByIdUseCase by lazy { GetSshConfigByIdUseCase(sshConfigRepository) }
+    val selectSshConfigUseCase by lazy { SelectSshConfigUseCase(sshConfigRepository) }
 
-    val addSshPrivateKeyUseCase = AddSshPrivateKeyUseCase(sshPrivateKeyRepository)
-    val updateSshPrivateKeyUseCase = UpdateSshPrivateKeyUseCase(sshPrivateKeyRepository)
-    val deleteSshPrivateKeyUseCase = DeleteSshPrivateKeyUseCase(sshPrivateKeyRepository)
-    val getSshPrivateKeyByIdUseCase = GetSshPrivateKeyByIdUseCase(sshPrivateKeyRepository)
-    val getSshPrivateKeyListUseCase = GetSshPrivateKeyListUseCase(sshPrivateKeyRepository)
-    val getSshPrivateKeyUsageCountUseCase =
-        GetSshPrivateKeyUsageCountUseCase(sshPrivateKeyRepository)
+    val addSshPrivateKeyUseCase by lazy { AddSshPrivateKeyUseCase(sshPrivateKeyRepository) }
+    val updateSshPrivateKeyUseCase by lazy { UpdateSshPrivateKeyUseCase(sshPrivateKeyRepository) }
+    val deleteSshPrivateKeyUseCase by lazy { DeleteSshPrivateKeyUseCase(sshPrivateKeyRepository) }
+    val getSshPrivateKeyByIdUseCase by lazy { GetSshPrivateKeyByIdUseCase(sshPrivateKeyRepository) }
+    val getSshPrivateKeyListUseCase by lazy { GetSshPrivateKeyListUseCase(sshPrivateKeyRepository) }
 
-    val connectVpnUseCase = ConnectVpnUseCase(
-        context = appContext,
-        configRepository = sshConfigRepository,
-        keyRepository = sshPrivateKeyRepository,
-        vpnConnectionRepository = vpnConnectionRepository,
-        appSettingsRepository = appSettingsRepository,
-    )
-    val disconnectVpnUseCase = DisconnectVpnUseCase(appContext)
-    val observeVpnConnectionStateUseCase = ObserveVpnConnectionStateUseCase(vpnConnectionRepository)
+    val connectVpnUseCase by lazy {
+        ConnectVpnUseCase(
+            context = appContext,
+            configRepository = sshConfigRepository,
+            keyRepository = sshPrivateKeyRepository,
+            vpnConnectionRepository = vpnConnectionRepository,
+            appSettingsRepository = appSettingsRepository,
+        )
+    }
+    val disconnectVpnUseCase by lazy { DisconnectVpnUseCase(appContext) }
+    val observeVpnConnectionStateUseCase by lazy {
+        ObserveVpnConnectionStateUseCase(vpnConnectionRepository)
+    }
 }

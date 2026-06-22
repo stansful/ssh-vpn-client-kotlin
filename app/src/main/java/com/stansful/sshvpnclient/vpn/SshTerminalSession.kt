@@ -1,11 +1,18 @@
 package com.stansful.sshvpnclient.vpn
 
 import com.jcraft.jsch.ChannelShell
+import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.InputStream
 import java.io.OutputStream
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 class SshTerminalSession internal constructor(
     private val channel: ChannelShell,
@@ -13,19 +20,18 @@ class SshTerminalSession internal constructor(
     private val outputStream: OutputStream,
     private val onOutput: (String) -> Unit,
     private val onClosed: (String) -> Unit,
+    readerDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : Closeable {
     private val isOpen = AtomicBoolean(true)
-    private val reader = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, READER_THREAD_NAME).apply {
-            isDaemon = true
-        }
-    }
+    private val readerScope = CoroutineScope(SupervisorJob() + readerDispatcher)
+    private var readerJob: Job? = null
 
     val isActive: Boolean
         get() = isOpen.get() && channel.isConnected
 
     internal fun start() {
-        reader.execute(::readLoop)
+        check(readerJob == null) { "Terminal reader is already started" }
+        readerJob = readerScope.launch { readLoop() }
     }
 
     @Synchronized
@@ -40,7 +46,7 @@ class SshTerminalSession internal constructor(
         if (isOpen.getAndSet(false)) {
             runCatching { channel.disconnect() }
         }
-        reader.shutdownNow()
+        readerScope.cancel()
     }
 
     private fun readLoop() {
@@ -49,9 +55,20 @@ class SshTerminalSession internal constructor(
             while (isOpen.get()) {
                 val bytesRead = inputStream.read(buffer)
                 if (bytesRead < 0) break
-                if (bytesRead > 0) {
-                    onOutput(String(buffer, offset = 0, length = bytesRead, charset = Charsets.UTF_8))
+                if (bytesRead == 0) continue
+
+                val output = ByteArrayOutputStream(MAX_OUTPUT_BATCH_SIZE)
+                output.write(buffer, 0, bytesRead)
+                while (inputStream.available() > 0 && output.size() < MAX_OUTPUT_BATCH_SIZE) {
+                    val nextRead = inputStream.read(
+                        buffer,
+                        0,
+                        minOf(buffer.size, MAX_OUTPUT_BATCH_SIZE - output.size()),
+                    )
+                    if (nextRead <= 0) break
+                    output.write(buffer, 0, nextRead)
                 }
+                onOutput(output.toString(Charsets.UTF_8.name()))
             }
             if (isOpen.get()) {
                 onClosed("remote shell closed")
@@ -66,8 +83,8 @@ class SshTerminalSession internal constructor(
     }
 
     private companion object {
-        const val BUFFER_SIZE = 4096
-        const val READER_THREAD_NAME = "ssh-terminal-reader"
+        const val BUFFER_SIZE = 8 * 1_024
+        const val MAX_OUTPUT_BATCH_SIZE = 32 * 1_024
         const val NEW_LINE = '\n'.code
     }
 }

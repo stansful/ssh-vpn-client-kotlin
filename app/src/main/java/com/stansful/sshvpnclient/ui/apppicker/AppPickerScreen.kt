@@ -26,7 +26,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -36,6 +35,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stansful.sshvpnclient.AppContainer
 import com.stansful.sshvpnclient.domain.model.InstalledAppInfo
 import com.stansful.sshvpnclient.ui.common.AppScreen
@@ -47,7 +47,7 @@ fun AppPickerRoute(
     onBack: () -> Unit,
 ) {
     val viewModel: AppPickerViewModel = viewModel(factory = AppViewModelFactory(container))
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
     val saveAndBack = {
         viewModel.saveSelection()
         onBack()

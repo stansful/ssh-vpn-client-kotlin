@@ -6,6 +6,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.jcraft.jsch.Session
 import com.stansful.sshvpnclient.R
@@ -25,9 +26,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class SshVpnService : android.net.VpnService() {
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile
     private var connectionJob: Job? = null
+    @Volatile
     private var connectionRunId: Long = 0L
+    @Volatile
     private var userRequestedDisconnect: Boolean = true
 
     private val appContainer
@@ -92,26 +96,55 @@ class SshVpnService : android.net.VpnService() {
             connectionRepository.appendDiagnostic("Auth type: ${config.authType.label}")
             startVpnForeground()
             connectionRepository.appendDiagnostic("Foreground VPN service started")
+            val appSettings = appContainer.appSettingsRepository.settings.value
+            validateAppSettings(appSettings)
+            val privateKey = loadPrivateKey(config, runId, keyRepository::getById)
 
             var attempt = 1
             var everConnected = false
-            var reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS
+            val reconnectBackoff = ReconnectBackoff(
+                initialDelayMs = INITIAL_RECONNECT_DELAY_MS,
+                maxDelayMs = MAX_RECONNECT_DELAY_MS,
+            )
+            var reconnectStartedAtMs: Long? = null
             while (shouldKeepConnectionAlive(runId)) {
                 if (attempt > 1) {
                     connectionRepository.setReconnecting(config.id)
                     connectionRepository.appendDiagnostic("Reconnect attempt $attempt starting")
                 }
 
+                var activeConnectionInterrupted = false
                 try {
-                    val privateKey = loadPrivateKey(config, runId, keyRepository::getById)
-                    val sshSession = connectSingleAttempt(config, privateKey, runId)
+                    val reuseVpnInterface = everConnected && canReuseVpnPipeline()
+                    val connection = connectSingleAttempt(
+                        config = config,
+                        privateKey = privateKey,
+                        appSettings = appSettings,
+                        runId = runId,
+                        reuseVpnInterface = reuseVpnInterface,
+                        includeNetworkDiagnostics = attempt == 1 ||
+                            attempt % NETWORK_DIAGNOSTICS_RETRY_INTERVAL == 0,
+                    )
                     everConnected = true
-                    reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS
+                    reconnectBackoff.reset()
+                    reconnectStartedAtMs?.let { startedAt ->
+                        val elapsedMs = SystemClock.elapsedRealtime() - startedAt
+                        val restorePath = if (connection.reusedVpnInterface) {
+                            "without rebuilding Android VPN interface"
+                        } else {
+                            "after rebuilding Android VPN interface"
+                        }
+                        connectionRepository.appendDiagnostic("VPN forwarding restored in ${elapsedMs}ms $restorePath")
+                    }
+                    reconnectStartedAtMs = null
 
-                    val interruptReason = monitorActiveConnection(sshSession, runId)
+                    val interruptReason = monitorActiveConnection(connection.sshSession, runId)
                     if (!shouldKeepConnectionAlive(runId)) {
                         break
                     }
+                    activeConnectionInterrupted = true
+                    reconnectStartedAtMs = SystemClock.elapsedRealtime()
+                    connectionRepository.setReconnecting(config.id)
                     connectionRepository.appendDiagnostic("Connection interrupted: $interruptReason")
                 } catch (error: CancellationException) {
                     disconnectInternal(updateState = false, stopForegroundNotification = false)
@@ -145,16 +178,23 @@ class SshVpnService : android.net.VpnService() {
                     )
                 }
 
-                disconnectInternal(updateState = false, stopForegroundNotification = false)
+                prepareForReconnect(
+                    keepVpnPipeline = everConnected,
+                    announceHotReconnect = activeConnectionInterrupted,
+                )
                 if (!shouldKeepConnectionAlive(runId)) {
                     break
                 }
                 connectionRepository.setReconnecting(config.id)
-                connectionRepository.appendDiagnostic(
-                    "Reconnecting in ${reconnectDelayMs / 1000}s; press Disconnect to stop",
-                )
-                delay(reconnectDelayMs)
-                reconnectDelayMs = minOf(reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS)
+                if (activeConnectionInterrupted) {
+                    connectionRepository.appendDiagnostic("Immediate SSH reconnect starting")
+                } else {
+                    val reconnectDelayMs = reconnectBackoff.nextFailureDelayMs()
+                    connectionRepository.appendDiagnostic(
+                        "Reconnecting in ${reconnectDelayMs}ms; press Disconnect to stop",
+                    )
+                    delay(reconnectDelayMs)
+                }
                 attempt += 1
             }
         } finally {
@@ -184,14 +224,18 @@ class SshVpnService : android.net.VpnService() {
     private suspend fun connectSingleAttempt(
         config: SshConfig,
         privateKey: SshPrivateKey?,
+        appSettings: AppSettings,
         runId: Long,
-    ): Session {
+        reuseVpnInterface: Boolean,
+        includeNetworkDiagnostics: Boolean,
+    ): ConnectionAttempt {
         val connectionRepository = appContainer.vpnConnectionRepository
-        val appSettings = appContainer.appSettingsRepository.settings.value
         ensureConnectionStillWanted(runId)
         validateAppSettings(appSettings)
-        NetworkDiagnostics.describe(this@SshVpnService).forEach { message ->
-            appendConnectionDiagnostic(runId, message)
+        if (includeNetworkDiagnostics) {
+            NetworkDiagnostics.describe(this@SshVpnService).forEach { message ->
+                appendConnectionDiagnostic(runId, message)
+            }
         }
         val log = connectionLogger(runId)
         val sshSession = appContainer.sshConnectionManager.connect(
@@ -199,27 +243,44 @@ class SshVpnService : android.net.VpnService() {
             privateKey = privateKey,
             log = log,
             socketProtector = { socket -> protect(socket) },
+            connectTimeoutMs = if (reuseVpnInterface) RECONNECT_CONNECT_TIMEOUT_MS else INITIAL_CONNECT_TIMEOUT_MS,
+            verboseDiagnostics = includeNetworkDiagnostics,
         )
         ensureConnectionStillWanted(runId)
-        connectionRepository.appendDiagnostic("Establishing Android VPN interface")
-        val vpnInterface = appContainer.vpnTunnelManager.establish(
-            service = this@SshVpnService,
-            config = config,
-            appSettings = appSettings,
-            log = connectionRepository::appendDiagnostic,
-        )
-        ensureConnectionStillWanted(runId)
-        connectionRepository.appendDiagnostic("Starting local TUN forwarding layer")
-        appContainer.tun2SocksManager.start(
-            vpnInterface = vpnInterface,
-            sshSession = sshSession,
-            enableUdpForwarding = config.enableUdpForwarding,
-            log = connectionRepository::appendDiagnostic,
-        )
+        val reusedVpnInterface = reuseVpnInterface && canReuseVpnPipeline()
+        if (reusedVpnInterface) {
+            connectionRepository.appendDiagnostic("Resuming forwarding on existing Android VPN interface")
+            appContainer.tun2SocksManager.resumeSshTransport(sshSession)
+        } else {
+            if (reuseVpnInterface) {
+                connectionRepository.appendDiagnostic(
+                    "Existing VPN pipeline is unavailable; rebuilding Android VPN interface",
+                )
+            }
+            cleanupVpnPipelineForRebuild()
+            connectionRepository.appendDiagnostic("Establishing Android VPN interface")
+            val vpnInterface = appContainer.vpnTunnelManager.establish(
+                service = this@SshVpnService,
+                config = config,
+                appSettings = appSettings,
+                log = connectionRepository::appendDiagnostic,
+            )
+            ensureConnectionStillWanted(runId)
+            connectionRepository.appendDiagnostic("Starting local TUN forwarding layer")
+            appContainer.tun2SocksManager.start(
+                vpnInterface = vpnInterface,
+                sshSession = sshSession,
+                enableUdpForwarding = config.enableUdpForwarding,
+                log = connectionRepository::appendDiagnostic,
+            )
+        }
         ensureConnectionStillWanted(runId)
         connectionRepository.appendDiagnostic("VPN connection is connected")
         connectionRepository.setConnected(config.id)
-        return sshSession
+        return ConnectionAttempt(
+            sshSession = sshSession,
+            reusedVpnInterface = reusedVpnInterface,
+        )
     }
 
     private suspend fun monitorActiveConnection(
@@ -228,6 +289,9 @@ class SshVpnService : android.net.VpnService() {
     ): String {
         while (shouldKeepConnectionAlive(runId)) {
             delay(CONNECTION_MONITOR_INTERVAL_MS)
+            if (!appContainer.tun2SocksManager.isRunning) {
+                return "TUN forwarding stopped"
+            }
             if (!sshSession.isConnected) {
                 return "SSH session disconnected"
             }
@@ -276,6 +340,31 @@ class SshVpnService : android.net.VpnService() {
         }
     }
 
+    private fun prepareForReconnect(
+        keepVpnPipeline: Boolean,
+        announceHotReconnect: Boolean,
+    ) {
+        if (keepVpnPipeline && canReuseVpnPipeline()) {
+            if (announceHotReconnect) {
+                appContainer.vpnConnectionRepository.appendDiagnostic(
+                    "Keeping Android VPN interface active while SSH transport reconnects",
+                )
+            }
+            cleanupDisconnectStep("TUN SSH transport") {
+                appContainer.tun2SocksManager.pauseSshTransport()
+            }
+            cleanupDisconnectStep("SSH session") {
+                appContainer.sshConnectionManager.disconnect()
+            }
+        } else {
+            disconnectInternal(updateState = false, stopForegroundNotification = false)
+        }
+    }
+
+    private fun canReuseVpnPipeline(): Boolean {
+        return appContainer.vpnTunnelManager.isEstablished && appContainer.tun2SocksManager.isRunning
+    }
+
     private fun disconnect() {
         serviceScope.launch {
             userRequestedDisconnect = true
@@ -294,12 +383,7 @@ class SshVpnService : android.net.VpnService() {
         updateState: Boolean,
         stopForegroundNotification: Boolean = true,
     ) {
-        cleanupDisconnectStep("TUN forwarding") {
-            appContainer.tun2SocksManager.stop()
-        }
-        cleanupDisconnectStep("VPN interface") {
-            appContainer.vpnTunnelManager.close()
-        }
+        cleanupVpnPipelineForRebuild()
         cleanupDisconnectStep("SSH session") {
             appContainer.sshConnectionManager.disconnect()
         }
@@ -310,6 +394,15 @@ class SshVpnService : android.net.VpnService() {
             cleanupDisconnectStep("foreground notification") {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             }
+        }
+    }
+
+    private fun cleanupVpnPipelineForRebuild() {
+        cleanupDisconnectStep("TUN forwarding") {
+            appContainer.tun2SocksManager.stop()
+        }
+        cleanupDisconnectStep("VPN interface") {
+            appContainer.vpnTunnelManager.close()
         }
     }
 
@@ -354,9 +447,12 @@ class SshVpnService : android.net.VpnService() {
             "com.stansful.sshvpnclient.extra.PRESERVE_DIAGNOSTICS"
         private const val CHANNEL_ID = "ssh_vpn_connection"
         private const val NOTIFICATION_ID = 3001
-        private const val CONNECTION_MONITOR_INTERVAL_MS = 15_000L
-        private const val INITIAL_RECONNECT_DELAY_MS = 2_000L
-        private const val MAX_RECONNECT_DELAY_MS = 30_000L
+        private const val CONNECTION_MONITOR_INTERVAL_MS = 2_000L
+        private const val INITIAL_CONNECT_TIMEOUT_MS = 20_000
+        private const val RECONNECT_CONNECT_TIMEOUT_MS = 8_000
+        private const val INITIAL_RECONNECT_DELAY_MS = 250L
+        private const val MAX_RECONNECT_DELAY_MS = 5_000L
+        private const val NETWORK_DIAGNOSTICS_RETRY_INTERVAL = 5
 
         fun connectIntent(
             context: Context,
@@ -372,6 +468,11 @@ class SshVpnService : android.net.VpnService() {
         }
     }
 }
+
+private data class ConnectionAttempt(
+    val sshSession: Session,
+    val reusedVpnInterface: Boolean,
+)
 
 private fun VpnConnectionException.isRecoverableBeforeFirstConnection(): Boolean {
     val value = message.orEmpty()

@@ -15,6 +15,33 @@ abstract class SshConfigDao {
     @Query("SELECT * FROM ssh_configs WHERE isSelected = 1 LIMIT 1")
     abstract fun observeSelected(): Flow<SshConfigEntity?>
 
+    @Query(
+        """
+        SELECT c.id, c.name, c.host, c.port, c.username, c.authType,
+               c.privateKeyId, k.name AS keyName, c.fingerprint,
+               c.keepAliveIntervalSec, c.enableUdpForwarding, c.note,
+               c.isSelected, c.updatedAt
+        FROM ssh_configs AS c
+        LEFT JOIN ssh_private_keys AS k ON k.id = c.privateKeyId
+        ORDER BY c.updatedAt DESC
+        """,
+    )
+    abstract fun observeSummaries(): Flow<List<SshConfigSummaryRow>>
+
+    @Query(
+        """
+        SELECT c.id, c.name, c.host, c.port, c.username, c.authType,
+               c.privateKeyId, k.name AS keyName, c.fingerprint,
+               c.keepAliveIntervalSec, c.enableUdpForwarding, c.note,
+               c.isSelected, c.updatedAt
+        FROM ssh_configs AS c
+        LEFT JOIN ssh_private_keys AS k ON k.id = c.privateKeyId
+        WHERE c.isSelected = 1
+        LIMIT 1
+        """,
+    )
+    abstract fun observeSelectedSummary(): Flow<SshConfigSummaryRow?>
+
     @Query("SELECT * FROM ssh_configs ORDER BY updatedAt DESC")
     abstract suspend fun getAll(): List<SshConfigEntity>
 

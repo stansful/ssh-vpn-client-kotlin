@@ -21,17 +21,20 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 internal class KotlinTunForwarder(
     private val vpnInterface: ParcelFileDescriptor,
-    private val sshSession: Session,
+    sshSession: Session,
     private val log: (String) -> Unit,
 ) {
     private val running = AtomicBoolean(false)
     private val stoppedLatch = CountDownLatch(1)
     private val sessions = ConcurrentHashMap<TcpKey, TcpProxySession>()
+    private val sshSessionReference = AtomicReference<Session?>(sshSession)
+    private val transportLock = Any()
     private val diagnostics = ForwarderDiagnostics(log)
     private val executors = ForwarderExecutors(diagnostics)
     private val packetId = AtomicInteger(1)
@@ -91,6 +94,21 @@ internal class KotlinTunForwarder(
 
     fun awaitStopped(timeoutMs: Long) {
         stoppedLatch.await(timeoutMs, TimeUnit.MILLISECONDS)
+    }
+
+    fun pauseSshTransport() {
+        synchronized(transportLock) {
+            sshSessionReference.set(null)
+            closeSessions()
+        }
+    }
+
+    fun resumeSshTransport(sshSession: Session) {
+        check(sshSession.isConnected) { "SSH session is not connected" }
+        synchronized(transportLock) {
+            closeSessions()
+            sshSessionReference.set(sshSession)
+        }
     }
 
     private fun scheduleSessionMaintenance() {
@@ -169,23 +187,34 @@ internal class KotlinTunForwarder(
             return
         }
 
-        val session = if (tcp.flags.hasFlag(TCP_SYN) && !tcp.flags.hasFlag(TCP_ACK)) {
-            sessions.computeIfAbsent(key) {
-                TcpProxySession(
-                    key = key,
-                    sshSession = sshSession,
-                    executors = executors,
-                    diagnostics = diagnostics,
-                    packetSender = ::sendTcpPacket,
-                    activeSessionCount = sessions::size,
-                    onClosed = sessions::remove,
-                )
-            }.also { it.onSyn(tcp.sequence) }
+        val isInitialSyn = tcp.flags.hasFlag(TCP_SYN) && !tcp.flags.hasFlag(TCP_ACK)
+        var waitForSshTransport = false
+        val session = if (isInitialSyn) {
+            val created = synchronized(transportLock) {
+                val activeSshSession = sshSessionReference.get()?.takeIf { it.isConnected }
+                    ?: run {
+                        waitForSshTransport = true
+                        return@synchronized null
+                    }
+                sessions.computeIfAbsent(key) {
+                    TcpProxySession(
+                        key = key,
+                        sshSession = activeSshSession,
+                        executors = executors,
+                        diagnostics = diagnostics,
+                        packetSender = ::sendTcpPacket,
+                        activeSessionCount = sessions::size,
+                        onClosed = sessions::remove,
+                    )
+                }
+            }
+            created?.also { it.onSyn(tcp.sequence) }
         } else {
             sessions[key]
         }
 
         if (session == null) {
+            if (isInitialSyn && waitForSshTransport) return
             sendTcpReset(packet, tcp)
             return
         }
@@ -259,9 +288,16 @@ internal class KotlinTunForwarder(
         dnsServerAddress: Int,
     ) {
         if (!running.get()) return
+        val sshSession = sshSessionReference.get()?.takeIf { it.isConnected } ?: return
         var channel: ChannelDirectTCPIP? = null
         try {
-            channel = openDirectTcpChannel(addressToString(dnsServerAddress), DNS_PORT, clientAddress, clientPort)
+            channel = openDirectTcpChannel(
+                sshSession = sshSession,
+                host = addressToString(dnsServerAddress),
+                port = DNS_PORT,
+                originAddress = clientAddress,
+                originPort = clientPort,
+            )
             val input = channel.inputStream
             val output = channel.outputStream
             output.write((query.size ushr 8) and 0xFF)
@@ -367,11 +403,11 @@ internal class KotlinTunForwarder(
         if (!running.get()) return
         synchronized(writeLock) {
             output?.write(packet)
-            output?.flush()
         }
     }
 
     private fun openDirectTcpChannel(
+        sshSession: Session,
         host: String,
         port: Int,
         originAddress: Int,
@@ -404,7 +440,9 @@ internal class KotlinTunForwarder(
             LinkedBlockingQueue(MAX_CONTROL_QUEUE_SIZE),
             NamedThreadFactory(CONTROL_THREAD_PREFIX),
             ThreadPoolExecutor.AbortPolicy(),
-        )
+        ).apply {
+            allowCoreThreadTimeOut(true)
+        }
         private val remoteReadExecutor = ThreadPoolExecutor(
             MIN_REMOTE_READ_THREADS,
             MAX_REMOTE_READ_THREADS,
@@ -711,7 +749,8 @@ internal class KotlinTunForwarder(
 
         private fun flushClientWrites() {
             while (true) {
-                val nextPayload: ByteArray
+                val payloadBatch = ArrayList<ByteArray>()
+                var batchSize = 0
                 val output: OutputStream
                 lock.withLock {
                     val remote = remoteOutput
@@ -719,16 +758,19 @@ internal class KotlinTunForwarder(
                         writeScheduled = false
                         return
                     }
-                    val queued = pendingClientWrites.poll()
-                    if (queued == null) {
+                    while (batchSize < CLIENT_WRITE_BATCH_SIZE) {
+                        val queued = pendingClientWrites.poll() ?: break
+                        payloadBatch += queued
+                        batchSize += queued.size
+                    }
+                    if (payloadBatch.isEmpty()) {
                         writeScheduled = false
                         return
                     }
-                    nextPayload = queued
                     output = remote
                 }
                 try {
-                    output.write(nextPayload)
+                    payloadBatch.forEach { payload -> output.write(payload) }
                     output.flush()
                     markActivity()
                 } catch (error: Exception) {
@@ -1270,6 +1312,7 @@ internal class KotlinTunForwarder(
         const val MAX_DETAILED_FORWARDER_LOGS = 5
         const val TUN_BUFFER_SIZE = 32 * 1024
         const val REMOTE_READ_BUFFER_SIZE = 16 * 1024
+        const val CLIENT_WRITE_BATCH_SIZE = 16 * 1024
         const val MAX_TCP_PAYLOAD_SIZE = 1_320
         const val SSH_CHANNEL_CONNECT_TIMEOUT_MS = 10_000
         const val DNS_PORT = 53

@@ -10,6 +10,9 @@ import com.stansful.sshvpnclient.domain.model.VpnMode
 class VpnTunnelManager {
     private var vpnInterface: ParcelFileDescriptor? = null
 
+    val isEstablished: Boolean
+        get() = vpnInterface?.fileDescriptor?.valid() == true
+
     fun establish(
         service: VpnService,
         config: SshConfig,

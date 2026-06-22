@@ -41,10 +41,10 @@ flowchart TD
    - выбрана ли конфигурация;
    - есть ли VPN permission;
    - если выбран режим `Selected apps`, выбран ли хотя бы один package.
-5. Android создаёт VPN TUN interface.
-6. Приложение открывает защищённый TCP socket до SSH-сервера.
-7. SSH-клиент проходит аутентификацию.
-8. Приложение запускает Kotlin TUN forwarding layer.
+5. Приложение открывает защищённый TCP socket до SSH-сервера.
+6. SSH-клиент проходит аутентификацию.
+7. Android создаёт VPN TUN interface.
+8. Приложение запускает Kotlin TUN forwarding layer с текущей SSH-сессией.
 9. TCP-трафик приложений открывается через SSH `direct-tcpip`.
 10. DNS-запросы обрабатываются как DNS-over-TCP через SSH.
 11. Статус на главном экране становится `Connected`.
@@ -86,7 +86,19 @@ stateDiagram-v2
     Error --> Connecting: Connect
 ```
 
-Reconnect продолжается до явного `Disconnect`. Backoff ограничен диапазоном от 2 до 30 секунд.
+Reconnect продолжается до явного `Disconnect`.
+
+При обычном разрыве SSH приложение не закрывает Android VPN interface:
+
+1. Статус меняется на `Reconnecting`.
+2. Kotlin TUN forwarder отвязывается от старой SSH-сессии и закрывает связанные с ней TCP flow.
+3. Первый SSH reconnect запускается без искусственной задержки.
+4. После успешной аутентификации новая JSch `Session` подставляется в существующий forwarder.
+5. Статус возвращается в `Connected`.
+
+Повторные неудачи используют backoff от 250 ms до 5 секунд. SSH reconnect использует timeout 8 секунд. Если VPN interface или TUN forwarder недоступен, приложение выполняет полный rebuild pipeline.
+
+Существующие TCP/TLS flow не переносятся между SSH-сессиями и должны быть переоткрыты клиентским приложением. Новые SYN во время короткой паузы временно не отклоняются, поэтому TCP stack Android может повторить их после восстановления transport.
 
 ## Диагностика
 
@@ -213,6 +225,19 @@ Tile нельзя автоматически добавить в шторку и
   - сетевых ограничений оператора или Wi-Fi.
 - Интерактивный terminal зависит от shell defaults на сервере.
 
+## Производительность и устойчивость
+
+- Тяжёлые компоненты Room, Tink и VPN создаются лениво, поэтому не блокируют холодный старт до фактической необходимости.
+- UI-экраны читают только metadata. Расшифровка password/private key происходит на IO-потоке только для подключения или редактирования.
+- Diagnostics не ограничены по количеству строк до следующего Connect, но обрабатываются пакетно и показываются виртуализированным списком.
+- Неактивные Compose-экраны прекращают сбор Flow по lifecycle.
+- Поиск приложений имеет debounce 200 ms, а результат PackageManager кэшируется на 5 минут.
+- Смена режима VPN или selected apps при активном соединении объединяется в один controlled reconnect; параллельные reconnect-задачи не создаются.
+- SSH terminal и VPN connection loop выполняют блокирующий I/O вне UI-потока и отменяются вместе с владельцем lifecycle/service.
+- В production-коде отсутствуют `GlobalScope` и `runBlocking`.
+
+Pagination для app picker не применяется: Android `PackageManager` возвращает локальный snapshot без page API, а отображение большого списка виртуализировано.
+
 ## Сборочные артефакты
 
 Debug APK:
@@ -240,7 +265,8 @@ Release APK:
 - Пользователь может добавить private key без passphrase.
 - Connect создаёт VPN и SSH-сессию.
 - Disconnect останавливает VPN.
-- При обрыве SSH приложение переподключается.
+- При обрыве SSH приложение сохраняет Android VPN interface и переподключает SSH transport.
+- При недоступном TUN forwarder приложение выполняет полный fallback rebuild.
 - В `Selected apps` без выбранных приложений Connect запрещён.
 - Diagnostics копируются в clipboard.
 - Check tunnel меняет состояние кнопки.

@@ -5,9 +5,14 @@ import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.domain.model.InstalledAppInfo
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.InstalledAppsRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -21,6 +26,7 @@ data class AppPickerUiState(
         get() = selectedPackages.size
 }
 
+@OptIn(FlowPreview::class)
 class AppPickerViewModel(
     private val appSettingsRepository: AppSettingsRepository,
     private val installedAppsRepository: InstalledAppsRepository,
@@ -29,15 +35,12 @@ class AppPickerViewModel(
     private val installedApps = MutableStateFlow<List<InstalledAppInfo>>(emptyList())
     private val selectedPackages = MutableStateFlow(appSettingsRepository.settings.value.selectedAppPackages)
     private val isLoading = MutableStateFlow(true)
-
-    val uiState = combine(
-        query,
+    private val filteredApps = combine(
+        query.debounce(SEARCH_DEBOUNCE_MS).distinctUntilChanged(),
         installedApps,
-        selectedPackages,
-        isLoading,
-    ) { query, apps, selectedPackages, loading ->
+    ) { query, apps ->
         val normalizedQuery = query.trim()
-        val filteredApps = if (normalizedQuery.isBlank()) {
+        if (normalizedQuery.isBlank()) {
             apps
         } else {
             apps.filter { app ->
@@ -45,10 +48,17 @@ class AppPickerViewModel(
                     app.packageName.contains(normalizedQuery, ignoreCase = true)
             }
         }
+    }.flowOn(Dispatchers.Default)
 
+    val uiState = combine(
+        query,
+        filteredApps,
+        selectedPackages,
+        isLoading,
+    ) { query, apps, selectedPackages, loading ->
         AppPickerUiState(
             query = query,
-            apps = filteredApps,
+            apps = apps,
             selectedPackages = selectedPackages,
             isLoading = loading,
         )
@@ -60,8 +70,13 @@ class AppPickerViewModel(
 
     init {
         viewModelScope.launch {
-            installedApps.value = installedAppsRepository.getInstalledApps()
-            isLoading.value = false
+            try {
+                installedApps.value = runCatching {
+                    installedAppsRepository.getInstalledApps()
+                }.getOrDefault(emptyList())
+            } finally {
+                isLoading.value = false
+            }
         }
     }
 
@@ -81,5 +96,9 @@ class AppPickerViewModel(
 
     fun saveSelection() {
         appSettingsRepository.setSelectedAppPackages(selectedPackages.value)
+    }
+
+    private companion object {
+        const val SEARCH_DEBOUNCE_MS = 200L
     }
 }

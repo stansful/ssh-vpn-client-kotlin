@@ -14,9 +14,13 @@ import com.google.crypto.tink.integration.android.AndroidKeysetManager
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.util.Base64
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class TinkSecretStorage(
     context: Context,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : SecretStorage {
     private val appContext = context.applicationContext
     private val migrationLock = Any()
@@ -41,30 +45,36 @@ class TinkSecretStorage(
     }
 
     override suspend fun saveSecret(id: String, value: String) {
-        ensureLegacyMigrationAttempted()
-        saveEncrypted(id, value)
-        deleteLegacySecret(id)
+        withContext(ioDispatcher) {
+            ensureLegacyMigrationAttempted()
+            saveEncrypted(id, value)
+            deleteLegacySecret(id)
+        }
     }
 
     override suspend fun getSecret(id: String): String? {
-        ensureLegacyMigrationAttempted()
-        val encryptedValue = preferences.getString(id, null)
-        if (encryptedValue != null) {
-            return decrypt(id, encryptedValue)
-        }
+        return withContext(ioDispatcher) {
+            ensureLegacyMigrationAttempted()
+            val encryptedValue = preferences.getString(id, null)
+            if (encryptedValue != null) {
+                return@withContext decrypt(id, encryptedValue)
+            }
 
-        val legacyValue = readLegacySecret(id) ?: return null
-        saveEncrypted(id, legacyValue)
-        deleteLegacySecret(id)
-        return legacyValue
+            val legacyValue = readLegacySecret(id) ?: return@withContext null
+            saveEncrypted(id, legacyValue)
+            deleteLegacySecret(id)
+            legacyValue
+        }
     }
 
     override suspend fun deleteSecret(id: String) {
-        ensureLegacyMigrationAttempted()
-        preferences.edit {
-            remove(id)
+        withContext(ioDispatcher) {
+            ensureLegacyMigrationAttempted()
+            preferences.edit {
+                remove(id)
+            }
+            deleteLegacySecret(id)
         }
-        deleteLegacySecret(id)
     }
 
     private fun ensureLegacyMigrationAttempted() {

@@ -21,7 +21,6 @@ class AppViewModelFactory(
             modelClass.isAssignableFrom(MainViewModel::class.java) -> MainViewModel(
                 appSettingsRepository = container.appSettingsRepository,
                 configRepository = container.sshConfigRepository,
-                keyRepository = container.sshPrivateKeyRepository,
                 vpnConnectionRepository = container.vpnConnectionRepository,
                 connectVpnUseCase = container.connectVpnUseCase,
                 disconnectVpnUseCase = container.disconnectVpnUseCase,
@@ -36,7 +35,6 @@ class AppViewModelFactory(
 
             modelClass.isAssignableFrom(ConfigListViewModel::class.java) -> ConfigListViewModel(
                 configRepository = container.sshConfigRepository,
-                keyRepository = container.sshPrivateKeyRepository,
                 selectSshConfigUseCase = container.selectSshConfigUseCase,
                 deleteSshConfigUseCase = container.deleteSshConfigUseCase,
             )
@@ -51,7 +49,6 @@ class AppViewModelFactory(
 
             modelClass.isAssignableFrom(KeyListViewModel::class.java) -> KeyListViewModel(
                 getSshPrivateKeyListUseCase = container.getSshPrivateKeyListUseCase,
-                getSshPrivateKeyUsageCountUseCase = container.getSshPrivateKeyUsageCountUseCase,
                 deleteSshPrivateKeyUseCase = container.deleteSshPrivateKeyUseCase,
             )
 

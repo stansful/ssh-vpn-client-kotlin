@@ -5,11 +5,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.rememberNavController
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.ui.SshVpnNavGraph
@@ -23,7 +23,7 @@ class MainActivity : ComponentActivity() {
         val container = (application as SshVpnApplication).container
 
         setContent {
-            val settings by container.appSettingsRepository.settings.collectAsState()
+            val settings by container.appSettingsRepository.settings.collectAsStateWithLifecycle()
             val systemDarkTheme = isSystemInDarkTheme()
             val darkTheme = when (settings.themeMode) {
                 AppThemeMode.SYSTEM -> systemDarkTheme

@@ -69,7 +69,7 @@ internal fun TerminalPanel(
 
     LaunchedEffect(terminalState.output.length, expanded) {
         if (expanded) {
-            outputScrollState.animateScrollTo(outputScrollState.maxValue)
+            outputScrollState.scrollTo(outputScrollState.maxValue)
         }
     }
 

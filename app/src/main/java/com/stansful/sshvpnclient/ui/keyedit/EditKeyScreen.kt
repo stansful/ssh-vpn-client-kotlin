@@ -7,11 +7,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stansful.sshvpnclient.AppContainer
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
@@ -31,7 +31,7 @@ fun EditKeyRoute(
         key = "edit-key-${keyId ?: "new"}",
         factory = AppViewModelFactory(container, keyId = keyId),
     )
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
 
     LaunchedEffect(state.isSaved) {
         if (state.isSaved) onSaved()

@@ -23,7 +23,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stansful.sshvpnclient.AppContainer
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.ui.common.AppScreen
@@ -47,7 +47,7 @@ fun ConfigListRoute(
     onEdit: (String) -> Unit,
 ) {
     val viewModel: ConfigListViewModel = viewModel(factory = AppViewModelFactory(container))
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
 
     ConfigListScreen(
         state = state,

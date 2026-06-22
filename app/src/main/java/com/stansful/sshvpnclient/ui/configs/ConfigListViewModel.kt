@@ -2,9 +2,8 @@ package com.stansful.sshvpnclient.ui.configs
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.stansful.sshvpnclient.domain.model.SshConfig
+import com.stansful.sshvpnclient.domain.model.SshConfigSummary
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
-import com.stansful.sshvpnclient.domain.repository.SshPrivateKeyRepository
 import com.stansful.sshvpnclient.domain.usecase.config.DeleteSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.SelectSshConfigUseCase
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,7 +14,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class ConfigListItem(
-    val config: SshConfig,
+    val config: SshConfigSummary,
     val keyName: String?,
     val isSelected: Boolean,
 )
@@ -27,25 +26,21 @@ data class ConfigListUiState(
 
 class ConfigListViewModel(
     configRepository: SshConfigRepository,
-    keyRepository: SshPrivateKeyRepository,
     private val selectSshConfigUseCase: SelectSshConfigUseCase,
     private val deleteSshConfigUseCase: DeleteSshConfigUseCase,
 ) : ViewModel() {
     private val message = MutableStateFlow<String?>(null)
 
     val uiState = combine(
-        configRepository.observeAll(),
-        configRepository.observeSelectedConfig(),
-        keyRepository.observeAll(),
+        configRepository.observeSummaries(),
         message,
-    ) { configs, selected, keys, currentMessage ->
+    ) { configs, currentMessage ->
         ConfigListUiState(
             items = configs.map { config ->
                 ConfigListItem(
                     config = config,
-                    keyName = config.privateKeyId
-                        ?.let { keyId -> keys.firstOrNull { it.id == keyId }?.name },
-                    isSelected = config.id == selected?.id,
+                    keyName = config.keyName,
+                    isSelected = config.isSelected,
                 )
             },
             message = currentMessage,

@@ -30,7 +30,7 @@ android {
     defaultConfig {
         applicationId = "com.stansful.sshvpnclient"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 1
         versionName = "2.1.0"
 
@@ -72,11 +72,19 @@ android {
     }
 
     packaging {
+        jniLibs {
+            keepDebugSymbols += "**/libandroidx.graphics.path.so"
+        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "META-INF/INDEX.LIST"
             excludes += "META-INF/io.netty.versions.properties"
         }
+    }
+
+    lint {
+        // Gradle 9.6 triggers a deprecation inside AGP 9.2.1; stay on its compatible wrapper.
+        disable += "AndroidGradlePluginVersion"
     }
 }
 
@@ -88,8 +96,9 @@ dependencies {
 
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.core:core-ktx:1.19.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
     implementation("androidx.navigation:navigation-compose:2.9.8")
 
     implementation("androidx.compose.foundation:foundation")
@@ -105,8 +114,8 @@ dependencies {
     ksp("androidx.room:room-compiler:2.8.4")
 
     implementation("androidx.security:security-crypto:1.1.0")
-    implementation("com.google.crypto.tink:tink-android:1.21.0")
-    implementation("com.github.mwiede:jsch:2.28.2")
+    implementation("com.google.crypto.tink:tink-android:1.22.0")
+    implementation("com.github.mwiede:jsch:2.28.3")
     implementation("org.bouncycastle:bcprov-jdk18on:1.84")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 

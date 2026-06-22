@@ -150,8 +150,8 @@ fun ErrorMessage(message: String?) {
 fun PrimaryActionButton(
     text: String,
     onClick: () -> Unit,
-    enabled: Boolean = true,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()

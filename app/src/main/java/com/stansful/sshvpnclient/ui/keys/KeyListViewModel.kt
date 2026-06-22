@@ -3,10 +3,9 @@ package com.stansful.sshvpnclient.ui.keys
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.domain.model.KeyInUseException
-import com.stansful.sshvpnclient.domain.model.SshPrivateKey
+import com.stansful.sshvpnclient.domain.model.SshPrivateKeySummary
 import com.stansful.sshvpnclient.domain.usecase.key.DeleteSshPrivateKeyUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyListUseCase
-import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyUsageCountUseCase
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
@@ -16,7 +15,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class KeyListItem(
-    val key: SshPrivateKey,
+    val key: SshPrivateKeySummary,
     val usageCount: Int,
 )
 
@@ -27,7 +26,6 @@ data class KeyListUiState(
 
 class KeyListViewModel(
     getSshPrivateKeyListUseCase: GetSshPrivateKeyListUseCase,
-    private val getSshPrivateKeyUsageCountUseCase: GetSshPrivateKeyUsageCountUseCase,
     private val deleteSshPrivateKeyUseCase: DeleteSshPrivateKeyUseCase,
 ) : ViewModel() {
     private val message = MutableStateFlow<String?>(null)
@@ -37,7 +35,7 @@ class KeyListViewModel(
             keys.map { key ->
                 KeyListItem(
                     key = key,
-                    usageCount = getSshPrivateKeyUsageCountUseCase(key.id),
+                    usageCount = key.usageCount,
                 )
             }
         },

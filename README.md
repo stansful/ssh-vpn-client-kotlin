@@ -25,7 +25,10 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
 - CRUD для SSH-конфигураций и приватных SSH-ключей.
 - Переиспользование одного SSH-ключа в нескольких конфигурациях.
 - Проверка SSH host fingerprint, если он указан в конфигурации.
-- SSH keepalive и автоматический reconnect при обрыве до явного Disconnect.
+- SSH keepalive и автоматический fast reconnect при обрыве до явного Disconnect:
+  - Android VPN interface и маршруты сохраняются во время переподключения SSH;
+  - первый reconnect запускается сразу, повторные ошибки используют bounded backoff от 250 ms до 5 s;
+  - полный VPN rebuild используется только как fallback, если TUN forwarding layer недоступен.
 - Split tunneling:
   - `Proxy` - через туннель идут все приложения;
   - `Selected apps` - через туннель идут только выбранные приложения.
@@ -74,6 +77,35 @@ Target websites / services
 
 TCP-трафик из TUN проксируется через SSH `direct-tcpip`. DNS-запросы VPN обрабатываются как DNS-over-TCP через SSH. Произвольный non-DNS UDP сейчас не проксируется и отбрасывается локальным forwarding layer.
 
+## Fast reconnect
+
+После обнаружения разрыва приложение оставляет Android `VpnService` TUN interface поднятым, приостанавливает только SSH transport и сразу начинает новый SSH handshake. После успешной аутентификации работающий Kotlin forwarder получает новую JSch `Session` без пересоздания VPN interface.
+
+Уже существующие TCP/TLS flow нельзя перенести между двумя SSH-сессиями: они закрываются и переоткрываются самими приложениями. Новые TCP SYN во время короткого reconnect не отклоняются сразу, чтобы Android мог повторить SYN после восстановления transport.
+
+Параметры восстановления:
+
+- local health polling: 2 секунды;
+- effective SSH keepalive: не более 10 секунд, один пропущенный ответ;
+- первый retry после активного разрыва: без искусственной задержки;
+- connect timeout повторной попытки: 8 секунд;
+- повторные неудачи: `250 ms -> 500 ms -> ... -> 5 s`;
+- если TUN forwarder или VPN interface потерян, выполняется полный rebuild pipeline.
+
+## Производительность и потоки
+
+- Контейнер зависимостей ленивый: Room, Tink, PackageManager и VPN-компоненты создаются только при первом использовании. Для первого кадра синхронно загружаются только небольшие UI settings.
+- Room-запросы, Tink/Android Keystore и legacy migration выполняются на `Dispatchers.IO`.
+- Главный экран и списки используют metadata-only Room projections: passwords, private keys и passphrases не расшифровываются для отображения карточек.
+- Usage count SSH-ключей вычисляется одним `LEFT JOIN + COUNT`, без N+1 запросов.
+- Compose собирает `Flow` через `collectAsStateWithLifecycle`, поэтому неактивные экраны не держат лишние collectors.
+- Список установленных приложений кэшируется на 5 минут; поиск дебаунсится на 200 ms и фильтруется на `Dispatchers.Default`.
+- Diagnostics восстанавливаются и сериализуются вне Main thread, поступающие строки публикуются в UI пакетами, а раскрытый список виртуализирован.
+- SSH terminal использует lifecycle-bound coroutine scope на `Dispatchers.IO`; вывод читается пакетами до 32 KiB.
+- VPN connection loop выполняется на `Dispatchers.IO`. В production-коде нет `GlobalScope` и `runBlocking`.
+
+Pagination не используется для списка приложений: источник является локальным `PackageManager`, не предоставляет page API, один раз кэшируется, а UI уже виртуализирован через `LazyColumn`.
+
 ## Ограничения
 
 - Поддержаны TCP и DNS UDP/53. Остальной UDP не туннелируется.
@@ -87,7 +119,7 @@ TCP-трафик из TUN проксируется через SSH `direct-tcpip`
 - macOS или Linux.
 - Android Studio с JBR 17+ или отдельный JDK 17+.
 - Android SDK с API 37.
-- Gradle Wrapper из проекта.
+- Gradle Wrapper 9.5.1 из проекта. Gradle 9.6 пока не используется: AGP 9.2.1 вызывает в нём deprecated API.
 - Android emulator или физическое устройство с включенным USB debugging.
 
 Если Android SDK не найден автоматически, создай `local.properties` в корне проекта:
@@ -253,9 +285,10 @@ Diagnostics не должны содержать приватные ключи, 
 
 ## Последняя проверенная сборка
 
-На 2026-06-08:
+На 2026-06-22:
 
-- `./scripts/build-debug.sh`: success после `./scripts/clean.sh`.
+- `./scripts/build-debug.sh`: success.
+- `./gradlew testDebugUnitTest lintDebug`: success.
 - `./scripts/build-release.sh`: success.
 - `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, APK Signature Scheme v2, 1 signer.
 - Debug APK: `build/app/outputs/apk/debug/app-debug.apk` около 23M.

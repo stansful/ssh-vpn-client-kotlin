@@ -27,11 +27,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
@@ -62,12 +63,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -97,7 +98,9 @@ import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
 import com.stansful.sshvpnclient.ui.common.ErrorMessage
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun MainRoute(
@@ -107,7 +110,7 @@ fun MainRoute(
     openAppPicker: () -> Unit,
 ) {
     val viewModel: MainViewModel = viewModel(factory = AppViewModelFactory(container))
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
@@ -591,7 +594,7 @@ private fun DiagnosticsPanel(state: MainUiState) {
     var expanded by remember { mutableStateOf(false) }
     val clipboard = LocalClipboard.current
     val coroutineScope = rememberCoroutineScope()
-    val logText = state.vpnState.diagnostics.joinToString(separator = "\n")
+    val diagnostics = state.vpnState.diagnostics
 
     GlassPanel {
         Column(
@@ -617,6 +620,9 @@ private fun DiagnosticsPanel(state: MainUiState) {
                     IconButton(
                         onClick = {
                             coroutineScope.launch {
+                                val logText = withContext(Dispatchers.Default) {
+                                    diagnostics.joinToString(separator = "\n")
+                                }
                                 clipboard.setClipEntry(
                                     ClipEntry(ClipData.newPlainText("Connection diagnostics", logText)),
                                 )
@@ -638,14 +644,16 @@ private fun DiagnosticsPanel(state: MainUiState) {
                 enter = fadeIn(tween(150)) + slideInVertically(tween(150)) { -it / 5 },
                 exit = fadeOut(tween(120)),
             ) {
-                SelectionContainer {
-                    Box(
-                        modifier = Modifier
-                            .heightIn(max = 320.dp)
-                            .verticalScroll(rememberScrollState()),
-                    ) {
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 320.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    itemsIndexed(
+                        items = diagnostics,
+                        key = { index, _ -> index },
+                    ) { _, line ->
                         Text(
-                            text = logText,
+                            text = line,
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
                         )

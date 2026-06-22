@@ -8,6 +8,9 @@ class Tun2SocksManager {
     var isRunning: Boolean = false
         private set
 
+    @Volatile
+    private var isTransportPaused: Boolean = false
+
     private var forwarder: KotlinTunForwarder? = null
 
     fun start(
@@ -31,6 +34,7 @@ class Tun2SocksManager {
         )
         forwarder = nextForwarder
         isRunning = true
+        isTransportPaused = false
         nextForwarder.start(
             onStopped = { reason ->
                 if (isRunning) {
@@ -47,10 +51,24 @@ class Tun2SocksManager {
         forwarder = null
         val wasRunning = isRunning
         isRunning = false
+        isTransportPaused = false
         activeForwarder?.stop()
         if (wasRunning) {
             activeForwarder?.awaitStopped(STOP_WAIT_MS)
         }
+    }
+
+    fun pauseSshTransport() {
+        if (isTransportPaused) return
+        forwarder?.pauseSshTransport()
+        isTransportPaused = true
+    }
+
+    fun resumeSshTransport(sshSession: Session) {
+        check(isRunning) { "TUN forwarding is not running" }
+        val activeForwarder = checkNotNull(forwarder) { "TUN forwarder is unavailable" }
+        activeForwarder.resumeSshTransport(sshSession)
+        isTransportPaused = false
     }
 
     private companion object {

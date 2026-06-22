@@ -39,6 +39,129 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-22 - Before Block 50
+
+Plan:
+
+- Optimize cold/warm startup, frame stability, memory, storage, database, and coroutine usage without changing VPN business behavior.
+- Move Room/Tink mapping and legacy secret migration away from the main thread.
+- Add metadata-only Room projections so list/main screens do not decrypt private keys or passwords.
+- Remove N+1 key usage-count queries from the SSH key list.
+- Make the dependency graph lazy except for first-frame settings/state dependencies.
+- Move large diagnostics JSON parsing/serialization off the main thread while preserving unlimited diagnostics semantics.
+- Add lifecycle-aware Compose Flow collection, installed-app caching, and debounced/default-dispatcher app search.
+- Replace terminal executor/manual cleanup thread with structured coroutines and reduce terminal rendering churn.
+- Preserve SSH reconnect, split tunneling, terminal, diagnostics, themes, and storage behavior.
+- Run static coroutine audit, unit tests, lint, debug/release builds, and APK signature verification.
+
+Result:
+
+- Reduced startup work:
+  - made Room, Tink, repositories, PackageManager, VPN managers, and use cases lazy;
+  - kept only small first-frame app settings eager.
+- Removed secret decryption from read-only UI paths:
+  - added metadata-only Room projections for config/key/main screens;
+  - moved full entity mapping, Tink AEAD, Android Keystore, and legacy migration to `Dispatchers.IO`;
+  - replaced per-key usage queries with one joined aggregate query.
+- Reduced UI and memory churn:
+  - switched all Compose state collection to `collectAsStateWithLifecycle`;
+  - batched diagnostics UI publication and moved restore/JSON serialization off Main;
+  - virtualized expanded diagnostics instead of joining/rendering one unlimited string;
+  - moved copy serialization to `Dispatchers.Default`;
+  - batched terminal reads and replaced its executor/manual cleanup thread with a lifecycle-bound IO coroutine scope.
+- Optimized local app discovery:
+  - cached the PackageManager result for 5 minutes;
+  - added 200 ms search debounce and Default-dispatcher filtering;
+  - retained `LazyColumn` virtualization; pagination is not applicable to the local non-pageable PackageManager API.
+- Moved the VPN service connection loop from Main to `Dispatchers.IO`.
+- Debounced split-tunnel settings changes before disconnect and prevented overlapping controlled reconnect jobs.
+- Confirmed no production `GlobalScope` or `runBlocking`; ViewModels use `viewModelScope`, services own and cancel their scopes.
+- Updated target SDK/dependencies and removed project-owned lint warnings. Gradle remains at 9.5.1 because AGP 9.2.1 itself uses an API deprecated by Gradle 9.6.
+
+Behavior preserved:
+
+- VPN routing, SSH auth, split tunneling, unlimited-until-Connect diagnostics, terminal, hot reconnect, and 5-second maximum reconnect backoff are unchanged.
+- Existing blocking TUN/JSch stream loops intentionally retain bounded dedicated executors because converting those protocol loops to coroutines would add regression risk without removing the underlying blocking I/O.
+
+Verification:
+
+- `./scripts/build-debug.sh`: success.
+- `./scripts/test.sh`: success.
+- `./scripts/lint.sh`: success; `No issues found`.
+- `./scripts/build-release.sh`: success with R8/resource shrinking.
+- `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, v2 signed, 1 signer.
+- `git diff --check`: success.
+- APK outputs:
+  - debug: `build/app/outputs/apk/debug/app-debug.apk` - 23 MiB;
+  - release: `build/app/outputs/apk/release/app-release.apk` - 3.7 MiB.
+
+Device validation still required:
+
+- Automated checks cannot measure cold/warm startup, frame timing, heap retention, battery drain, or reconnect latency on the user's Vivo device.
+- Validate with Android Studio Profiler/Macrobenchmark and a real SSH interruption before treating the performance targets as measured rather than structurally improved.
+
+### 2026-06-20 - Before Block 49
+
+Plan:
+
+- Reduce user-visible reconnect downtime without reintroducing battery-heavy polling.
+- Keep the Android VPN interface and Kotlin TUN forwarder alive while SSH reconnects.
+- Add pause/resume SSH transport support to the forwarder and reset only flows tied to the dead SSH session.
+- Retry immediately after an established transport drops, then use a short bounded exponential backoff for repeated failures.
+- Shorten local disconnect detection polling and cap SSH keepalive detection latency.
+- Retain a full VPN rebuild fallback when the TUN forwarder itself is unavailable.
+- Add focused tests where practical, rebuild debug/release, and run lint/unit checks.
+
+Progress:
+
+- User set the reconnect backoff maximum to 5 seconds.
+- Additional performance and energy work:
+  - reduce local health-monitor wakeups while retaining fast SSH keepalive detection;
+  - allow idle control workers to time out;
+  - batch client-to-SSH writes instead of flushing each TCP payload separately;
+  - remove redundant TUN output flush calls;
+  - limit verbose JSch protocol diagnostics on repeated reconnect attempts.
+
+Result:
+
+- Implemented hot SSH transport replacement:
+  - Android VPN interface and routes stay established during normal SSH reconnect;
+  - Kotlin TUN forwarder pauses the failed SSH transport, closes old TCP proxy sessions, and resumes with a new JSch `Session`;
+  - TUN/VPN rebuild remains the fallback when the forwarder or VPN file descriptor is unavailable.
+- Reduced user-visible reconnect delay:
+  - an established transport interruption starts the first reconnect immediately;
+  - repeated failures use tested exponential delays `250ms, 500ms, 1s, 2s, 4s, 5s` capped at 5 seconds;
+  - reconnect SSH handshake timeout is 8 seconds;
+  - local health polling runs every 2 seconds;
+  - effective JSch keepalive is capped at 10 seconds with one missed response before disconnect detection.
+- Improved behavior during the reconnect window:
+  - existing TCP flows tied to the dead SSH session are removed;
+  - new TCP SYN packets are temporarily left unanswered instead of immediately reset, allowing Android TCP retransmission to reach the restored transport;
+  - DNS requests during the short pause are dropped and retried by the client stack.
+- Added performance and energy optimizations:
+  - client-to-SSH writes are flushed in batches up to 16 KiB;
+  - redundant `FileOutputStream.flush()` calls were removed from TUN packet writes;
+  - idle control worker threads time out after 15 seconds;
+  - TUN transport pause is idempotent across repeated failed attempts;
+  - detailed JSch protocol/socket/fingerprint diagnostics run only on the first and every fifth attempt.
+- Added `ReconnectBackoffTest` for growth, maximum cap, and reset behavior.
+- Updated `README.md` and `README_SA.md` with the fast reconnect lifecycle and limitations.
+
+Verification:
+
+- `env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home ./gradlew testDebugUnitTest lintDebug assembleDebug`: success.
+- `./scripts/build-release.sh`: success.
+- `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, v2 signed, 1 signer.
+- `git diff --check`: success.
+- APK outputs:
+  - debug: `build/app/outputs/apk/debug/app-debug.apk`;
+  - release: `build/app/outputs/apk/release/app-release.apk`.
+
+Device validation:
+
+- Existing TCP/TLS streams cannot be migrated between SSH sessions and must reconnect at application level.
+- Real-device interruption testing should confirm the measured `VPN forwarding restored in ...ms` diagnostics and battery behavior under cellular and Wi-Fi networks.
+
 ### 2026-06-15 - Before Block 48
 
 Plan:

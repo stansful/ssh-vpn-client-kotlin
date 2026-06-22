@@ -5,5 +5,5 @@ import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 class GetSshConfigListUseCase(
     private val repository: SshConfigRepository,
 ) {
-    operator fun invoke() = repository.observeAll()
+    operator fun invoke() = repository.observeSummaries()
 }

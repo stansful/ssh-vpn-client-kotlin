@@ -25,18 +25,23 @@ class SshConnectionManager {
         privateKey: SshPrivateKey?,
         log: (String) -> Unit = {},
         socketProtector: ((Socket) -> Boolean)? = null,
+        connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS,
+        verboseDiagnostics: Boolean = true,
     ): Session = withContext(Dispatchers.IO) {
         disconnect()
 
+        val detailLog: (String) -> Unit = if (verboseDiagnostics) log else NO_OP_LOG
         installJschLogger()
-        configureEdDsaSupport(log)
+        configureEdDsaSupport(detailLog)
         val jsch = JSch()
         if (config.authType == AuthType.PRIVATE_KEY) {
             val key = privateKey ?: throw VpnConnectionException("Selected SSH key not found")
-            log("Loading private key into SSH client")
+            detailLog("Loading private key into SSH client")
             addPrivateKeyIdentity(jsch, key)
-            log("Private key loaded; passphrase present: ${!key.passphrase.isNullOrBlank()}")
-            logPrivateKeyFingerprint(jsch, key, log)
+            detailLog("Private key loaded; passphrase present: ${!key.passphrase.isNullOrBlank()}")
+            if (verboseDiagnostics) {
+                logPrivateKeyFingerprint(jsch, key, detailLog)
+            }
         }
 
         try {
@@ -46,16 +51,23 @@ class SshConnectionManager {
                 session.setSocketFactory(
                     VpnProtectedSocketFactory(
                         protectSocket = socketProtector,
-                        connectTimeoutMs = CONNECT_TIMEOUT_MS,
-                        log = log,
+                        connectTimeoutMs = connectTimeoutMs,
+                        log = detailLog,
                     ),
                 )
-                log("SSH socket protection enabled")
+                detailLog("SSH socket protection enabled")
             }
             session.setConfig(connectionConfig(config.authType))
-            session.setServerAliveInterval(config.keepAliveIntervalSec * 1000)
+            val effectiveKeepAliveIntervalSec = minOf(
+                config.keepAliveIntervalSec,
+                MAX_EFFECTIVE_KEEP_ALIVE_INTERVAL_SEC,
+            )
+            session.setServerAliveInterval(effectiveKeepAliveIntervalSec * 1000)
             session.setServerAliveCountMax(SERVER_ALIVE_COUNT_MAX)
-            log("SSH auth method: ${config.authType.label}; keepAlive=${config.keepAliveIntervalSec}s")
+            log(
+                "SSH auth method: ${config.authType.label}; " +
+                    "keepAlive=${effectiveKeepAliveIntervalSec}s; connectTimeout=${connectTimeoutMs}ms",
+            )
 
             if (config.authType == AuthType.PASSWORD) {
                 session.setPassword(
@@ -64,11 +76,15 @@ class SshConnectionManager {
                 )
             }
 
-            withJschLog(log) {
-                session.connect(CONNECT_TIMEOUT_MS)
+            if (verboseDiagnostics) {
+                withJschLog(detailLog) {
+                    session.connect(connectTimeoutMs)
+                }
+            } else {
+                session.connect(connectTimeoutMs)
             }
             log("SSH transport connected")
-            verifyFingerprintIfNeeded(jsch, session, config.fingerprint, log)
+            verifyFingerprintIfNeeded(jsch, session, config.fingerprint, detailLog)
             activeSession = session
             session
         } catch (error: JSchException) {
@@ -308,14 +324,16 @@ class SshConnectionManager {
     }
 
     private companion object {
-        const val CONNECT_TIMEOUT_MS = 20_000
-        const val SERVER_ALIVE_COUNT_MAX = 3
+        const val DEFAULT_CONNECT_TIMEOUT_MS = 20_000
+        const val MAX_EFFECTIVE_KEEP_ALIVE_INTERVAL_SEC = 10
+        const val SERVER_ALIVE_COUNT_MAX = 1
         const val TERMINAL_CONNECT_TIMEOUT_MS = 10_000
         const val TERMINAL_PTY_TYPE = "xterm"
         const val TUNNEL_CHECK_TIMEOUT_MS = 10_000
         const val DEFAULT_TUNNEL_CHECK_HOST = "youtube.com"
         const val DEFAULT_TUNNEL_CHECK_PORT = 443
         const val LOOPBACK_ADDRESS = "127.0.0.1"
+        val NO_OP_LOG: (String) -> Unit = {}
         val jschThreadLog = InheritableThreadLocal<((String) -> Unit)?>()
 
         @Volatile
@@ -328,7 +346,7 @@ class SshConnectionManager {
             if (jschLoggerInstalled) return
             JSch.setLogger(
                 object : Logger {
-                    override fun isEnabled(level: Int): Boolean = true
+                    override fun isEnabled(level: Int): Boolean = jschThreadLog.get() != null
 
                     override fun log(level: Int, message: String?) {
                         val value = message?.trim().orEmpty()
