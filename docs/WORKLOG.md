@@ -81,6 +81,8 @@ Verification:
 
 - `git diff --check`: success.
 - Gradle test/lint/build verification is pending: the managed environment denied access to the existing `~/.gradle` cache after the sandboxed run failed on its wrapper lock file.
+- User release build exposed a Kotlin callback inference error: `requestUpdateInstall` was inferred as `() -> Any` because its conditional branches returned different expression types. Add an explicit `Unit` callback result and rerun verification.
+- Added the explicit `Unit` result; callback type is now `() -> Unit`. Post-fix `git diff --check`: success.
 
 ### 2026-06-23 - Before Block 53
 
