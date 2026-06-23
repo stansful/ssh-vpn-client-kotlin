@@ -15,6 +15,7 @@ require_command() {
 }
 
 require_command python3
+require_command unzip
 
 if [[ -z "$SOURCE_AAR" ]]; then
   if [[ -f "$ROOT_DIR/build/xray-core/libXray/libXray.aar" ]]; then
@@ -50,15 +51,44 @@ PY
 
 mkdir -p "$OUTPUT_DIR"
 rm -f "$OUTPUT_DIR"/libXray-*.aar
+rm -f "$OUTPUT_DIR"/libXray-*.sha256
 
-python3 - "$SOURCE_AAR" "$OUTPUT_DIR" "$APP_VERSION" <<'PY'
+find_d8() {
+  if [[ -z "${ANDROID_HOME:-}" || ! -d "$ANDROID_HOME/build-tools" ]]; then
+    return 1
+  fi
+  find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name d8 | sort | tail -n 1
+}
+
+D8_BIN="$(find_d8 || true)"
+if [[ -z "$D8_BIN" ]]; then
+  echo "Android D8 was not found under ANDROID_HOME/build-tools" >&2
+  exit 1
+fi
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/xray-core-assets.XXXXXX")"
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+unzip -p "$SOURCE_AAR" classes.jar > "$TMP_DIR/classes.jar"
+mkdir -p "$TMP_DIR/dex"
+"$D8_BIN" --min-api 26 --output "$TMP_DIR/dex" "$TMP_DIR/classes.jar"
+if [[ ! -s "$TMP_DIR/dex/classes.dex" ]]; then
+  echo "D8 did not produce classes.dex for Xray runtime assets" >&2
+  exit 1
+fi
+
+python3 - "$SOURCE_AAR" "$TMP_DIR/dex/classes.dex" "$OUTPUT_DIR" "$APP_VERSION" <<'PY'
 import pathlib
 import sys
 import zipfile
 
 source_aar = pathlib.Path(sys.argv[1])
-output_dir = pathlib.Path(sys.argv[2])
-version = sys.argv[3]
+dex_file = pathlib.Path(sys.argv[2])
+output_dir = pathlib.Path(sys.argv[3])
+version = sys.argv[4]
 abis = ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"]
 base_entries = {"AndroidManifest.xml", "proguard.txt", "classes.jar", "R.txt", "res/"}
 
@@ -71,6 +101,11 @@ def clone_info(info):
     cloned.create_system = info.create_system
     cloned.compress_type = zipfile.ZIP_DEFLATED
     return cloned
+
+def generated_info(name):
+    info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    return info
 
 with zipfile.ZipFile(source_aar, "r") as source:
     names = set(source.namelist())
@@ -93,6 +128,7 @@ with zipfile.ZipFile(source_aar, "r") as source:
                     continue
                 data = b"" if info.is_dir() else source.read(info.filename)
                 target.writestr(clone_info(info), data)
+            target.writestr(generated_info("classes.dex"), dex_file.read_bytes())
 
         print(output_path)
 PY
