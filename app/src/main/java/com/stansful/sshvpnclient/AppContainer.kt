@@ -6,7 +6,10 @@ import com.stansful.sshvpnclient.data.apps.PackageManagerInstalledAppsRepository
 import com.stansful.sshvpnclient.data.config.RoomSshConfigRepository
 import com.stansful.sshvpnclient.data.key.RoomSshPrivateKeyRepository
 import com.stansful.sshvpnclient.data.local.AppDatabase
+import com.stansful.sshvpnclient.data.local.MIGRATION_1_2
 import com.stansful.sshvpnclient.data.local.InMemoryVpnConnectionRepository
+import com.stansful.sshvpnclient.data.proxy.RoomProxyProfileRepository
+import com.stansful.sshvpnclient.data.proxy.PublicProxySourceSynchronizer
 import com.stansful.sshvpnclient.data.secret.TinkSecretStorage
 import com.stansful.sshvpnclient.data.settings.SharedPreferencesAppSettingsRepository
 import com.stansful.sshvpnclient.data.update.AndroidAppUpdateDownloader
@@ -15,6 +18,8 @@ import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
 import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
 import com.stansful.sshvpnclient.domain.repository.InstalledAppsRepository
+import com.stansful.sshvpnclient.domain.repository.ProxyProfileRepository
+import com.stansful.sshvpnclient.domain.repository.ProxySourceSynchronizer
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.SshPrivateKeyRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
@@ -28,12 +33,16 @@ import com.stansful.sshvpnclient.domain.usecase.key.DeleteSshPrivateKeyUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyByIdUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyListUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.UpdateSshPrivateKeyUseCase
+import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyShareLinkParser
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
+import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectProxyVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
 import com.stansful.sshvpnclient.vpn.Tun2SocksManager
 import com.stansful.sshvpnclient.vpn.VpnTunnelManager
+import com.stansful.sshvpnclient.xray.XrayConfigBuilder
+import com.stansful.sshvpnclient.xray.XrayCoreBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,13 +52,15 @@ class AppContainer(
 ) {
     private val appContext = context.applicationContext
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val applicationContext: Context
+        get() = appContext
 
     private val database: AppDatabase by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         Room.databaseBuilder(
             appContext,
             AppDatabase::class.java,
             "ssh-vpn-client.db",
-        ).build()
+        ).addMigrations(MIGRATION_1_2).build()
     }
 
     private val secretStorage by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
@@ -78,6 +89,20 @@ class AppContainer(
     val installedAppsRepository: InstalledAppsRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         PackageManagerInstalledAppsRepository(appContext)
     }
+    val proxyShareLinkParser by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { ProxyShareLinkParser() }
+    val proxyProfileRepository: ProxyProfileRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RoomProxyProfileRepository(
+            dao = database.proxyProfileDao(),
+            secretStorage = secretStorage,
+            parser = proxyShareLinkParser,
+        )
+    }
+    val proxySourceSynchronizer: ProxySourceSynchronizer by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        PublicProxySourceSynchronizer(
+            context = appContext,
+            proxyProfileRepository = proxyProfileRepository,
+        )
+    }
     val appUpdateRepository: AppUpdateRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         GitHubAppUpdateRepository(
             context = appContext,
@@ -94,6 +119,12 @@ class AppContainer(
     val sshConnectionManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { SshConnectionManager() }
     val vpnTunnelManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { VpnTunnelManager() }
     val tun2SocksManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { Tun2SocksManager() }
+    val xrayConfigBuilder by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        XrayConfigBuilder(proxyShareLinkParser)
+    }
+    val xrayCoreBridge by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        XrayCoreBridge(appContext, xrayConfigBuilder)
+    }
 
     val addSshConfigUseCase by lazy { AddSshConfigUseCase(sshConfigRepository) }
     val updateSshConfigUseCase by lazy { UpdateSshConfigUseCase(sshConfigRepository) }
@@ -116,7 +147,20 @@ class AppContainer(
             appSettingsRepository = appSettingsRepository,
         )
     }
-    val disconnectVpnUseCase by lazy { DisconnectVpnUseCase(appContext) }
+    val connectProxyVpnUseCase by lazy {
+        ConnectProxyVpnUseCase(
+            context = appContext,
+            proxyProfileRepository = proxyProfileRepository,
+            appSettingsRepository = appSettingsRepository,
+            vpnConnectionRepository = vpnConnectionRepository,
+        )
+    }
+    val disconnectVpnUseCase by lazy {
+        DisconnectVpnUseCase(
+            context = appContext,
+            vpnConnectionRepository = vpnConnectionRepository,
+        )
+    }
     val observeVpnConnectionStateUseCase by lazy {
         ObserveVpnConnectionStateUseCase(vpnConnectionRepository)
     }

@@ -109,6 +109,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
     implementation("androidx.navigation:navigation-compose:2.9.8")
+    implementation("androidx.work:work-runtime:2.11.2")
 
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material:material-icons-extended")
@@ -128,7 +129,13 @@ dependencies {
     implementation("org.bouncycastle:bcprov-jdk18on:1.84")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
+    val xrayAar = file("libs/libXray.aar")
+    if (xrayAar.isFile) {
+        implementation(files(xrayAar))
+    }
+
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20260522")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
 }

@@ -1,6 +1,7 @@
 package com.stansful.sshvpnclient.domain.usecase.vpn
 
 import android.content.Context
+import android.content.Intent
 import androidx.core.content.ContextCompat
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.VpnMode
@@ -9,6 +10,7 @@ import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.SshPrivateKeyRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.vpn.SshVpnService
+import com.stansful.sshvpnclient.vpn.OpenSourceVpnService
 
 class ConnectVpnUseCase(
     private val context: Context,
@@ -18,6 +20,7 @@ class ConnectVpnUseCase(
     private val appSettingsRepository: AppSettingsRepository,
 ) {
     suspend operator fun invoke(preserveDiagnostics: Boolean = false) {
+        context.stopService(Intent(context, OpenSourceVpnService::class.java))
         val config = configRepository.getSelectedConfig()
         if (config == null) {
             vpnConnectionRepository.setError(null, "No configuration selected")

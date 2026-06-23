@@ -12,7 +12,7 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.rememberNavController
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
-import com.stansful.sshvpnclient.ui.SshVpnNavGraph
+import com.stansful.sshvpnclient.ui.GlobalTabsHost
 import com.stansful.sshvpnclient.ui.theme.SshVpnTheme
 import android.graphics.Color as AndroidColor
 
@@ -47,7 +47,7 @@ class MainActivity : ComponentActivity() {
                 themeMode = settings.themeMode,
                 customThemeColors = settings.customThemeColors,
             ) {
-                SshVpnNavGraph(
+                GlobalTabsHost(
                     container = container,
                     navController = rememberNavController(),
                 )

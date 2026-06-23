@@ -7,3 +7,5 @@ local.properties
 *.apk
 *.aab
 *.iml
+app/libs/libXray.aar
+app/libs/libXray-sources.jar

@@ -5,4 +5,10 @@ data class VpnConnectionState(
     val activeConfigId: String? = null,
     val errorMessage: String? = null,
     val diagnostics: List<String> = emptyList(),
+    val activeTransport: VpnTransportType? = null,
 )
+
+enum class VpnTransportType {
+    SSH,
+    XRAY,
+}

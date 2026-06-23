@@ -19,10 +19,24 @@ class VpnTunnelManager {
         appSettings: AppSettings,
         log: (String) -> Unit = {},
     ): ParcelFileDescriptor {
+        return establish(
+            service = service,
+            sessionName = "SSH VPN: ${config.name}",
+            appSettings = appSettings,
+            log = log,
+        )
+    }
+
+    fun establish(
+        service: VpnService,
+        sessionName: String,
+        appSettings: AppSettings,
+        log: (String) -> Unit = {},
+    ): ParcelFileDescriptor {
         close()
 
         val builder = service.Builder()
-            .setSession("SSH VPN: ${config.name}")
+            .setSession(sessionName)
             .setMtu(MTU)
             .addAddress(PRIVATE_ADDRESS, PRIVATE_ADDRESS_PREFIX)
             .addRoute(DEFAULT_ROUTE, DEFAULT_ROUTE_PREFIX)

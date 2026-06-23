@@ -5,6 +5,7 @@ import android.os.SystemClock
 import androidx.core.content.edit
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
+import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -40,13 +41,15 @@ class InMemoryVpnConnectionRepository(
     private var lastDiagnosticsPersistElapsedMs = 0L
 
     override val state: Flow<VpnConnectionState> = mutableState.asStateFlow()
+    override val currentState: VpnConnectionState
+        get() = mutableState.value
 
     init {
         applicationScope.launch { processPersistenceRequests() }
         applicationScope.launch { restoreDiagnostics() }
     }
 
-    override fun setConnecting(configId: String?) {
+    override fun setConnecting(configId: String?, transport: VpnTransportType) {
         synchronized(stateLock) {
             diagnosticsTouched = true
             diagnosticsBuffer.clear()
@@ -54,27 +57,30 @@ class InMemoryVpnConnectionRepository(
             mutableState.value = VpnConnectionState(
                 status = VpnConnectionStatus.CONNECTING,
                 activeConfigId = configId,
+                activeTransport = transport,
             )
             enqueuePersistence(emptyList(), force = true)
         }
     }
 
-    override fun setConnected(configId: String) {
+    override fun setConnected(configId: String, transport: VpnTransportType) {
         updateState { state ->
             state.copy(
                 status = VpnConnectionStatus.CONNECTED,
                 activeConfigId = configId,
                 errorMessage = null,
+                activeTransport = transport,
             )
         }
     }
 
-    override fun setReconnecting(configId: String) {
+    override fun setReconnecting(configId: String, transport: VpnTransportType) {
         updateState { state ->
             state.copy(
                 status = VpnConnectionStatus.RECONNECTING,
                 activeConfigId = configId,
                 errorMessage = null,
+                activeTransport = transport,
             )
         }
     }
@@ -96,6 +102,7 @@ class InMemoryVpnConnectionRepository(
                 status = VpnConnectionStatus.DISCONNECTED,
                 activeConfigId = null,
                 errorMessage = null,
+                activeTransport = null,
             )
             enqueuePersistence(diagnostics, force = true)
         }
@@ -108,6 +115,7 @@ class InMemoryVpnConnectionRepository(
                 status = VpnConnectionStatus.ERROR,
                 activeConfigId = configId,
                 errorMessage = message,
+                activeTransport = null,
             )
             enqueuePersistence(diagnostics, force = true)
         }

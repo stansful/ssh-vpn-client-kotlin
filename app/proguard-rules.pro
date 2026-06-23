@@ -8,3 +8,5 @@
 # Tink registries/keyset managers are sensitive to aggressive class stripping.
 -keep class com.google.crypto.tink.** { *; }
 -dontwarn com.google.crypto.tink.**
+-keep class libXray.** { *; }
+-keep class libxray.** { *; }

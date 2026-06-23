@@ -9,6 +9,7 @@ import com.stansful.sshvpnclient.ui.configs.ConfigListViewModel
 import com.stansful.sshvpnclient.ui.keyedit.EditKeyViewModel
 import com.stansful.sshvpnclient.ui.keys.KeyListViewModel
 import com.stansful.sshvpnclient.ui.main.MainViewModel
+import com.stansful.sshvpnclient.ui.opensource.OpenSourceViewModel
 
 class AppViewModelFactory(
     private val container: AppContainer,
@@ -18,6 +19,15 @@ class AppViewModelFactory(
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         return when {
+            modelClass.isAssignableFrom(OpenSourceViewModel::class.java) -> OpenSourceViewModel(
+                proxyProfileRepository = container.proxyProfileRepository,
+                proxySourceSynchronizer = container.proxySourceSynchronizer,
+                xrayCoreBridge = container.xrayCoreBridge,
+                connectProxyVpnUseCase = container.connectProxyVpnUseCase,
+                disconnectVpnUseCase = container.disconnectVpnUseCase,
+                vpnConnectionRepository = container.vpnConnectionRepository,
+            )
+
             modelClass.isAssignableFrom(MainViewModel::class.java) -> MainViewModel(
                 appSettingsRepository = container.appSettingsRepository,
                 configRepository = container.sshConfigRepository,

@@ -2,7 +2,7 @@
     <string name="app_name">shadow-ssh</string>
     <string name="vpn_notification_channel">VPN connection</string>
     <string name="vpn_notification_title">shadow-ssh is active</string>
-    <string name="vpn_notification_text">Traffic is routed through the selected SSH configuration.</string>
+    <string name="vpn_notification_text">Traffic is routed through the selected VPN configuration.</string>
     <string name="qs_tile_label">shadow-ssh</string>
     <string name="qs_tile_disconnected">Disconnected</string>
     <string name="qs_tile_connecting">Connecting</string>

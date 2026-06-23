@@ -3,6 +3,7 @@ package com.stansful.sshvpnclient.domain.repository
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
+import com.stansful.sshvpnclient.domain.model.GlobalTab
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import kotlinx.coroutines.flow.StateFlow
 
@@ -20,4 +21,8 @@ interface AppSettingsRepository {
     fun setVpnMode(vpnMode: VpnMode)
 
     fun setSelectedAppPackages(packageNames: Set<String>)
+
+    fun setActiveGlobalTab(tab: GlobalTab)
+
+    fun setOpenSourceConsentVersion(version: Int)
 }

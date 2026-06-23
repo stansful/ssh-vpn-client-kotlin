@@ -7,7 +7,23 @@ data class AppSettings(
     val customThemeColors: CustomThemeColors = CustomThemeColors.defaultLight(),
     val vpnMode: VpnMode = VpnMode.PROXY,
     val selectedAppPackages: Set<String> = emptySet(),
+    val activeGlobalTab: GlobalTab = GlobalTab.SHADOW_SSH,
+    val openSourceConsentVersion: Int = 0,
 )
+
+enum class GlobalTab(
+    val storageValue: String,
+    val label: String,
+) {
+    SHADOW_SSH("shadow-ssh", "shadow-ssh"),
+    OPEN_SOURCE("opensource", "opensource");
+
+    companion object {
+        fun fromStorageValue(value: String?): GlobalTab {
+            return entries.firstOrNull { it.storageValue == value } ?: SHADOW_SSH
+        }
+    }
+}
 
 data class CustomThemeColors(
     val primary: Int,

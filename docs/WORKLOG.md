@@ -39,6 +39,42 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-06-23 - Before Block 55
+
+Goal:
+
+- Add a second global `opensource` VPN workspace while preserving the existing SSH workflow and business behavior.
+- Import, synchronize, manage, test, and connect public 3x-ui-compatible VLESS/VMess/Trojan profiles.
+
+Confirmed decisions:
+
+- Use official XTLS/Xray-core pinned to an exact upstream commit and build the Android binding reproducibly from source; do not consume an opaque prebuilt AAR.
+- Persist risk consent by disclaimer version and keep a permanent warning banner in the opensource workspace.
+- Refresh remote profiles through Android-guided 15-minute network-constrained periodic work; do not wake a sleeping device or hold wake locks.
+
+Plan:
+
+- Add a root tab shell with independently preserved `shadow-ssh` and `opensource` navigation state; persist the selected tab with `shadow-ssh` as the initial default.
+- Add versioned consent with accept/back behavior and no opensource connection before acceptance.
+- Add Room entities/DAO/repository and a migration for source-managed and user-managed proxy profiles.
+- Keep list metadata queryable in Room and store raw connection URIs/credentials through the existing Tink-backed secret storage.
+- Implement strict parsers and canonical fingerprints for VLESS, VMess, and Trojan links, including bulk import, duplicate elimination, validation, and unsupported-combination reporting.
+- Implement HTTPS source synchronization with timeouts, response-size limits, ETag support, atomic merge, stale marking, and diagnostics without logging credentials.
+- Add a WorkManager refresh every 15 minutes with validated-network constraints plus immediate/manual refresh paths.
+- Build the opensource UI: risk banner, refresh/add/clipboard import, search/filter, active profile selection, copy/edit/delete, long-press multi-select, select-all, bulk delete, and status/results.
+- Add selected/all tunnel checks with bounded concurrency, cancellation, timeout, progress, and a real YouTube request through each temporary outbound.
+- Introduce a transport abstraction under the existing VPN service so SSH remains unchanged while Xray can consume the Android TUN fd and reconnect independently.
+- Add scripts to fetch a pinned Xray-core revision, verify it, build ABI-specific Android bindings with gomobile/NDK, and package optimized release artifacts.
+- Add parser/repository/migration/sync/UI/transport tests; update README and README_SA; run test, lint, debug, release, signature, and physical-device checks.
+
+Initial observations:
+
+- The provided sample is about 230 VLESS links and includes REALITY/TLS, XTLS Vision, RAW/TCP, gRPC, and XHTTP combinations.
+- Go 1.25.3 is installed locally; gomobile and Android NDK are not currently installed.
+- Android WorkManager periodic work has a 15-minute minimum interval, matching the confirmed refresh policy.
+- First Kotlin compile pass reached Compose and found one explicit `layout.weight` import incompatible with the current Compose BOM; remove it and rerun verification.
+- First pinned native build reached gomobile but Go 1.26 requires `gobind` to be retained through a `tool` directive; add pinned `go get -tool` setup before `gomobile bind`.
+
 ### 2026-06-23 - Before Block 54
 
 Problem:
@@ -1887,3 +1923,56 @@ Result:
 - Verified `./scripts/test.sh`: success.
 - Verified `./scripts/lint.sh`: success.
 - Updated debug APK at `app/build/outputs/apk/debug/app-debug.apk`.
+
+### 2026-06-23 - Before Block 55
+
+Plan:
+
+- Add global tabs with persisted active tab:
+  - `shadow-ssh` as the default existing SSH workflow;
+  - `opensource` as a new public proxy workflow.
+- Add versioned risk consent before entering `opensource`; keep the risk banner visible on the screen.
+- Add public proxy profile storage, parser, deduplication, manual add/edit/delete/copy, clipboard bulk import, search, protocol filters, multi-select, select all, and active selection.
+- Add remote public source sync every 15 minutes after consent and only with network connectivity.
+- Add official Xray-core Android binding built from pinned source commits.
+- Add OpenSource VPN service using Xray TUN mode, app split tunneling, socket protection, connect/disconnect integration, and tunnel checks.
+- Add focused parser/config tests.
+- Update build scripts and documentation.
+- Run tests, lint, Xray build, debug build, and release build.
+
+Result:
+
+- Added `GlobalTabsHost` with persisted `shadow-ssh` / `opensource` tabs.
+- Added one-time versioned consent for public configs and persistent risk banner on the `opensource` screen.
+- Added `ProxyProfile` domain model, Room metadata storage, Tink-backed raw share-link storage, migration `1 -> 2`, and repository APIs.
+- Added parser support for `vless://`, `vmess://`, and `trojan://` share links with canonical fingerprint deduplication.
+- Added remote source sync from `https://hub.mos.ru/zieng2/wl/raw/main/list_universal.txt` through WorkManager with 15-minute periodic scheduling, network constraint, ETag/304 handling, timeouts, and response size cap.
+- Added `opensource` UI:
+  - refresh;
+  - manual add/edit;
+  - clipboard bulk import;
+  - search/filter;
+  - copy/delete;
+  - active profile selection;
+  - long-press multi-select;
+  - select all;
+  - selected/all tunnel checks;
+  - connect/disconnect controls.
+- Added official Xray integration through a reflection bridge to `libXray.aar`, with generated JSON configs for VLESS/VMess/Trojan and common 3x-ui transports/security settings.
+- Added `OpenSourceVpnService`, separate from `SshVpnService`, using Android TUN fd and Xray-core.
+- Added controlled transport switching: connecting SSH stops Xray, connecting Xray stops SSH, and disconnect routes to the active transport.
+- Added `scripts/build-xray-core.sh`; `build-debug.sh` and `build-release.sh` auto-build Xray when `app/libs/libXray.aar` is missing.
+- Built pinned Xray Android binding:
+  - libXray `9bb7cad11a225f1039274dc8afd9810bcf458038`;
+  - Xray-core `94ffd50060f1cfd5d7482ec90a23a92bdefdff68`;
+  - gomobile `v0.0.0-20260611195102-4dd8f1dbf5d2`.
+- Updated `README.md` and `README_SA.md`.
+- Verified `git diff --check`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/build-xray-core.sh`: success.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/build-release.sh`: success.
+- Verified `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, APK Signature Scheme v2, 1 signer.
+- Debug APK built at `build/app/outputs/apk/debug/app-debug.apk` around 153M.
+- Release APK built at `build/app/outputs/apk/release/app-release.apk` around 134M.

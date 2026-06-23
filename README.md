@@ -48,6 +48,19 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
   - открывает shell-channel на текущей SSH-сессии;
   - команды отправляются с фонового IO-потока;
   - команды и remote output не пишутся в diagnostics.
+- Глобальные вкладки:
+  - `shadow-ssh` - основной SSH VPN режим;
+  - `opensource` - импорт и запуск публичных VLESS/VMess/Trojan конфигураций через Xray-core;
+  - активная вкладка сохраняется после перезапуска.
+- `opensource` режим:
+  - перед первым входом показывает предупреждение о рисках публичных конфигураций;
+  - риск-баннер всегда остаётся на экране вкладки;
+  - раз в 15 минут синхронизирует публичный список при наличии сети и принятом предупреждении;
+  - умеет manual refresh, bulk import из clipboard, add/edit/delete/copy конфигураций;
+  - убирает дубли по canonical fingerprint;
+  - поддерживает выбор активного профиля, multi-select, select all и массовое удаление;
+  - проверяет выбранный профиль или все профили запросом к YouTube через Xray;
+  - подключает выбранный профиль отдельным Android `VpnService`.
 - Темы:
   - `System` по умолчанию;
   - `Light`;
@@ -80,6 +93,42 @@ Target websites / services
 ```
 
 TCP-трафик из TUN проксируется через SSH `direct-tcpip`. DNS-запросы VPN обрабатываются как DNS-over-TCP через SSH. Произвольный non-DNS UDP сейчас не проксируется и отбрасывается локальным forwarding layer.
+
+## OpenSource / Xray поток
+
+```text
+Selected Android apps / all apps
+        |
+        v
+Android VpnService TUN interface
+        |
+        v
+Official Xray-core Android binding
+        |
+        v
+Selected VLESS / VMess / Trojan public profile
+        |
+        v
+Target websites / services
+```
+
+Xray-core собирается из исходников официального `XTLS/libXray` с закреплённым commit:
+
+```text
+libXray: 9bb7cad11a225f1039274dc8afd9810bcf458038
+Xray-core: 94ffd50060f1cfd5d7482ec90a23a92bdefdff68
+gomobile: v0.0.0-20260611195102-4dd8f1dbf5d2
+```
+
+Публичный источник конфигураций:
+
+```text
+https://hub.mos.ru/zieng2/wl/raw/main/list_universal.txt
+```
+
+Автосинхронизация выполняется через WorkManager с минимальным периодом 15 минут, только после согласия пользователя и только при доступной сети. Приложение не будит устройство специально и не держит wake lock для этой задачи.
+
+Поддерживаемые share links: `vless://`, `vmess://`, `trojan://`. Parser сохраняет исходную ссылку в Tink-backed secret storage, а в Room кладёт только metadata и fingerprint.
 
 ## Fast reconnect
 
@@ -121,12 +170,15 @@ Pagination не используется для списка приложени�
 - SSH terminal использует интерактивный PTY на сервере, поэтому поведение prompt/echo зависит от server shell.
 - Quick Settings tile нельзя автоматически поставить в конкретное место шторки: пользователь должен добавить плитку через редактирование быстрых настроек Android.
 - Release APK, подписанный локальным ignored keystore, подходит для установки на устройство, но не для production-дистрибуции.
+- Публичные `opensource` конфигурации используются на риск пользователя: приложение не может гарантировать безопасность чужого proxy-сервера.
+- Xray-core значительно увеличивает размер APK, потому что внутри находится нативная Go-библиотека.
 
 ## Требования
 
 - macOS или Linux.
 - Android Studio с JBR 17+ или отдельный JDK 17+.
 - Android SDK с API 37.
+- Android NDK, Go toolchain и gomobile нужны для сборки `libXray.aar`.
 - Gradle Wrapper 9.5.1 из проекта. Gradle 9.6 пока не используется: AGP 9.2.1 вызывает в нём deprecated API.
 - Android emulator или физическое устройство с включенным USB debugging.
 
@@ -140,6 +192,7 @@ sdk.dir=/Users/<user>/Library/Android/sdk
 
 ```bash
 ./scripts/check-env.sh
+./scripts/build-xray-core.sh
 ./scripts/build-debug.sh
 ./scripts/install-debug.sh
 ```
@@ -178,6 +231,8 @@ export SSH_VPN_RELEASE_KEY_PASSWORD='key-password'
 
 Release variant использует R8 minification и resource shrinking. Keep rules лежат в `app/proguard-rules.pro`.
 
+`build-debug.sh` и `build-release.sh` автоматически запускают `build-xray-core.sh`, если `app/libs/libXray.aar` отсутствует.
+
 ## Обновления приложения
 
 Приложение запрашивает последний опубликованный stable release:
@@ -210,6 +265,7 @@ apksigner verify --verbose build/app/outputs/apk/release/app-release.apk
 - `./scripts/create-gradle-wrapper.sh` - создаёт Gradle Wrapper через доступный Gradle или cached distribution.
 - `./scripts/build-debug.sh` - собирает debug APK.
 - `./scripts/build-release.sh` - собирает installable release APK.
+- `./scripts/build-xray-core.sh` - собирает официальный Xray Android binding из закреплённых исходников и кладёт `app/libs/libXray.aar`.
 - `./scripts/install-debug.sh` - устанавливает debug APK на подключённое устройство.
 - `./scripts/lint.sh` - запускает Android lint для debug variant.
 - `./scripts/test.sh` - запускает unit tests.
@@ -234,6 +290,7 @@ app/src/main/java/com/stansful/sshvpnclient/
     config/     SSH config persistence
     key/        SSH key persistence
     local/      Room and VPN state repositories
+    proxy/      public proxy parser, Room repository, source sync
     secret/     Tink-backed secret storage
     settings/   app settings persistence
   domain/
@@ -241,6 +298,7 @@ app/src/main/java/com/stansful/sshvpnclient/
     repository/
     usecase/
   ui/
+    opensource/ public profile list, import, checks, connect controls
     main/       main screen, settings, diagnostics, terminal
     apps/       selected-apps picker
     configs/
@@ -249,7 +307,11 @@ app/src/main/java/com/stansful/sshvpnclient/
     keyedit/
     theme/
   vpn/
-    Android VpnService, SSH manager, Kotlin TUN forwarder, QS tile
+    Android VpnService, SSH manager, Kotlin TUN forwarder, OpenSource Xray service, QS tile
+  work/
+    periodic public proxy sync
+  xray/
+    Xray config builder and reflection bridge to libXray
 ```
 
 Ключевые сетевые файлы:
@@ -260,7 +322,10 @@ app/src/main/java/com/stansful/sshvpnclient/
 - `app/src/main/java/com/stansful/sshvpnclient/vpn/KotlinTunForwarder.kt`
 - `app/src/main/java/com/stansful/sshvpnclient/vpn/Tun2SocksManager.kt`
 - `app/src/main/java/com/stansful/sshvpnclient/vpn/VpnProtectedSocketFactory.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/vpn/OpenSourceVpnService.kt`
 - `app/src/main/java/com/stansful/sshvpnclient/vpn/SshVpnTileService.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/xray/XrayCoreBridge.kt`
+- `app/src/main/java/com/stansful/sshvpnclient/xray/XrayConfigBuilder.kt`
 
 ## Данные и секреты
 
@@ -313,11 +378,13 @@ Diagnostics не должны содержать приватные ключи, 
 
 ## Последняя проверенная сборка
 
-На 2026-06-22:
+На 2026-06-23:
 
 - `./scripts/build-debug.sh`: success.
-- `./gradlew testDebugUnitTest lintDebug`: success.
+- `./scripts/test.sh`: success.
+- `./scripts/lint.sh`: success.
+- `./scripts/build-xray-core.sh`: success.
 - `./scripts/build-release.sh`: success.
 - `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, APK Signature Scheme v2, 1 signer.
-- Debug APK: `build/app/outputs/apk/debug/app-debug.apk` около 23M.
-- Release APK: `build/app/outputs/apk/release/app-release.apk` около 3.7M.
+- Debug APK: `build/app/outputs/apk/debug/app-debug.apk` около 153M.
+- Release APK: `build/app/outputs/apk/release/app-release.apk` около 134M.

@@ -1,13 +1,15 @@
 package com.stansful.sshvpnclient.domain.repository
 
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
+import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import kotlinx.coroutines.flow.Flow
 
 interface VpnConnectionRepository {
     val state: Flow<VpnConnectionState>
-    fun setConnecting(configId: String?)
-    fun setConnected(configId: String)
-    fun setReconnecting(configId: String)
+    val currentState: VpnConnectionState
+    fun setConnecting(configId: String?, transport: VpnTransportType = VpnTransportType.SSH)
+    fun setConnected(configId: String, transport: VpnTransportType = VpnTransportType.SSH)
+    fun setReconnecting(configId: String, transport: VpnTransportType = VpnTransportType.SSH)
     fun setDisconnecting(configId: String?)
     fun setDisconnected()
     fun setError(configId: String?, message: String)

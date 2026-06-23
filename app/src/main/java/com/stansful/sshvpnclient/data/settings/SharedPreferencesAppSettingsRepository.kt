@@ -5,6 +5,7 @@ import androidx.core.content.edit
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
+import com.stansful.sshvpnclient.domain.model.GlobalTab
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -73,6 +74,16 @@ class SharedPreferencesAppSettingsRepository(
         currentSettings.value = currentSettings.value.copy(selectedAppPackages = sortedPackages)
     }
 
+    override fun setActiveGlobalTab(tab: GlobalTab) {
+        preferences.edit { putString(KEY_ACTIVE_GLOBAL_TAB, tab.storageValue) }
+        currentSettings.value = currentSettings.value.copy(activeGlobalTab = tab)
+    }
+
+    override fun setOpenSourceConsentVersion(version: Int) {
+        preferences.edit { putInt(KEY_OPEN_SOURCE_CONSENT_VERSION, version) }
+        currentSettings.value = currentSettings.value.copy(openSourceConsentVersion = version)
+    }
+
     private fun readSettings(): AppSettings {
         return AppSettings(
             showLogsOnMain = preferences.getBoolean(KEY_SHOW_LOGS_ON_MAIN, false),
@@ -84,6 +95,10 @@ class SharedPreferencesAppSettingsRepository(
                 .getStringSet(KEY_SELECTED_APP_PACKAGES, emptySet())
                 .orEmpty()
                 .toSortedSet(),
+            activeGlobalTab = GlobalTab.fromStorageValue(
+                preferences.getString(KEY_ACTIVE_GLOBAL_TAB, null),
+            ),
+            openSourceConsentVersion = preferences.getInt(KEY_OPEN_SOURCE_CONSENT_VERSION, 0),
         )
     }
 
@@ -116,5 +131,7 @@ class SharedPreferencesAppSettingsRepository(
         const val KEY_CUSTOM_ERROR = "custom_error"
         const val KEY_VPN_MODE = "vpn_mode"
         const val KEY_SELECTED_APP_PACKAGES = "selected_app_packages"
+        const val KEY_ACTIVE_GLOBAL_TAB = "active_global_tab"
+        const val KEY_OPEN_SOURCE_CONSENT_VERSION = "open_source_consent_version"
     }
 }
