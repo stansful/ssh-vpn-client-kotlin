@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.os.Build
 import androidx.core.content.edit
 import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
 import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
@@ -24,6 +25,7 @@ class GitHubAppUpdateRepository(
     private val currentVersionName: String,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val cpuDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val supportedAbis: List<String> = Build.SUPPORTED_ABIS.toList(),
     private val nowMs: () -> Long = System::currentTimeMillis,
 ) : AppUpdateRepository {
     private val appContext = context.applicationContext
@@ -155,9 +157,11 @@ class GitHubAppUpdateRepository(
             }
         }
         val versionText = version.toString()
-        val apk = apkCandidates.firstOrNull { asset ->
-            asset.optString("name").contains(versionText)
-        } ?: apkCandidates.firstOrNull()
+        val apk = selectBestApkAsset(
+            apkCandidates = apkCandidates,
+            versionText = versionText,
+            supportedAbis = supportedAbis,
+        )
         ?: throw AppUpdateException("GitHub release does not contain an APK asset")
 
         return AppUpdateInfo(
@@ -202,6 +206,85 @@ class GitHubAppUpdateRepository(
         const val SHA256_PREFIX = "sha256:"
     }
 }
+
+internal fun selectBestApkAssetName(
+    apkNames: List<String>,
+    versionText: String,
+    supportedAbis: List<String>,
+): String? {
+    if (apkNames.isEmpty()) return null
+    return apkNames
+        .mapIndexed { index, name ->
+            ApkAssetScore(
+                index = index,
+                name = name,
+                score = apkAssetScore(name, versionText, supportedAbis),
+            )
+        }
+        .maxWithOrNull(
+            compareBy<ApkAssetScore> { it.score }
+                .thenByDescending { -it.index },
+        )
+        ?.name
+}
+
+private fun selectBestApkAsset(
+    apkCandidates: List<JSONObject>,
+    versionText: String,
+    supportedAbis: List<String>,
+): JSONObject? {
+    val selectedName = selectBestApkAssetName(
+        apkNames = apkCandidates.map { asset -> asset.optString("name") },
+        versionText = versionText,
+        supportedAbis = supportedAbis,
+    ) ?: return null
+    return apkCandidates.firstOrNull { asset -> asset.optString("name") == selectedName }
+}
+
+private fun apkAssetScore(
+    name: String,
+    versionText: String,
+    supportedAbis: List<String>,
+): Int {
+    val normalizedName = name.lowercase()
+    val versionBonus = if (normalizedName.contains(versionText.lowercase())) VERSION_MATCH_BONUS else 0
+    val abiRank = supportedAbis.indexOfFirst { abi -> normalizedName.matchesAbi(abi) }
+
+    return when {
+        abiRank >= 0 -> ABI_MATCH_BASE_SCORE - abiRank + versionBonus
+        normalizedName.contains("universal") -> UNIVERSAL_MATCH_SCORE + versionBonus
+        versionBonus > 0 -> VERSION_ONLY_SCORE + versionBonus
+        else -> 0
+    }
+}
+
+private fun String.matchesAbi(abi: String): Boolean {
+    if (abi.equals("x86", ignoreCase = true)) {
+        return contains("x86") && !contains("x86_64") && !contains("x86-64")
+    }
+    return abiMarkers(abi).any { marker -> contains(marker) }
+}
+
+private fun abiMarkers(abi: String): List<String> {
+    return when (abi.lowercase()) {
+        "arm64-v8a" -> listOf("arm64-v8a", "arm64", "aarch64")
+        "armeabi-v7a" -> listOf("armeabi-v7a", "armv7", "arm32")
+        "x86_64" -> listOf("x86_64", "x86-64", "x64")
+        "x86" -> listOf("x86")
+        else -> listOf(abi.lowercase())
+    }
+}
+
+private data class ApkAssetScore(
+    val index: Int,
+    val name: String,
+    val score: Int,
+)
+
+private const val ABI_MATCH_BASE_SCORE = 10_000
+private const val UNIVERSAL_MATCH_SCORE = 5_000
+private const val VERSION_ONLY_SCORE = 1_000
+private const val VERSION_MATCH_BONUS = 100
 
 class AppUpdateException(
     message: String,

@@ -139,28 +139,34 @@ else
   exit 1
 fi
 
+release_output_dir="$ROOT_DIR/build/app/outputs/apk/release"
+rm -rf "$release_output_dir"
+
 "$GRADLE" -p "$ROOT_DIR" :app:assembleRelease
 
-signed_apk="$ROOT_DIR/build/app/outputs/apk/release/app-release.apk"
-unsigned_apk="$ROOT_DIR/build/app/outputs/apk/release/app-release-unsigned.apk"
+release_apks=()
+while IFS= read -r apk_path; do
+  release_apks+=("$apk_path")
+done < <(find "$release_output_dir" -maxdepth 1 -type f -name '*.apk' | sort)
 
-if [[ -f "$signed_apk" ]]; then
-  signed_output_exists=1
-else
-  signed_output_exists=0
-fi
+signed_apks=()
+unsigned_apks=()
+for apk_path in "${release_apks[@]}"; do
+  if [[ "$apk_path" == *-unsigned.apk ]]; then
+    unsigned_apks+=("$apk_path")
+  else
+    signed_apks+=("$apk_path")
+  fi
+done
 
-if [[ -f "$unsigned_apk" ]]; then
-  unsigned_output_exists=1
-else
-  unsigned_output_exists=0
-fi
-
-if ((signed_output_exists == 1)); then
-  echo "Release APK: $signed_apk"
-elif ((unsigned_output_exists == 1)); then
-  echo "Unsigned release APK: $unsigned_apk"
-  echo "This APK is not installable until it is signed." >&2
+if ((${#signed_apks[@]} > 0)); then
+  echo "Release APKs:"
+  printf '  %s\n' "${signed_apks[@]}"
+elif ((${#unsigned_apks[@]} > 0)); then
+  echo "Release build produced unsigned APKs only:" >&2
+  printf '  %s\n' "${unsigned_apks[@]}"
+  echo "Expected signed APKs. Check release signing configuration." >&2
+  exit 1
 else
   echo "Release build completed, but APK output was not found in build/app/outputs/apk/release." >&2
   exit 1
