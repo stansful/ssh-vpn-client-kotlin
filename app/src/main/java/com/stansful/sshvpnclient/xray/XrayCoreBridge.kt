@@ -46,6 +46,8 @@ class XrayCoreBridge(
             XrayCoreStore(appContext).install(input)
             cachedBinding = null
             bindingLoaded = false
+            cachedBinding = XrayBinding.loadRequired(appContext)
+            bindingLoaded = true
         }
     }
 
@@ -219,19 +221,61 @@ private class XrayBinding(private val apiClass: Class<*>) {
 
     companion object {
         fun load(context: Context): XrayBinding? {
-            loadFromClassLoader(context.classLoader)?.let { return it }
-            return XrayCoreStore(context).loadClassLoader()?.let(::loadFromClassLoader)
+            return loadWithDetails(context).binding
         }
 
-        private fun loadFromClassLoader(classLoader: ClassLoader): XrayBinding? {
-            val apiClass = XRAY_CLASS_NAMES.firstNotNullOfOrNull { className ->
-                runCatching { Class.forName(className, true, classLoader) }.getOrNull()
+        fun loadRequired(context: Context): XrayBinding {
+            val result = loadWithDetails(context)
+            return result.binding ?: error(
+                buildString {
+                    append("Installed Xray core could not be loaded")
+                    if (result.errors.isNotEmpty()) {
+                        append(": ")
+                        append(result.errors.joinToString("; "))
+                    }
+                },
+            )
+        }
+
+        private fun loadWithDetails(context: Context): XrayBindingLoadResult {
+            val errors = mutableListOf<String>()
+            loadFromClassLoader(context.classLoader, errors)?.let {
+                return XrayBindingLoadResult(it, errors)
             }
-            return apiClass?.let(::XrayBinding)
+            val runtimeClassLoader = runCatching { XrayCoreStore(context).loadClassLoader() }
+                .onFailure { error ->
+                    errors += "runtime core prepare failed: ${error.message ?: error::class.java.simpleName}"
+                }
+                .getOrNull()
+            runtimeClassLoader?.let { classLoader ->
+                loadFromClassLoader(classLoader, errors)?.let {
+                    return XrayBindingLoadResult(it, errors)
+                }
+            }
+            return XrayBindingLoadResult(null, errors)
+        }
+
+        private fun loadFromClassLoader(
+            classLoader: ClassLoader,
+            errors: MutableList<String>,
+        ): XrayBinding? {
+            XRAY_CLASS_NAMES.forEach { className ->
+                runCatching { Class.forName(className, true, classLoader) }
+                    .onSuccess { apiClass -> return XrayBinding(apiClass) }
+                    .onFailure { error ->
+                        errors += "$className: ${error.message ?: error::class.java.simpleName}"
+                    }
+            }
+            return null
         }
 
         private val XRAY_CLASS_NAMES = listOf("libXray.LibXray", "libxray.LibXray")
     }
+
+    private data class XrayBindingLoadResult(
+        val binding: XrayBinding?,
+        val errors: List<String>,
+    )
 }
 
 private class XrayCoreStore(context: Context) {

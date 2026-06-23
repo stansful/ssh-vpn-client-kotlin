@@ -49,9 +49,9 @@ PY
 )"
 
 mkdir -p "$OUTPUT_DIR"
+rm -f "$OUTPUT_DIR"/libXray-*.aar
 
 python3 - "$SOURCE_AAR" "$OUTPUT_DIR" "$APP_VERSION" <<'PY'
-import hashlib
 import pathlib
 import sys
 import zipfile
@@ -94,9 +94,5 @@ with zipfile.ZipFile(source_aar, "r") as source:
                 data = b"" if info.is_dir() else source.read(info.filename)
                 target.writestr(clone_info(info), data)
 
-        digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
-        sha_path = output_dir / f"{output_path.name}.sha256"
-        sha_path.write_text(f"{digest}  {output_path.name}\n", encoding="utf-8")
         print(output_path)
-        print(sha_path)
 PY

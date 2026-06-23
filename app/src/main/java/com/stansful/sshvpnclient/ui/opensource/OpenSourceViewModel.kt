@@ -31,6 +31,7 @@ import com.stansful.sshvpnclient.domain.repository.XrayCoreUpdateRepository
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectProxyVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -134,6 +135,7 @@ class OpenSourceViewModel(
     )
     private var checkJob: Job? = null
     private var updateCheckJob: Job? = null
+    private var xrayCoreDownloadJob: Job? = null
     private var settingsReconnectJob: Job? = null
     private var settingsReconnectStarted = false
 
@@ -533,7 +535,7 @@ class OpenSourceViewModel(
 
     fun downloadXrayCore(asset: XrayCoreAsset) {
         val state = xrayCoreUpdateState.value
-        if (state.isDownloading || state.isChecking) return
+        if (xrayCoreDownloadJob?.isActive == true || state.isDownloading || state.isChecking) return
         if (vpnConnectionRepository.currentState.isXrayActive()) {
             xrayCoreUpdateState.update {
                 it.copy(statusMessage = "Disconnect opensource VPN before updating Xray core")
@@ -550,7 +552,7 @@ class OpenSourceViewModel(
             return
         }
 
-        viewModelScope.launch {
+        xrayCoreDownloadJob = viewModelScope.launch {
             xrayCoreUpdateState.update {
                 it.copy(
                     isDownloading = true,
@@ -578,11 +580,28 @@ class OpenSourceViewModel(
                     it.copy(
                         isDownloading = false,
                         downloadingAbi = null,
-                        statusMessage = error.message ?: "Unable to install Xray core",
+                        statusMessage = if (error is CancellationException) {
+                            "Xray core download cancelled"
+                        } else {
+                            error.message ?: "Unable to install Xray core"
+                        },
                     )
                 }
+            }.also {
+                xrayCoreDownloadJob = null
             }
-            downloadedFile?.delete()
+        }
+    }
+
+    fun cancelXrayCoreDownload() {
+        xrayCoreDownloadJob?.cancel()
+        xrayCoreDownloadJob = null
+        xrayCoreUpdateState.update {
+            it.copy(
+                isDownloading = false,
+                downloadingAbi = null,
+                statusMessage = "Xray core download cancelled",
+            )
         }
     }
 

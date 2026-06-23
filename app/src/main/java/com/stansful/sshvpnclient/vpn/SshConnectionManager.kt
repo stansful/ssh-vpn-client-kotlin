@@ -104,6 +104,33 @@ class SshConnectionManager {
         activeSession = null
     }
 
+    suspend fun checkActiveTransport(
+        log: (String) -> Unit = {},
+        timeoutMs: Int = WAKE_HEALTH_CHECK_TIMEOUT_MS,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val session = activeSession?.takeIf { it.isConnected } ?: run {
+            log("SSH transport probe failed: session is not connected")
+            return@withContext false
+        }
+        var channel: ChannelDirectTCPIP? = null
+        try {
+            log("SSH transport probe: opening direct TCP to $WAKE_HEALTH_CHECK_HOST:$WAKE_HEALTH_CHECK_PORT")
+            channel = session.openChannel("direct-tcpip") as ChannelDirectTCPIP
+            channel.setHost(WAKE_HEALTH_CHECK_HOST)
+            channel.setPort(WAKE_HEALTH_CHECK_PORT)
+            channel.setOrgIPAddress(LOOPBACK_ADDRESS)
+            channel.setOrgPort(0)
+            channel.connect(timeoutMs)
+            log("SSH transport probe succeeded")
+            true
+        } catch (error: Exception) {
+            log("SSH transport probe failed: ${error.message ?: error::class.java.simpleName}")
+            false
+        } finally {
+            channel?.disconnect()
+        }
+    }
+
     suspend fun openTerminal(
         log: (String) -> Unit = {},
         onOutput: (String) -> Unit,
@@ -330,6 +357,9 @@ class SshConnectionManager {
         const val TERMINAL_CONNECT_TIMEOUT_MS = 10_000
         const val TERMINAL_PTY_TYPE = "xterm"
         const val TUNNEL_CHECK_TIMEOUT_MS = 10_000
+        const val WAKE_HEALTH_CHECK_TIMEOUT_MS = 4_000
+        const val WAKE_HEALTH_CHECK_HOST = "1.1.1.1"
+        const val WAKE_HEALTH_CHECK_PORT = 443
         const val DEFAULT_TUNNEL_CHECK_HOST = "youtube.com"
         const val DEFAULT_TUNNEL_CHECK_PORT = 443
         const val LOOPBACK_ADDRESS = "127.0.0.1"

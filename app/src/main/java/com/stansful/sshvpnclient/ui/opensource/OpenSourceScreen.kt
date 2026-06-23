@@ -430,6 +430,7 @@ private fun OpenSourceScreen(
             xrayActive = state.xrayConnected,
             onCheckXrayCoreUpdates = viewModel::checkXrayCoreUpdates,
             onDownloadXrayCore = viewModel::downloadXrayCore,
+            onCancelXrayCoreDownload = viewModel::cancelXrayCoreDownload,
             updateState = state.updateState,
             onCheckForUpdates = viewModel::checkForUpdates,
             onInstallUpdate = onInstallUpdate,
@@ -654,6 +655,7 @@ private fun OpenSourceSettingsSheet(
     xrayActive: Boolean,
     onCheckXrayCoreUpdates: () -> Unit,
     onDownloadXrayCore: (XrayCoreAsset) -> Unit,
+    onCancelXrayCoreDownload: () -> Unit,
     updateState: OpenSourceUpdateUiState,
     onCheckForUpdates: () -> Unit,
     onInstallUpdate: () -> Unit,
@@ -707,6 +709,7 @@ private fun OpenSourceSettingsSheet(
                 xrayActive = xrayActive,
                 onCheckUpdates = onCheckXrayCoreUpdates,
                 onDownload = onDownloadXrayCore,
+                onCancelDownload = onCancelXrayCoreDownload,
             )
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
@@ -797,6 +800,7 @@ private fun XrayCoreUpdateSection(
     xrayActive: Boolean,
     onCheckUpdates: () -> Unit,
     onDownload: (XrayCoreAsset) -> Unit,
+    onCancelDownload: () -> Unit,
 ) {
     val uriHandler = LocalUriHandler.current
 
@@ -861,6 +865,7 @@ private fun XrayCoreUpdateSection(
                 downloading = state.isDownloading && state.downloadingAbi == state.runtimeAbi,
                 enabled = !xrayActive && !state.isChecking && !state.isDownloading,
                 onDownload = onDownload,
+                onCancelDownload = onCancelDownload,
             )
         }
 
@@ -895,6 +900,7 @@ private fun XrayCoreAssetRow(
     downloading: Boolean,
     enabled: Boolean,
     onDownload: (XrayCoreAsset) -> Unit,
+    onCancelDownload: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -925,22 +931,25 @@ private fun XrayCoreAssetRow(
                 )
             }
             FilledTonalButton(
-                onClick = { asset?.let(onDownload) },
-                enabled = asset != null && enabled,
+                onClick = {
+                    if (downloading) {
+                        onCancelDownload()
+                    } else {
+                        asset?.let(onDownload)
+                    }
+                },
+                enabled = downloading || (asset != null && enabled),
                 shape = RoundedCornerShape(8.dp),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
             ) {
                 if (downloading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                    )
+                    Icon(Icons.Default.Cancel, contentDescription = null, modifier = Modifier.size(18.dp))
                 } else {
                     Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                 }
                 Text(
                     text = when {
-                        downloading -> "Loading"
+                        downloading -> "Cancel"
                         asset == null -> "Missing"
                         else -> "Download"
                     },

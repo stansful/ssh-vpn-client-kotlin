@@ -133,6 +133,17 @@ class SshVpnService : android.net.VpnService() {
                         "${screenOffDurationMs / 1_000L}s screen off",
                 )
             }
+            val transportHealthy = appContainer.sshConnectionManager.checkActiveTransport(
+                log = { message ->
+                    appContainer.vpnConnectionRepository.appendDiagnostic("Wake recovery: $message")
+                },
+            )
+            if (!transportHealthy && !userRequestedDisconnect) {
+                appContainer.vpnConnectionRepository.appendDiagnostic(
+                    "Wake recovery: SSH transport is stale; reconnecting",
+                )
+                appContainer.sshConnectionManager.disconnect()
+            }
         }
     }
 

@@ -12,13 +12,16 @@ import com.stansful.sshvpnclient.domain.model.XrayCoreRelease
 import com.stansful.sshvpnclient.domain.repository.XrayCoreUpdateRepository
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import kotlin.coroutines.coroutineContext
 
 class GitHubXrayCoreUpdateRepository(
     context: Context,
@@ -41,10 +44,15 @@ class GitHubXrayCoreUpdateRepository(
         }
         validateDownloadUrl(asset.downloadUrl)
 
-        val downloadDir = File(appContext.cacheDir, XRAY_CORE_DOWNLOAD_DIRECTORY).apply { mkdirs() }
-        downloadDir.listFiles()?.forEach { oldFile -> runCatching { oldFile.delete() } }
+        val downloadDir = File(appContext.filesDir, XRAY_CORE_DOWNLOAD_DIRECTORY).apply { mkdirs() }
+        downloadDir.listFiles()
+            ?.filter { oldFile -> oldFile.name != asset.safeFileName() }
+            ?.forEach { oldFile -> runCatching { oldFile.delete() } }
 
         val targetFile = File(downloadDir, asset.safeFileName())
+        if (targetFile.isFile && targetFile.length() > 0L && targetFile.matchesDigest(asset.sha256Digest)) {
+            return@withContext targetFile
+        }
         val tempFile = File(downloadDir, "${targetFile.name}.tmp")
         runCatching { tempFile.delete() }
 
@@ -66,6 +74,7 @@ class GitHubXrayCoreUpdateRepository(
                     val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
                     var totalBytes = 0L
                     while (true) {
+                        coroutineContext.ensureActive()
                         val read = input.read(buffer)
                         if (read < 0) break
                         totalBytes += read
@@ -123,17 +132,6 @@ class GitHubXrayCoreUpdateRepository(
         val releaseUrl = release.requireString("html_url")
         val assets = release.optJSONArray("assets")
             ?: throw AppUpdateException("Xray core release does not contain assets")
-        val sha256ByName = buildMap {
-            for (index in 0 until assets.length()) {
-                val asset = assets.optJSONObject(index) ?: continue
-                val name = asset.optString("name")
-                if (!name.endsWith(".sha256", ignoreCase = true)) continue
-                val url = asset.optString("browser_download_url")
-                if (url.isBlank()) continue
-                put(name.removeSuffix(".sha256"), url)
-            }
-        }
-        val sha256DigestCache = mutableMapOf<String, String?>()
 
         val parsedAssets = buildList {
             for (index in 0 until assets.length()) {
@@ -162,10 +160,7 @@ class GitHubXrayCoreUpdateRepository(
                             sha256Digest = asset.optString("digest")
                                 .takeIf { it.startsWith(SHA256_PREFIX, ignoreCase = true) }
                                 ?.substringAfter(':')
-                                ?.lowercase()
-                                ?: sha256DigestCache.getOrPut(name) {
-                                    sha256ByName[name]?.let(::loadSha256Sidecar)
-                                },
+                                ?.lowercase(),
                             universal = matchingAbis.isEmpty(),
                         ),
                     )
@@ -206,25 +201,22 @@ class GitHubXrayCoreUpdateRepository(
         }
     }
 
-    private fun loadSha256Sidecar(downloadUrl: String): String? {
-        validateDownloadUrl(downloadUrl)
-        val connection = openConnection(URL(downloadUrl))
-        try {
-            connection.requestMethod = "GET"
-            connection.connectTimeout = CONNECT_TIMEOUT_MS
-            connection.readTimeout = READ_TIMEOUT_MS
-            connection.instanceFollowRedirects = true
-            connection.setRequestProperty("User-Agent", USER_AGENT)
+    private fun File.matchesDigest(expectedDigest: String?): Boolean {
+        if (expectedDigest.isNullOrBlank()) return true
+        return sha256() == expectedDigest.lowercase()
+    }
 
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
-            val body = readLimitedResponse(connection)
-            return SHA256_LINE_REGEX.find(body)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.lowercase()
-        } finally {
-            connection.disconnect()
+    private fun File.sha256(): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        FileInputStream(this).use { input ->
+            val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
         }
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
     }
 
     private fun openConnection(url: URL): HttpURLConnection {
@@ -283,6 +275,5 @@ class GitHubXrayCoreUpdateRepository(
         const val RESPONSE_BUFFER_SIZE = 8 * 1_024
         const val DOWNLOAD_BUFFER_SIZE = 32 * 1_024
         const val SHA256_PREFIX = "sha256:"
-        val SHA256_LINE_REGEX = Regex("""\b([a-fA-F0-9]{64})\b""")
     }
 }
