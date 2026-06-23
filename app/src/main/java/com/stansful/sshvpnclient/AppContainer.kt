@@ -7,6 +7,7 @@ import com.stansful.sshvpnclient.data.config.RoomSshConfigRepository
 import com.stansful.sshvpnclient.data.key.RoomSshPrivateKeyRepository
 import com.stansful.sshvpnclient.data.local.AppDatabase
 import com.stansful.sshvpnclient.data.local.MIGRATION_1_2
+import com.stansful.sshvpnclient.data.local.MIGRATION_2_3
 import com.stansful.sshvpnclient.data.local.InMemoryVpnConnectionRepository
 import com.stansful.sshvpnclient.data.proxy.RoomProxyProfileRepository
 import com.stansful.sshvpnclient.data.proxy.PublicProxySourceSynchronizer
@@ -60,7 +61,7 @@ class AppContainer(
             appContext,
             AppDatabase::class.java,
             "ssh-vpn-client.db",
-        ).addMigrations(MIGRATION_1_2).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
     }
 
     private val secretStorage by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {

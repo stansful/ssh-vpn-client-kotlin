@@ -4,17 +4,24 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
+import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
+import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
+import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSource
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSummary
 import com.stansful.sshvpnclient.domain.model.ProxyProtocol
+import com.stansful.sshvpnclient.domain.model.ProxySecurity
 import com.stansful.sshvpnclient.domain.model.ProxyTestStatus
+import com.stansful.sshvpnclient.domain.model.ProxyTransport
 import com.stansful.sshvpnclient.domain.model.ProxyTunnelTestResult
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
+import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
+import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
 import com.stansful.sshvpnclient.domain.repository.ProxyProfileRepository
 import com.stansful.sshvpnclient.domain.repository.ProxySourceSynchronizer
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
@@ -57,6 +64,7 @@ data class OpenSourceUiState(
     val appSettings: AppSettings = AppSettings(),
     val vpnState: VpnConnectionState = VpnConnectionState(),
     val xrayCoreAvailable: Boolean = false,
+    val updateState: OpenSourceUpdateUiState = OpenSourceUpdateUiState(),
 ) {
     val selectionMode: Boolean get() = selectedIds.isNotEmpty()
     val selectedProfile: ProxyProfileSummary? get() = profiles.firstOrNull(ProxyProfileSummary::isSelected)
@@ -80,6 +88,13 @@ data class OpenSourceUiState(
             vpnState.status != VpnConnectionStatus.DISCONNECTING
 }
 
+data class OpenSourceUpdateUiState(
+    val isChecking: Boolean = false,
+    val availableUpdate: AppUpdateInfo? = null,
+    val statusMessage: String? = null,
+    val downloadState: AppUpdateDownloadState = AppUpdateDownloadState.Idle,
+)
+
 class OpenSourceViewModel(
     private val proxyProfileRepository: ProxyProfileRepository,
     private val proxySourceSynchronizer: ProxySourceSynchronizer,
@@ -88,6 +103,8 @@ class OpenSourceViewModel(
     private val connectProxyVpnUseCase: ConnectProxyVpnUseCase,
     private val disconnectVpnUseCase: DisconnectVpnUseCase,
     private val vpnConnectionRepository: VpnConnectionRepository,
+    private val appUpdateRepository: AppUpdateRepository,
+    private val appUpdateDownloader: AppUpdateDownloader,
 ) : ViewModel() {
     private val query = MutableStateFlow("")
     private val protocolFilter = MutableStateFlow<ProxyProtocol?>(null)
@@ -95,12 +112,14 @@ class OpenSourceViewModel(
     private val operation = MutableStateFlow(OperationState())
     private val dialogState = MutableStateFlow(DialogState())
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
+    private val appUpdateState = MutableStateFlow(OpenSourceUpdateUiState())
     private var checkJob: Job? = null
+    private var updateCheckJob: Job? = null
     private var settingsReconnectJob: Job? = null
     private var settingsReconnectStarted = false
 
     init {
-        synchronize()
+        synchronize(force = false)
         viewModelScope.launch {
             var previousSplitTunnelSettings = appSettingsRepository.settings.value.splitTunnelSettings()
             appSettingsRepository.settings
@@ -112,6 +131,32 @@ class OpenSourceViewModel(
                     }
                     previousSplitTunnelSettings = nextSplitTunnelSettings
                 }
+        }
+        viewModelScope.launch {
+            appUpdateDownloader.state.collect { downloadState ->
+                appUpdateState.update { state ->
+                    state.copy(
+                        downloadState = downloadState,
+                        statusMessage = when (downloadState) {
+                            is AppUpdateDownloadState.Downloading -> {
+                                val progress = downloadState.progressPercent?.let { " · $it%" }.orEmpty()
+                                val paused = if (downloadState.isPaused) " · paused" else ""
+                                "Downloading shadow-ssh ${downloadState.versionName}$progress$paused"
+                            }
+                            is AppUpdateDownloadState.Failed -> downloadState.message
+                            is AppUpdateDownloadState.ReadyToInstall ->
+                                "shadow-ssh ${downloadState.versionName} is ready to install"
+                            AppUpdateDownloadState.Idle -> {
+                                if (state.downloadState is AppUpdateDownloadState.Idle) {
+                                    state.statusMessage
+                                } else {
+                                    null
+                                }
+                            }
+                        },
+                    )
+                }
+            }
         }
     }
 
@@ -147,7 +192,8 @@ class OpenSourceViewModel(
         profileListState,
         auxiliaryState,
         appSettingsRepository.settings,
-    ) { profileState, auxiliary, appSettings ->
+        appUpdateState,
+    ) { profileState, auxiliary, appSettings, updateState ->
         val operation = auxiliary.operation
         val dialogs = auxiliary.dialogs
         OpenSourceUiState(
@@ -167,6 +213,7 @@ class OpenSourceViewModel(
             appSettings = appSettings,
             vpnState = auxiliary.vpnState,
             xrayCoreAvailable = xrayCoreBridge.isAvailable,
+            updateState = updateState,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -182,11 +229,11 @@ class OpenSourceViewModel(
         protocolFilter.value = value
     }
 
-    fun synchronize() {
+    fun synchronize(force: Boolean = true) {
         if (operation.value.isSyncing) return
         viewModelScope.launch {
             operation.update { it.copy(isSyncing = true, message = null) }
-            runCatching { proxySourceSynchronizer.synchronize() }
+            runCatching { proxySourceSynchronizer.synchronize(force = force) }
                 .onSuccess { result ->
                     operation.update {
                         it.copy(
@@ -269,7 +316,9 @@ class OpenSourceViewModel(
     }
 
     fun selectAll() {
-        selectedIds.value = uiState.value.allProfileIds
+        selectedIds.value = uiState.value.profiles
+            .filterNot(ProxyProfileSummary::isPinned)
+            .mapTo(linkedSetOf(), ProxyProfileSummary::id)
     }
 
     fun clearSelection() {
@@ -290,6 +339,12 @@ class OpenSourceViewModel(
             proxyProfileRepository.delete(ids)
             selectedIds.value = emptySet()
             operation.update { it.copy(message = "Deleted ${ids.size} configurations") }
+        }
+    }
+
+    fun setPinned(id: String, pinned: Boolean) {
+        viewModelScope.launch {
+            proxyProfileRepository.setPinned(id, pinned)
         }
     }
 
@@ -350,7 +405,7 @@ class OpenSourceViewModel(
     }
 
     fun checkAll() {
-        runChecks(uiState.value.allProfileIds.toList())
+        runChecks(uiState.value.profiles.map(ProxyProfileSummary::id))
     }
 
     fun cancelChecks() {
@@ -361,6 +416,53 @@ class OpenSourceViewModel(
 
     fun clearMessage() {
         operation.update { it.copy(message = null) }
+    }
+
+    fun checkForUpdates() {
+        if (updateCheckJob?.isActive == true) return
+        updateCheckJob = viewModelScope.launch {
+            appUpdateState.update { it.copy(isChecking = true, statusMessage = null) }
+            runCatching {
+                appUpdateRepository.checkForUpdate(force = true)
+            }.onSuccess { result ->
+                appUpdateState.update { state ->
+                    when (result) {
+                        is AppUpdateCheckResult.Available -> state.copy(
+                            isChecking = false,
+                            availableUpdate = result.update,
+                            statusMessage = null,
+                        )
+                        AppUpdateCheckResult.UpToDate -> state.copy(
+                            isChecking = false,
+                            availableUpdate = null,
+                            statusMessage = "shadow-ssh is up to date",
+                        )
+                        AppUpdateCheckResult.NotDue -> state.copy(isChecking = false)
+                    }
+                }
+            }.onFailure { error ->
+                appUpdateState.update {
+                    it.copy(
+                        isChecking = false,
+                        statusMessage = error.message ?: "Unable to check for updates",
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissAvailableUpdate() {
+        appUpdateState.update { it.copy(availableUpdate = null) }
+    }
+
+    fun downloadAvailableUpdate() {
+        val update = appUpdateState.value.availableUpdate ?: return
+        appUpdateDownloader.download(update)
+        appUpdateState.update { it.copy(availableUpdate = null, statusMessage = null) }
+    }
+
+    fun onUpdateActionFailed(message: String) {
+        appUpdateState.update { it.copy(statusMessage = message) }
     }
 
     private fun importText(text: String, source: ProxyProfileSource) {
@@ -412,32 +514,80 @@ class OpenSourceViewModel(
     }
 
     private fun runChecks(profileIds: List<String>) {
-        if (profileIds.isEmpty() || checkJob?.isActive == true) return
+        val distinctProfileIds = profileIds.distinct()
+        if (checkJob?.isActive == true) return
+        if (distinctProfileIds.isEmpty()) {
+            operation.update { it.copy(message = "No configurations to check") }
+            return
+        }
         checkJob = viewModelScope.launch {
             var runningProfileId: String? = null
+            var completedNormally = false
             try {
+                val summariesById = uiState.value.profiles.associateBy(ProxyProfileSummary::id)
                 operation.update {
-                    it.copy(isChecking = true, checkCompleted = 0, checkTotal = profileIds.size, message = null)
+                    it.copy(
+                        isChecking = true,
+                        checkCompleted = 0,
+                        checkTotal = distinctProfileIds.size,
+                        message = null,
+                    )
                 }
                 var available = 0
-                profileIds.forEachIndexed { index, profileId ->
+                var unavailable = 0
+                var unsupported = 0
+                distinctProfileIds.forEachIndexed { index, profileId ->
                     runningProfileId = profileId
                     proxyProfileRepository.saveTestResult(
                         ProxyTunnelTestResult(profileId, ProxyTestStatus.RUNNING),
                     )
-                    val profile = proxyProfileRepository.getById(profileId)
-                    val result = if (profile == null) {
-                        ProxyTunnelTestResult(profileId, ProxyTestStatus.UNAVAILABLE, message = "Missing profile")
+                    val summary = summariesById[profileId]
+                    val profile = if (summary?.isStale == true ||
+                        summary?.transport == ProxyTransport.UNKNOWN ||
+                        summary?.security == ProxySecurity.UNKNOWN
+                    ) {
+                        null
                     } else {
-                        xrayCoreBridge.test(profile)
+                        proxyProfileRepository.getById(profileId)
+                    }
+                    val result = when {
+                        summary?.isStale == true -> ProxyTunnelTestResult(
+                            profileId,
+                            ProxyTestStatus.UNAVAILABLE,
+                            message = "Stale profile",
+                        )
+                        summary?.transport == ProxyTransport.UNKNOWN ||
+                            summary?.security == ProxySecurity.UNKNOWN -> ProxyTunnelTestResult(
+                                profileId,
+                                ProxyTestStatus.UNSUPPORTED,
+                                message = "Unsupported transport configuration",
+                            )
+                        profile == null -> ProxyTunnelTestResult(
+                            profileId,
+                            ProxyTestStatus.UNAVAILABLE,
+                            message = "Missing profile",
+                        )
+                        else -> xrayCoreBridge.test(profile)
                     }
                     proxyProfileRepository.saveTestResult(result)
                     runningProfileId = null
-                    if (result.status == ProxyTestStatus.AVAILABLE) available += 1
+                    when (result.status) {
+                        ProxyTestStatus.AVAILABLE -> available += 1
+                        ProxyTestStatus.UNSUPPORTED -> unsupported += 1
+                        ProxyTestStatus.UNAVAILABLE -> unavailable += 1
+                        ProxyTestStatus.RUNNING,
+                        ProxyTestStatus.NOT_TESTED,
+                        -> Unit
+                    }
                     operation.update { it.copy(checkCompleted = index + 1) }
                 }
+                completedNormally = true
                 operation.update {
-                    it.copy(message = "Tunnel check completed: $available/${profileIds.size} available")
+                    it.copy(
+                        isChecking = false,
+                        message = "Tunnel check completed: " +
+                            "$available available, $unavailable unavailable, $unsupported unsupported",
+                    )
                 }
             } finally {
                 runningProfileId?.let { profileId ->
@@ -447,7 +597,9 @@ class OpenSourceViewModel(
                         )
                     }
                 }
-                operation.update { it.copy(isChecking = false) }
+                if (!completedNormally) {
+                    operation.update { it.copy(isChecking = false) }
+                }
             }
         }
     }

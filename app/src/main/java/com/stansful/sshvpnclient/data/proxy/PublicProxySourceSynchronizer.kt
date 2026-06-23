@@ -26,7 +26,7 @@ class PublicProxySourceSynchronizer(
         Context.MODE_PRIVATE,
     )
 
-    override suspend fun synchronize(): ProxySyncResult = withContext(ioDispatcher) {
+    override suspend fun synchronize(force: Boolean): ProxySyncResult = withContext(ioDispatcher) {
         val connection = (URL(OpenSourcePolicy.SOURCE_URL).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = CONNECT_TIMEOUT_MS
@@ -34,8 +34,10 @@ class PublicProxySourceSynchronizer(
             instanceFollowRedirects = false
             setRequestProperty("Accept", "text/plain")
             setRequestProperty("User-Agent", USER_AGENT)
-            preferences.getString(KEY_ETAG, null)?.let { etag ->
-                setRequestProperty("If-None-Match", etag)
+            if (!force) {
+                preferences.getString(KEY_ETAG, null)?.let { etag ->
+                    setRequestProperty("If-None-Match", etag)
+                }
             }
         }
 

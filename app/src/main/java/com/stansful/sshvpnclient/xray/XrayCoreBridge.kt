@@ -104,7 +104,7 @@ class XrayCoreBridge(
     companion object {
         const val CORE_UNAVAILABLE_MESSAGE =
             "Xray core is not packaged. Run scripts/build-xray-core.sh first."
-        private const val TEST_TIMEOUT_SECONDS = 8
+        private const val TEST_TIMEOUT_SECONDS = 5
         private const val TEST_URL = "https://www.youtube.com/generate_204"
     }
 }

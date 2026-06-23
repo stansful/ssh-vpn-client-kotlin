@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 abstract class ProxyProfileDao {
-    @Query("SELECT * FROM proxy_profiles ORDER BY isSelected DESC, isStale ASC, updatedAt DESC")
+    @Query("SELECT * FROM proxy_profiles ORDER BY isPinned DESC, isStale ASC, updatedAt DESC")
     abstract fun observeAll(): Flow<List<ProxyProfileEntity>>
 
     @Query("SELECT * FROM proxy_profiles WHERE id = :id LIMIT 1")
@@ -21,7 +21,7 @@ abstract class ProxyProfileDao {
     @Query("SELECT * FROM proxy_profiles WHERE isSelected = 1 AND isStale = 0 LIMIT 1")
     abstract suspend fun getSelected(): ProxyProfileEntity?
 
-    @Query("SELECT id FROM proxy_profiles WHERE isStale = 0 ORDER BY updatedAt DESC LIMIT 1")
+    @Query("SELECT id FROM proxy_profiles WHERE isStale = 0 ORDER BY isPinned DESC, updatedAt DESC LIMIT 1")
     abstract suspend fun getFirstAvailableId(): String?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -36,8 +36,11 @@ abstract class ProxyProfileDao {
     @Query("UPDATE proxy_profiles SET isSelected = 0")
     protected abstract suspend fun clearSelection()
 
-    @Query("UPDATE proxy_profiles SET isSelected = 1, updatedAt = :updatedAt WHERE id = :id")
-    protected abstract suspend fun markSelected(id: String, updatedAt: Long)
+    @Query("UPDATE proxy_profiles SET isSelected = 1 WHERE id = :id")
+    protected abstract suspend fun markSelected(id: String)
+
+    @Query("UPDATE proxy_profiles SET isPinned = :isPinned WHERE id = :id")
+    abstract suspend fun setPinned(id: String, isPinned: Boolean)
 
     @Query(
         """
@@ -63,8 +66,8 @@ abstract class ProxyProfileDao {
     )
 
     @Transaction
-    open suspend fun select(id: String, updatedAt: Long) {
+    open suspend fun select(id: String) {
         clearSelection()
-        markSelected(id, updatedAt)
+        markSelected(id)
     }
 }

@@ -1610,7 +1610,7 @@ internal class KotlinTunForwarder(
         const val HTTP_MAX_LINE_BYTES = 4 * 1024
         const val HTTP_SUCCESS_MIN = 200
         const val HTTP_SUCCESS_MAX = 299
-        const val SESSION_MAINTENANCE_INTERVAL_MS = 10_000L
+        const val SESSION_MAINTENANCE_INTERVAL_MS = 20_000L
         const val REMOTE_FIN_SESSION_TTL_MS = 30_000L
         const val CLIENT_FIN_SESSION_TTL_MS = 10_000L
         const val PRESSURE_IDLE_SESSION_TTL_MS = 35_000L

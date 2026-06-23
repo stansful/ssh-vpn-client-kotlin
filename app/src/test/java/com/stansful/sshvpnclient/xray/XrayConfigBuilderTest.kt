@@ -45,6 +45,7 @@ class XrayConfigBuilderTest {
         rawUri = "vless://id@example.com:443?security=reality&type=tcp&pbk=public-key&sni=example.org",
         fingerprint = "fingerprint",
         isSelected = true,
+        isPinned = false,
         isStale = false,
         lastTestStatus = ProxyTestStatus.NOT_TESTED,
         lastLatencyMs = null,

@@ -9,6 +9,7 @@ import androidx.room.PrimaryKey
     indices = [
         Index(value = ["fingerprint"], unique = true),
         Index(value = ["isSelected"]),
+        Index(value = ["isPinned"]),
         Index(value = ["source", "sourceUrl"]),
     ],
 )
@@ -26,6 +27,7 @@ data class ProxyProfileEntity(
     val secretId: String,
     val fingerprint: String,
     val isSelected: Boolean,
+    val isPinned: Boolean,
     val isStale: Boolean,
     val lastTestStatus: String,
     val lastLatencyMs: Long?,

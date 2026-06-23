@@ -318,8 +318,8 @@ class AndroidAppUpdateDownloader(
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         const val INVALID_DOWNLOAD_ID = -1L
         const val HASH_BUFFER_SIZE = 32 * 1_024
-        const val ACTIVE_PROGRESS_POLL_INTERVAL_MS = 750L
-        const val PAUSED_PROGRESS_POLL_INTERVAL_MS = 3_000L
+        const val ACTIVE_PROGRESS_POLL_INTERVAL_MS = 2_000L
+        const val PAUSED_PROGRESS_POLL_INTERVAL_MS = 10_000L
         val PACKAGE_INFO_FLAGS: Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             PackageManager.GET_SIGNING_CERTIFICATES
         } else {

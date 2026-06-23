@@ -130,7 +130,11 @@ class RoomProxyProfileRepository(
     }
 
     override suspend fun select(id: String) = withContext(ioDispatcher) {
-        dao.select(id, System.currentTimeMillis())
+        dao.select(id)
+    }
+
+    override suspend fun setPinned(id: String, pinned: Boolean) = withContext(ioDispatcher) {
+        dao.setPinned(id, pinned)
     }
 
     override suspend fun delete(ids: Set<String>) = mutationMutex.withLock {
@@ -154,7 +158,7 @@ class RoomProxyProfileRepository(
 
     private suspend fun ensureSelection(now: Long) {
         if (dao.getSelected() == null) {
-            dao.getFirstAvailableId()?.let { id -> dao.select(id, now) }
+            dao.getFirstAvailableId()?.let { id -> dao.select(id) }
         }
     }
 
@@ -194,6 +198,7 @@ private fun ParsedProxyProfile.toEntity(
         secretId = secretId,
         fingerprint = fingerprint,
         isSelected = existing?.isSelected ?: false,
+        isPinned = existing?.isPinned ?: false,
         isStale = false,
         lastTestStatus = existing?.lastTestStatus ?: ProxyTestStatus.NOT_TESTED.name,
         lastLatencyMs = existing?.lastLatencyMs,
@@ -216,6 +221,7 @@ private fun ProxyProfileEntity.toSummary(): ProxyProfileSummary {
         flow = flow,
         source = enumValueOf(source),
         isSelected = isSelected,
+        isPinned = isPinned,
         isStale = isStale,
         lastTestStatus = enumValueOf(lastTestStatus),
         lastLatencyMs = lastLatencyMs,
@@ -239,6 +245,7 @@ private suspend fun ProxyProfileEntity.toDomain(secretStorage: SecretStorage): P
         rawUri = rawUri,
         fingerprint = fingerprint,
         isSelected = isSelected,
+        isPinned = isPinned,
         isStale = isStale,
         lastTestStatus = enumValueOf(lastTestStatus),
         lastLatencyMs = lastLatencyMs,

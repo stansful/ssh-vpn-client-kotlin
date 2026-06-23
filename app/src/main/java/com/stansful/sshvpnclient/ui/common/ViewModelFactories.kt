@@ -27,6 +27,8 @@ class AppViewModelFactory(
                 connectProxyVpnUseCase = container.connectProxyVpnUseCase,
                 disconnectVpnUseCase = container.disconnectVpnUseCase,
                 vpnConnectionRepository = container.vpnConnectionRepository,
+                appUpdateRepository = container.appUpdateRepository,
+                appUpdateDownloader = container.appUpdateDownloader,
             )
 
             modelClass.isAssignableFrom(MainViewModel::class.java) -> MainViewModel(

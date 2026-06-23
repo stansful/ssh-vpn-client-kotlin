@@ -38,15 +38,24 @@ class ProxySourceSyncWorker(
         fun schedule(context: Context) {
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
+                .setRequiresBatteryNotLow(true)
                 .build()
-            val request = PeriodicWorkRequestBuilder<ProxySourceSyncWorker>(15, TimeUnit.MINUTES)
+            val request = PeriodicWorkRequestBuilder<ProxySourceSyncWorker>(
+                REPEAT_INTERVAL_HOURS,
+                TimeUnit.HOURS,
+                FLEX_INTERVAL_HOURS,
+                TimeUnit.HOURS,
+            )
                 .setConstraints(constraints)
                 .build()
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 UNIQUE_WORK_NAME,
-                ExistingPeriodicWorkPolicy.KEEP,
+                ExistingPeriodicWorkPolicy.UPDATE,
                 request,
             )
         }
+
+        private const val REPEAT_INTERVAL_HOURS = 6L
+        private const val FLEX_INTERVAL_HOURS = 1L
     }
 }

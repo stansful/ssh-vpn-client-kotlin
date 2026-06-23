@@ -325,7 +325,7 @@ class SshConnectionManager {
 
     private companion object {
         const val DEFAULT_CONNECT_TIMEOUT_MS = 20_000
-        const val MAX_EFFECTIVE_KEEP_ALIVE_INTERVAL_SEC = 10
+        const val MAX_EFFECTIVE_KEEP_ALIVE_INTERVAL_SEC = 60
         const val SERVER_ALIVE_COUNT_MAX = 1
         const val TERMINAL_CONNECT_TIMEOUT_MS = 10_000
         const val TERMINAL_PTY_TYPE = "xterm"

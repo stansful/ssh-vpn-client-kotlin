@@ -18,6 +18,7 @@ interface ProxyProfileRepository {
     ): ProxyImportResult
     suspend fun update(id: String, rawUri: String): ProxyImportResult
     suspend fun select(id: String)
+    suspend fun setPinned(id: String, pinned: Boolean)
     suspend fun delete(ids: Set<String>)
     suspend fun saveTestResult(result: ProxyTunnelTestResult)
 }
