@@ -9,6 +9,9 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetAddress
+import java.net.Socket
+import java.nio.charset.StandardCharsets
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -23,12 +26,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 import kotlin.concurrent.withLock
 
 internal class KotlinTunForwarder(
     private val vpnInterface: ParcelFileDescriptor,
     sshSession: Session,
     private val log: (String) -> Unit,
+    private val onDegraded: (String) -> Unit = {},
 ) {
     private val running = AtomicBoolean(false)
     private val stoppedLatch = CountDownLatch(1)
@@ -38,6 +44,8 @@ internal class KotlinTunForwarder(
     private val diagnostics = ForwarderDiagnostics(log)
     private val executors = ForwarderExecutors(diagnostics)
     private val packetId = AtomicInteger(1)
+    private val dnsFailureStreak = AtomicInteger(0)
+    private val degradationReported = AtomicBoolean(false)
     private val writeLock = Any()
 
     @Volatile
@@ -297,11 +305,52 @@ internal class KotlinTunForwarder(
     ) {
         if (!running.get()) return
         val sshSession = sshSessionReference.get()?.takeIf { it.isConnected } ?: return
+        val dnsServer = addressToString(dnsServerAddress)
+        try {
+            val response = try {
+                resolveDnsOverTcp(
+                    sshSession = sshSession,
+                    query = query,
+                    dnsServer = dnsServer,
+                    clientAddress = clientAddress,
+                    clientPort = clientPort,
+                )
+            } catch (tcpError: Exception) {
+                resolveDnsOverHttps(
+                    sshSession = sshSession,
+                    query = query,
+                    clientAddress = clientAddress,
+                    clientPort = clientPort,
+                    tcpError = tcpError,
+                )
+            }
+            sendUdpPacket(
+                sourceAddress = dnsServerAddress,
+                destinationAddress = clientAddress,
+                sourcePort = DNS_PORT,
+                destinationPort = clientPort,
+                payload = response,
+            )
+            recordDnsSuccess()
+        } catch (error: Exception) {
+            val message = error.message ?: error::class.java.simpleName
+            diagnostics.logDnsFailure("$dnsServer: $message")
+            recordDnsFailure("$dnsServer: $message")
+        }
+    }
+
+    private fun resolveDnsOverTcp(
+        sshSession: Session,
+        query: ByteArray,
+        dnsServer: String,
+        clientAddress: Int,
+        clientPort: Int,
+    ): ByteArray {
         var channel: ChannelDirectTCPIP? = null
         try {
             channel = openDirectTcpChannel(
                 sshSession = sshSession,
-                host = addressToString(dnsServerAddress),
+                host = dnsServer,
                 port = DNS_PORT,
                 originAddress = clientAddress,
                 originPort = clientPort,
@@ -316,21 +365,196 @@ internal class KotlinTunForwarder(
             val lengthPrefix = ByteArray(DNS_TCP_LENGTH_SIZE)
             readFully(input, lengthPrefix)
             val responseLength = PacketCodec.readU16(lengthPrefix, 0)
-            if (responseLength <= 0 || responseLength > DNS_MAX_RESPONSE_SIZE) return
+            if (responseLength <= 0 || responseLength > DNS_MAX_RESPONSE_SIZE) {
+                throw EOFException("Invalid DNS TCP response length: $responseLength")
+            }
 
             val response = ByteArray(responseLength)
             readFully(input, response)
-            sendUdpPacket(
-                sourceAddress = dnsServerAddress,
-                destinationAddress = clientAddress,
-                sourcePort = DNS_PORT,
-                destinationPort = clientPort,
-                payload = response,
-            )
-        } catch (error: Exception) {
-            diagnostics.logDnsFailure(error.message ?: error::class.java.simpleName)
+            return response
         } finally {
             channel?.disconnect()
+        }
+    }
+
+    private fun resolveDnsOverHttps(
+        sshSession: Session,
+        query: ByteArray,
+        clientAddress: Int,
+        clientPort: Int,
+        tcpError: Exception,
+    ): ByteArray {
+        var channel: ChannelDirectTCPIP? = null
+        var tlsSocket: SSLSocket? = null
+        try {
+            diagnostics.logDnsFallback(tcpError.message ?: tcpError::class.java.simpleName)
+            channel = openDirectTcpChannel(
+                sshSession = sshSession,
+                host = DOH_ENDPOINT_ADDRESS,
+                port = DOH_ENDPOINT_PORT,
+                originAddress = clientAddress,
+                originPort = clientPort,
+            )
+            val tunnelSocket = StreamBackedSocket(
+                input = channel.inputStream,
+                output = channel.outputStream,
+                remotePort = DOH_ENDPOINT_PORT,
+                closeAction = channel::disconnect,
+            )
+            tlsSocket = (SSLSocketFactory.getDefault() as SSLSocketFactory)
+                .createSocket(tunnelSocket, DOH_ENDPOINT_HOST, DOH_ENDPOINT_PORT, true) as SSLSocket
+            tlsSocket.useClientMode = true
+            tlsSocket.soTimeout = DOH_READ_TIMEOUT_MS
+            tlsSocket.startHandshake()
+
+            val output = tlsSocket.outputStream
+            val requestHeaders = buildString {
+                append("POST /dns-query HTTP/1.1\r\n")
+                append("Host: ")
+                append(DOH_ENDPOINT_HOST)
+                append("\r\n")
+                append("Accept: application/dns-message\r\n")
+                append("Content-Type: application/dns-message\r\n")
+                append("Content-Length: ")
+                append(query.size)
+                append("\r\n")
+                append("Connection: close\r\n")
+                append("\r\n")
+            }.toByteArray(StandardCharsets.US_ASCII)
+            output.write(requestHeaders)
+            output.write(query)
+            output.flush()
+
+            return readDnsOverHttpsResponse(tlsSocket.inputStream)
+        } finally {
+            runCatching { tlsSocket?.close() }
+            channel?.disconnect()
+        }
+    }
+
+    private fun readDnsOverHttpsResponse(input: InputStream): ByteArray {
+        val headers = readHttpHeaders(input)
+        if (headers.statusCode !in HTTP_SUCCESS_MIN..HTTP_SUCCESS_MAX) {
+            throw EOFException("DoH HTTP ${headers.statusCode}")
+        }
+        val transferEncoding = headers.values["transfer-encoding"].orEmpty()
+        val body = if (transferEncoding.contains("chunked", ignoreCase = true)) {
+            readChunkedHttpBody(input)
+        } else {
+            val contentLength = headers.values["content-length"]?.toIntOrNull()
+            if (contentLength != null) {
+                if (contentLength <= 0 || contentLength > DNS_MAX_RESPONSE_SIZE) {
+                    throw EOFException("Invalid DoH response length: $contentLength")
+                }
+                ByteArray(contentLength).also { readFully(input, it) }
+            } else {
+                readUntilEof(input, DNS_MAX_RESPONSE_SIZE)
+            }
+        }
+        if (body.isEmpty() || body.size > DNS_MAX_RESPONSE_SIZE) {
+            throw EOFException("Invalid DoH body length: ${body.size}")
+        }
+        return body
+    }
+
+    private fun readHttpHeaders(input: InputStream): HttpHeaders {
+        val bytes = ArrayList<Byte>(HTTP_MAX_HEADER_BYTES)
+        var matched = 0
+        while (bytes.size < HTTP_MAX_HEADER_BYTES) {
+            val next = input.read()
+            if (next < 0) throw EOFException("Unexpected EOF before DoH headers")
+            bytes += next.toByte()
+            matched = if (next.toByte() == HTTP_HEADER_TERMINATOR[matched]) {
+                matched + 1
+            } else {
+                if (next == HTTP_HEADER_TERMINATOR[0].toInt()) 1 else 0
+            }
+            if (matched == HTTP_HEADER_TERMINATOR.size) break
+        }
+        if (matched != HTTP_HEADER_TERMINATOR.size) {
+            throw EOFException("DoH headers are too large")
+        }
+        val text = bytes.toByteArray().toString(StandardCharsets.ISO_8859_1)
+        val lines = text.split("\r\n")
+        val statusCode = lines.firstOrNull()
+            ?.split(" ")
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?: throw EOFException("Invalid DoH status line")
+        val values = lines.drop(1)
+            .mapNotNull { line ->
+                val separator = line.indexOf(':')
+                if (separator <= 0) return@mapNotNull null
+                line.substring(0, separator).trim().lowercase() to line.substring(separator + 1).trim()
+            }
+            .toMap()
+        return HttpHeaders(statusCode, values)
+    }
+
+    private fun readChunkedHttpBody(input: InputStream): ByteArray {
+        val body = ArrayList<Byte>()
+        while (true) {
+            val chunkSize = readHttpLine(input).substringBefore(';').trim().toInt(16)
+            if (chunkSize == 0) {
+                readHttpLine(input)
+                return body.toByteArray()
+            }
+            if (chunkSize < 0 || body.size + chunkSize > DNS_MAX_RESPONSE_SIZE) {
+                throw EOFException("Invalid DoH chunk size: $chunkSize")
+            }
+            val chunk = ByteArray(chunkSize)
+            readFully(input, chunk)
+            chunk.forEach { body += it }
+            val cr = input.read()
+            val lf = input.read()
+            if (cr != '\r'.code || lf != '\n'.code) {
+                throw EOFException("Invalid DoH chunk delimiter")
+            }
+        }
+    }
+
+    private fun readHttpLine(input: InputStream): String {
+        val bytes = ArrayList<Byte>()
+        while (bytes.size < HTTP_MAX_LINE_BYTES) {
+            val next = input.read()
+            if (next < 0) throw EOFException("Unexpected EOF in DoH response")
+            if (next == '\n'.code) {
+                val lineBytes = if (bytes.lastOrNull() == '\r'.code.toByte()) {
+                    bytes.dropLast(1)
+                } else {
+                    bytes
+                }
+                return lineBytes.toByteArray().toString(StandardCharsets.ISO_8859_1)
+            }
+            bytes += next.toByte()
+        }
+        throw EOFException("DoH line is too large")
+    }
+
+    private fun readUntilEof(input: InputStream, maxBytes: Int): ByteArray {
+        val body = ArrayList<Byte>()
+        val buffer = ByteArray(1024)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) return body.toByteArray()
+            if (body.size + read > maxBytes) {
+                throw EOFException("DoH response is too large")
+            }
+            for (index in 0 until read) {
+                body += buffer[index]
+            }
+        }
+    }
+
+    private fun recordDnsSuccess() {
+        dnsFailureStreak.set(0)
+        degradationReported.set(false)
+    }
+
+    private fun recordDnsFailure(message: String) {
+        val failures = dnsFailureStreak.incrementAndGet()
+        if (failures >= DNS_DEGRADATION_FAILURE_THRESHOLD && degradationReported.compareAndSet(false, true)) {
+            onDegraded("DNS failed $failures consecutive time(s); last error: $message")
         }
     }
 
@@ -976,6 +1200,7 @@ internal class KotlinTunForwarder(
         private val tcpClientFinTimeoutCount = AtomicInteger(0)
         private val tcpIdleTimeoutCount = AtomicInteger(0)
         private val dnsFailureCount = AtomicInteger(0)
+        private val dnsFallbackCount = AtomicInteger(0)
         private val workerRejectedCount = AtomicInteger(0)
 
         fun logTcpOpen(host: String, port: Int) {
@@ -1026,6 +1251,14 @@ internal class KotlinTunForwarder(
             )
         }
 
+        fun logDnsFallback(message: String) {
+            logLimited(
+                counter = dnsFallbackCount,
+                message = "DNS over SSH TCP failed, trying DoH fallback: $message",
+                suppressedMessage = "DNS over SSH: further DoH fallback logs suppressed",
+            )
+        }
+
         fun logWorkerRejected(poolName: String) {
             logLimited(
                 counter = workerRejectedCount,
@@ -1052,6 +1285,39 @@ internal class KotlinTunForwarder(
         val remoteAddress: Int,
         val remotePort: Int,
     )
+
+    private data class HttpHeaders(
+        val statusCode: Int,
+        val values: Map<String, String>,
+    )
+
+    private class StreamBackedSocket(
+        private val input: InputStream,
+        private val output: OutputStream,
+        private val remotePort: Int,
+        private val closeAction: () -> Unit,
+    ) : Socket() {
+        @Volatile
+        private var closed = false
+
+        override fun getInputStream(): InputStream = input
+
+        override fun getOutputStream(): OutputStream = output
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            closeAction()
+        }
+
+        override fun isConnected(): Boolean = !closed
+
+        override fun isClosed(): Boolean = closed
+
+        override fun getInetAddress(): InetAddress = InetAddress.getLoopbackAddress()
+
+        override fun getPort(): Int = remotePort
+    }
 
     private data class Ipv4Packet(
         val source: Int,
@@ -1335,6 +1601,15 @@ internal class KotlinTunForwarder(
         const val DNS_PORT = 53
         const val DNS_TCP_LENGTH_SIZE = 2
         const val DNS_MAX_RESPONSE_SIZE = 4_096
+        const val DNS_DEGRADATION_FAILURE_THRESHOLD = 3
+        const val DOH_ENDPOINT_ADDRESS = "1.1.1.1"
+        const val DOH_ENDPOINT_HOST = "cloudflare-dns.com"
+        const val DOH_ENDPOINT_PORT = 443
+        const val DOH_READ_TIMEOUT_MS = 10_000
+        const val HTTP_MAX_HEADER_BYTES = 16 * 1024
+        const val HTTP_MAX_LINE_BYTES = 4 * 1024
+        const val HTTP_SUCCESS_MIN = 200
+        const val HTTP_SUCCESS_MAX = 299
         const val SESSION_MAINTENANCE_INTERVAL_MS = 10_000L
         const val REMOTE_FIN_SESSION_TTL_MS = 30_000L
         const val CLIENT_FIN_SESSION_TTL_MS = 10_000L
@@ -1364,6 +1639,7 @@ internal class KotlinTunForwarder(
         const val TCP_WINDOW_WAIT_MS = 250L
         const val UINT_MASK = 0xFFFF_FFFFL
         val TCP_SYN_OPTIONS = byteArrayOf(2, 4, ((TCP_MSS ushr 8) and 0xFF).toByte(), (TCP_MSS and 0xFF).toByte())
+        val HTTP_HEADER_TERMINATOR = byteArrayOf('\r'.code.toByte(), '\n'.code.toByte(), '\r'.code.toByte(), '\n'.code.toByte())
         val EMPTY_BYTES = ByteArray(0)
     }
 }

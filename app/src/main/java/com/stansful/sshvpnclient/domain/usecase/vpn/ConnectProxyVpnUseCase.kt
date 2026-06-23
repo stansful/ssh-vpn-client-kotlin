@@ -27,7 +27,7 @@ class ConnectProxyVpnUseCase(
         }
         val settings = appSettingsRepository.settings.value
         if (settings.vpnMode == VpnMode.SELECTED_APPS && settings.selectedAppPackages.isEmpty()) {
-            vpnConnectionRepository.setError(profile.id, "Нет выбранных приложений")
+            vpnConnectionRepository.setError(profile.id, "No apps selected")
             return
         }
         if (vpnConnectionRepository.currentState.activeTransport == VpnTransportType.SSH) {

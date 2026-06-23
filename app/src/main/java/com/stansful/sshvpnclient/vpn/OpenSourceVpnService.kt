@@ -72,7 +72,7 @@ class OpenSourceVpnService : android.net.VpnService() {
         }
         val settings = appContainer.appSettingsRepository.settings.value
         if (settings.vpnMode == VpnMode.SELECTED_APPS && settings.selectedAppPackages.isEmpty()) {
-            repository.setError(profile.id, "Нет выбранных приложений")
+            repository.setError(profile.id, getString(R.string.error_no_selected_apps))
             stopSelf()
             return
         }
@@ -163,7 +163,7 @@ class OpenSourceVpnService : android.net.VpnService() {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setContentTitle(getString(R.string.vpn_notification_title))
-            .setContentText("Traffic is routed through public profile $profileName")
+            .setContentText(getString(R.string.vpn_notification_public_profile_text, profileName))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()

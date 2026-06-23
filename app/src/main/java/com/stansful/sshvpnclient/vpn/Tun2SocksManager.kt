@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.vpn
 
 import android.os.ParcelFileDescriptor
 import com.jcraft.jsch.Session
+import java.util.concurrent.atomic.AtomicReference
 
 class Tun2SocksManager {
     @Volatile
@@ -12,6 +13,7 @@ class Tun2SocksManager {
     private var isTransportPaused: Boolean = false
 
     private var forwarder: KotlinTunForwarder? = null
+    private val degradationReason = AtomicReference<String?>(null)
 
     fun start(
         vpnInterface: ParcelFileDescriptor,
@@ -20,6 +22,7 @@ class Tun2SocksManager {
         log: (String) -> Unit,
     ) {
         stop()
+        degradationReason.set(null)
         check(vpnInterface.fileDescriptor.valid()) { "VPN interface is not valid" }
         check(sshSession.isConnected) { "SSH session is not connected" }
 
@@ -31,6 +34,11 @@ class Tun2SocksManager {
             vpnInterface = vpnInterface,
             sshSession = sshSession,
             log = log,
+            onDegraded = { reason ->
+                if (degradationReason.compareAndSet(null, reason)) {
+                    log("Kotlin TUN forwarding degradation detected: $reason")
+                }
+            },
         )
         forwarder = nextForwarder
         isRunning = true
@@ -56,6 +64,7 @@ class Tun2SocksManager {
         if (wasRunning) {
             activeForwarder?.awaitStopped(STOP_WAIT_MS)
         }
+        degradationReason.set(null)
     }
 
     fun pauseSshTransport() {
@@ -76,7 +85,11 @@ class Tun2SocksManager {
         return forwarder?.resetIdleClientConnections(minimumIdleMs) ?: 0
     }
 
+    fun consumeDegradationReason(): String? {
+        return degradationReason.getAndSet(null)
+    }
+
     private companion object {
-        const val STOP_WAIT_MS = 500L
+        const val STOP_WAIT_MS = 2_000L
     }
 }

@@ -176,6 +176,7 @@ class SshVpnService : android.net.VpnService() {
                 maxDelayMs = MAX_RECONNECT_DELAY_MS,
             )
             var reconnectStartedAtMs: Long? = null
+            var forceVpnRebuildOnNextAttempt = false
             while (shouldKeepConnectionAlive(runId)) {
                 if (attempt > 1) {
                     connectionRepository.setReconnecting(config.id)
@@ -190,11 +191,12 @@ class SshVpnService : android.net.VpnService() {
                         privateKey = privateKey,
                         appSettings = appSettings,
                         runId = runId,
-                        reuseVpnInterface = reuseVpnInterface,
+                        reuseVpnInterface = reuseVpnInterface && !forceVpnRebuildOnNextAttempt,
                         includeNetworkDiagnostics = attempt == 1 ||
                             attempt % NETWORK_DIAGNOSTICS_RETRY_INTERVAL == 0,
                     )
                     everConnected = true
+                    forceVpnRebuildOnNextAttempt = false
                     reconnectBackoff.reset()
                     reconnectStartedAtMs?.let { startedAt ->
                         val elapsedMs = SystemClock.elapsedRealtime() - startedAt
@@ -212,9 +214,10 @@ class SshVpnService : android.net.VpnService() {
                         break
                     }
                     activeConnectionInterrupted = true
+                    forceVpnRebuildOnNextAttempt = interruptReason.forceVpnRebuild
                     reconnectStartedAtMs = SystemClock.elapsedRealtime()
                     connectionRepository.setReconnecting(config.id)
-                    connectionRepository.appendDiagnostic("Connection interrupted: $interruptReason")
+                    connectionRepository.appendDiagnostic("Connection interrupted: ${interruptReason.message}")
                 } catch (error: CancellationException) {
                     disconnectInternal(updateState = false, stopForegroundNotification = false)
                     break
@@ -248,7 +251,7 @@ class SshVpnService : android.net.VpnService() {
                 }
 
                 prepareForReconnect(
-                    keepVpnPipeline = everConnected,
+                    keepVpnPipeline = everConnected && !forceVpnRebuildOnNextAttempt,
                     announceHotReconnect = activeConnectionInterrupted,
                 )
                 if (!shouldKeepConnectionAlive(runId)) {
@@ -355,17 +358,33 @@ class SshVpnService : android.net.VpnService() {
     private suspend fun monitorActiveConnection(
         sshSession: Session,
         runId: Long,
-    ): String {
+    ): ActiveConnectionInterrupt {
         while (shouldKeepConnectionAlive(runId)) {
             delay(CONNECTION_MONITOR_INTERVAL_MS)
             if (!appContainer.tun2SocksManager.isRunning) {
-                return "TUN forwarding stopped"
+                return ActiveConnectionInterrupt(
+                    message = "TUN forwarding stopped",
+                    forceVpnRebuild = true,
+                )
+            }
+            val degradationReason = appContainer.tun2SocksManager.consumeDegradationReason()
+            if (degradationReason != null) {
+                return ActiveConnectionInterrupt(
+                    message = "TUN forwarding degraded: $degradationReason",
+                    forceVpnRebuild = true,
+                )
             }
             if (!sshSession.isConnected) {
-                return "SSH session disconnected"
+                return ActiveConnectionInterrupt(
+                    message = "SSH session disconnected",
+                    forceVpnRebuild = false,
+                )
             }
         }
-        return "Connection stopped"
+        return ActiveConnectionInterrupt(
+            message = "Connection stopped",
+            forceVpnRebuild = false,
+        )
     }
 
     private fun logConnectionAttemptFailure(
@@ -405,7 +424,7 @@ class SshVpnService : android.net.VpnService() {
 
     private fun validateAppSettings(appSettings: AppSettings) {
         if (appSettings.vpnMode == VpnMode.SELECTED_APPS && appSettings.selectedAppPackages.isEmpty()) {
-            throw VpnConnectionException("Нет выбранных приложений")
+            throw VpnConnectionException("No apps selected")
         }
     }
 
@@ -544,6 +563,11 @@ class SshVpnService : android.net.VpnService() {
 private data class ConnectionAttempt(
     val sshSession: Session,
     val reusedVpnInterface: Boolean,
+)
+
+private data class ActiveConnectionInterrupt(
+    val message: String,
+    val forceVpnRebuild: Boolean,
 )
 
 private fun VpnConnectionException.isRecoverableBeforeFirstConnection(): Boolean {

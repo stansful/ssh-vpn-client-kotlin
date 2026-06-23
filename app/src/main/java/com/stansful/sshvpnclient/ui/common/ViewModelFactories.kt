@@ -23,6 +23,7 @@ class AppViewModelFactory(
                 proxyProfileRepository = container.proxyProfileRepository,
                 proxySourceSynchronizer = container.proxySourceSynchronizer,
                 xrayCoreBridge = container.xrayCoreBridge,
+                appSettingsRepository = container.appSettingsRepository,
                 connectProxyVpnUseCase = container.connectProxyVpnUseCase,
                 disconnectVpnUseCase = container.disconnectVpnUseCase,
                 vpnConnectionRepository = container.vpnConnectionRepository,

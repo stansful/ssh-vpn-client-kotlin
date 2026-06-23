@@ -9,44 +9,66 @@ import android.os.Build
 import android.os.PersistableBundle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -58,25 +80,36 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.stansful.sshvpnclient.AppContainer
-import com.stansful.sshvpnclient.domain.model.OpenSourcePolicy
+import com.stansful.sshvpnclient.R
+import com.stansful.sshvpnclient.domain.model.AppSettings
+import com.stansful.sshvpnclient.domain.model.AppThemeMode
+import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSummary
 import com.stansful.sshvpnclient.domain.model.ProxyProtocol
 import com.stansful.sshvpnclient.domain.model.ProxyTestStatus
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
+import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
+import com.stansful.sshvpnclient.ui.main.CustomThemeColorsEditor
 import kotlinx.coroutines.launch
 
 @Composable
-fun OpenSourceRoute(container: AppContainer) {
+fun OpenSourceRoute(
+    container: AppContainer,
+    openAppPicker: () -> Unit,
+) {
     val viewModel: OpenSourceViewModel = viewModel(factory = AppViewModelFactory(container))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -89,6 +122,7 @@ fun OpenSourceRoute(container: AppContainer) {
     OpenSourceScreen(
         state = state,
         viewModel = viewModel,
+        openAppPicker = openAppPicker,
         onConnect = {
             val permissionIntent = VpnService.prepare(context)
             if (permissionIntent == null) viewModel.connect() else vpnPermissionLauncher.launch(permissionIntent)
@@ -100,12 +134,14 @@ fun OpenSourceRoute(container: AppContainer) {
 private fun OpenSourceScreen(
     state: OpenSourceUiState,
     viewModel: OpenSourceViewModel,
+    openAppPicker: () -> Unit,
     onConnect: () -> Unit,
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboard.current
     val coroutineScope = rememberCoroutineScope()
     var pendingDeleteIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var settingsVisible by remember { mutableStateOf(false) }
 
     AppScreen(
         title = if (state.selectionMode) "Selected: ${state.selectedIds.size}" else "opensource",
@@ -121,6 +157,9 @@ private fun OpenSourceScreen(
                     Icon(Icons.Default.Close, contentDescription = "Clear selection")
                 }
             } else {
+                IconButton(onClick = { settingsVisible = true }) {
+                    Icon(Icons.Default.Settings, contentDescription = "Settings")
+                }
                 IconButton(onClick = viewModel::showBulkImport) {
                     Icon(Icons.Default.ContentPaste, contentDescription = "Import from clipboard")
                 }
@@ -134,7 +173,10 @@ private fun OpenSourceScreen(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            RiskBanner()
+            RiskBanner(
+                expanded = state.appSettings.openSourceRiskBannerExpanded,
+                onExpandedChange = viewModel::setOpenSourceRiskBannerExpanded,
+            )
             OpenSourceActions(
                 state = state,
                 onRefresh = viewModel::synchronize,
@@ -157,6 +199,13 @@ private fun OpenSourceScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            AnimatedVisibility(
+                visible = state.appSettings.showLogsOnOpenSource && state.vpnState.diagnostics.isNotEmpty(),
+                enter = fadeIn() + slideInVertically { it / 4 },
+                exit = fadeOut(),
+            ) {
+                DiagnosticsLogPanel(state.vpnState.diagnostics)
             }
             if (state.profiles.isEmpty()) {
                 EmptyProxyList(onRefresh = viewModel::synchronize, onAdd = { viewModel.openEditor() })
@@ -232,21 +281,353 @@ private fun OpenSourceScreen(
             },
         )
     }
+    if (settingsVisible) {
+        OpenSourceSettingsSheet(
+            settings = state.appSettings,
+            onShowLogsChange = viewModel::setShowLogsOnOpenSource,
+            onShowWarningDialogChange = viewModel::setShowOpenSourceWarningOnEnter,
+            onThemeModeChange = viewModel::setThemeMode,
+            onCustomThemeColorsChange = viewModel::setCustomThemeColors,
+            onVpnModeChange = viewModel::setVpnMode,
+            onOpenAppPicker = {
+                settingsVisible = false
+                openAppPicker()
+            },
+            onDismiss = { settingsVisible = false },
+        )
+    }
+    if (state.showNoSelectedAppsDialog) {
+        AlertDialog(
+            onDismissRequest = viewModel::dismissNoSelectedAppsDialog,
+            confirmButton = {
+                TextButton(onClick = viewModel::dismissNoSelectedAppsDialog) {
+                    Text("OK")
+                }
+            },
+            title = { Text(stringResource(R.string.vpn_mode)) },
+            text = { Text(stringResource(R.string.error_no_selected_apps)) },
+        )
+    }
 }
 
 @Composable
-private fun RiskBanner() {
+private fun RiskBanner(
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+) {
     Surface(
-        color = MaterialTheme.colorScheme.errorContainer,
+        color = if (expanded) {
+            MaterialTheme.colorScheme.errorContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f)
+        },
         contentColor = MaterialTheme.colorScheme.onErrorContainer,
         shape = RoundedCornerShape(8.dp),
     ) {
-        Text(
-            text = OpenSourcePolicy.DISCLAIMER,
-            modifier = Modifier.padding(12.dp),
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.SemiBold,
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .animateContentSize()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.open_source_banner_title),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (expanded) {
+                        MaterialTheme.colorScheme.onErrorContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+                IconButton(
+                    onClick = { onExpandedChange(!expanded) },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (expanded) {
+                            stringResource(R.string.hide_diagnostics)
+                        } else {
+                            stringResource(R.string.show_diagnostics)
+                        },
+                        tint = if (expanded) {
+                            MaterialTheme.colorScheme.onErrorContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            }
+            AnimatedVisibility(visible = expanded) {
+                Text(
+                    text = stringResource(R.string.open_source_warning_message),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticsLogPanel(diagnostics: List<String>) {
+    var expanded by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboard.current
+    val coroutineScope = rememberCoroutineScope()
+
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(14.dp)
+                .animateContentSize(),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.connection_diagnostics),
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                    Text(
+                        text = stringResource(R.string.diagnostics_line_count, diagnostics.size),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                clipboard.setClipEntry(
+                                    ClipEntry(
+                                        ClipData.newPlainText(
+                                            "Connection diagnostics",
+                                            diagnostics.joinToString(separator = "\n"),
+                                        ),
+                                    ),
+                                )
+                            }
+                        },
+                    ) {
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = stringResource(R.string.copy_diagnostics),
+                        )
+                    }
+                    IconButton(onClick = { expanded = !expanded }) {
+                        Icon(
+                            imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = if (expanded) {
+                                stringResource(R.string.hide_diagnostics)
+                            } else {
+                                stringResource(R.string.show_diagnostics)
+                            },
+                        )
+                    }
+                }
+            }
+
+            AnimatedVisibility(visible = expanded) {
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 280.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    itemsIndexed(
+                        items = diagnostics,
+                        key = { index, _ -> index },
+                    ) { _, line ->
+                        Text(
+                            text = line,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OpenSourceSettingsSheet(
+    settings: AppSettings,
+    onShowLogsChange: (Boolean) -> Unit,
+    onShowWarningDialogChange: (Boolean) -> Unit,
+    onThemeModeChange: (AppThemeMode) -> Unit,
+    onCustomThemeColorsChange: (CustomThemeColors) -> Unit,
+    onVpnModeChange: (VpnMode) -> Unit,
+    onOpenAppPicker: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        dragHandle = { BottomSheetDefaults.DragHandle(color = MaterialTheme.colorScheme.outline) },
+        shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 20.dp, vertical = 8.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.settings),
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
+
+            SettingsSwitchRow(
+                title = stringResource(R.string.debug_logs),
+                checked = settings.showLogsOnOpenSource,
+                onCheckedChange = onShowLogsChange,
+            )
+            SettingsSwitchRow(
+                title = stringResource(R.string.show_warning_dialog),
+                checked = settings.showOpenSourceWarningOnEnter,
+                onCheckedChange = onShowWarningDialogChange,
+            )
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(stringResource(R.string.vpn_mode), style = MaterialTheme.typography.labelLarge)
+                VpnModeSelector(
+                    selected = settings.vpnMode,
+                    selectedAppsCount = settings.selectedAppPackages.size,
+                    onSelected = onVpnModeChange,
+                    onOpenAppPicker = onOpenAppPicker,
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(stringResource(R.string.theme), style = MaterialTheme.typography.labelLarge)
+                ThemeModeSelector(
+                    selected = settings.themeMode,
+                    onSelected = onThemeModeChange,
+                )
+                AnimatedVisibility(visible = settings.themeMode == AppThemeMode.CUSTOM) {
+                    CustomThemeColorsEditor(
+                        colors = settings.customThemeColors,
+                        onColorsChange = onCustomThemeColorsChange,
+                    )
+                }
+            }
+
+            Box(modifier = Modifier.padding(bottom = 12.dp))
+        }
+    }
+}
+
+@Composable
+private fun SettingsSwitchRow(
+    title: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, style = MaterialTheme.typography.bodyLarge)
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
         )
+    }
+}
+
+@Composable
+private fun VpnModeSelector(
+    selected: VpnMode,
+    selectedAppsCount: Int,
+    onSelected: (VpnMode) -> Unit,
+    onOpenAppPicker: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            VpnMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = selected == mode,
+                    onClick = { onSelected(mode) },
+                    label = { Text(mode.label) },
+                    leadingIcon = if (selected == mode) {
+                        { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    } else {
+                        null
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
+        AnimatedVisibility(visible = selected == VpnMode.SELECTED_APPS) {
+            FilledTonalButton(
+                onClick = onOpenAppPicker,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Icon(Icons.Default.Apps, contentDescription = null)
+                Text(
+                    text = stringResource(R.string.select_apps_count, selectedAppsCount),
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThemeModeSelector(
+    selected: AppThemeMode,
+    onSelected: (AppThemeMode) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        AppThemeMode.entries.chunked(THEME_CHIP_COLUMNS).forEach { rowModes ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                rowModes.forEach { mode ->
+                    FilterChip(
+                        selected = selected == mode,
+                        onClick = { onSelected(mode) },
+                        label = { Text(mode.label) },
+                        leadingIcon = {
+                            Icon(mode.icon(), contentDescription = null, modifier = Modifier.size(18.dp))
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                repeat(THEME_CHIP_COLUMNS - rowModes.size) {
+                    Box(modifier = Modifier.weight(1f))
+                }
+            }
+        }
     }
 }
 
@@ -273,13 +654,14 @@ private fun OpenSourceActions(
         ) {
             Button(
                 onClick = onConnect,
-                enabled = state.selectedProfile != null && state.xrayCoreAvailable,
+                enabled = state.canStartOpenSource,
                 modifier = Modifier.weight(1f),
             ) {
                 Icon(Icons.Default.PowerSettingsNew, contentDescription = null)
                 Text(
                     when {
                         state.xrayConnected -> "Disconnect"
+                        state.sshActive -> "Switch to opensource"
                         else -> "Connect"
                     },
                     modifier = Modifier.padding(start = 6.dp),
@@ -516,3 +898,14 @@ private fun sensitiveClipData(label: String, value: String): ClipData {
         }
     }
 }
+
+private fun AppThemeMode.icon(): ImageVector {
+    return when (this) {
+        AppThemeMode.SYSTEM -> Icons.Default.Settings
+        AppThemeMode.LIGHT -> Icons.Default.LightMode
+        AppThemeMode.DARK -> Icons.Default.DarkMode
+        AppThemeMode.CUSTOM -> Icons.Default.Palette
+    }
+}
+
+private const val THEME_CHIP_COLUMNS = 2

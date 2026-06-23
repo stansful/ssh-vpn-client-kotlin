@@ -8,6 +8,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Terminal
@@ -27,7 +28,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import com.stansful.sshvpnclient.AppContainer
+import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.domain.model.GlobalTab
 import com.stansful.sshvpnclient.domain.model.OpenSourcePolicy
 import com.stansful.sshvpnclient.ui.opensource.OpenSourceRoute
@@ -40,18 +44,20 @@ fun GlobalTabsHost(
     navController: NavHostController,
 ) {
     val settings by container.appSettingsRepository.settings.collectAsStateWithLifecycle()
-    val consentAccepted = settings.openSourceConsentVersion >= OpenSourcePolicy.CONSENT_VERSION
-    val visibleTab = settings.activeGlobalTab.takeIf { it != GlobalTab.OPEN_SOURCE || consentAccepted }
-        ?: GlobalTab.SHADOW_SSH
+    val visibleTab = settings.activeGlobalTab
     var showConsent by remember { mutableStateOf(false) }
 
-    LaunchedEffect(settings.activeGlobalTab, consentAccepted) {
-        if (settings.activeGlobalTab == GlobalTab.OPEN_SOURCE && !consentAccepted) {
+    LaunchedEffect(settings.activeGlobalTab, settings.showOpenSourceWarningOnEnter) {
+        if (settings.activeGlobalTab == GlobalTab.OPEN_SOURCE && settings.showOpenSourceWarningOnEnter) {
             showConsent = true
         }
     }
 
-    Column(modifier = androidx.compose.ui.Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding(),
+    ) {
         PrimaryTabRow(
             selectedTabIndex = visibleTab.ordinal,
             containerColor = MaterialTheme.colorScheme.background,
@@ -61,11 +67,7 @@ fun GlobalTabsHost(
                 Tab(
                     selected = visibleTab == tab,
                     onClick = {
-                        if (tab == GlobalTab.OPEN_SOURCE && !consentAccepted) {
-                            showConsent = true
-                        } else {
-                            container.appSettingsRepository.setActiveGlobalTab(tab)
-                        }
+                        container.appSettingsRepository.setActiveGlobalTab(tab)
                     },
                     text = { Text(tab.label) },
                     icon = {
@@ -81,7 +83,7 @@ fun GlobalTabsHost(
                 )
             }
         }
-        Box(modifier = androidx.compose.ui.Modifier.weight(1f)) {
+        Box(modifier = Modifier.weight(1f)) {
             AnimatedContent(
                 targetState = visibleTab,
                 transitionSpec = { fadeIn(tween(160)) togetherWith fadeOut(tween(120)) },
@@ -89,7 +91,13 @@ fun GlobalTabsHost(
             ) { tab ->
                 when (tab) {
                     GlobalTab.SHADOW_SSH -> SshVpnNavGraph(container, navController)
-                    GlobalTab.OPEN_SOURCE -> OpenSourceRoute(container)
+                    GlobalTab.OPEN_SOURCE -> OpenSourceRoute(
+                        container = container,
+                        openAppPicker = {
+                            container.appSettingsRepository.setActiveGlobalTab(GlobalTab.SHADOW_SSH)
+                            navController.navigate(Routes.APP_PICKER)
+                        },
+                    )
                 }
             }
         }
@@ -97,12 +105,9 @@ fun GlobalTabsHost(
 
     if (showConsent) {
         AlertDialog(
-            onDismissRequest = {
-                showConsent = false
-                container.appSettingsRepository.setActiveGlobalTab(GlobalTab.SHADOW_SSH)
-            },
-            title = { Text("Публичные конфигурации") },
-            text = { Text(OpenSourcePolicy.DISCLAIMER) },
+            onDismissRequest = { showConsent = false },
+            title = { Text(stringResource(R.string.open_source_warning_title)) },
+            text = { Text(stringResource(R.string.open_source_warning_message)) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -113,7 +118,7 @@ fun GlobalTabsHost(
                         ProxySourceSyncWorker.schedule(container.applicationContext)
                         showConsent = false
                     },
-                ) { Text("Согласен") }
+                ) { Text(stringResource(R.string.open_source_warning_continue)) }
             },
             dismissButton = {
                 TextButton(
@@ -121,7 +126,7 @@ fun GlobalTabsHost(
                         container.appSettingsRepository.setActiveGlobalTab(GlobalTab.SHADOW_SSH)
                         showConsent = false
                     },
-                ) { Text("Нет, вернуться назад") }
+                ) { Text(stringResource(R.string.open_source_warning_back)) }
             },
         )
     }

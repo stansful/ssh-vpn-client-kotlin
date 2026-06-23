@@ -12,6 +12,8 @@ interface AppSettingsRepository {
 
     fun setShowLogsOnMain(show: Boolean)
 
+    fun setShowLogsOnOpenSource(show: Boolean)
+
     fun setShowTerminalOnMain(show: Boolean)
 
     fun setThemeMode(themeMode: AppThemeMode)
@@ -25,4 +27,8 @@ interface AppSettingsRepository {
     fun setActiveGlobalTab(tab: GlobalTab)
 
     fun setOpenSourceConsentVersion(version: Int)
+
+    fun setShowOpenSourceWarningOnEnter(show: Boolean)
+
+    fun setOpenSourceRiskBannerExpanded(expanded: Boolean)
 }

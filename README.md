@@ -149,6 +149,8 @@ https://hub.mos.ru/zieng2/wl/raw/main/list_universal.txt
 
 Wake recovery основан на системных `SCREEN_OFF/SCREEN_ON` событиях: дополнительные polling, ping и wake lock не используются.
 
+Если SSH transport жив, но TUN/DNS слой начинает деградировать, обычный `Check tunnel` может оставаться успешным, потому что он открывает прямой SSH `direct-tcpip` канал и не проходит через Android TUN. Forwarder отдельно отслеживает DNS failures: сначала пробует DNS-over-TCP через SSH, затем DoH fallback к Cloudflare через SSH на `443`. После серии DNS/TUN failures сервис пересобирает Android VPN interface и Kotlin forwarder без force stop приложения.
+
 ## Производительность и потоки
 
 - Контейнер зависимостей ленивый: Room, Tink, PackageManager и VPN-компоненты создаются только при первом использовании. Для первого кадра синхронно загружаются только небольшие UI settings.
@@ -160,6 +162,7 @@ Wake recovery основан на системных `SCREEN_OFF/SCREEN_ON` со
 - Diagnostics восстанавливаются и сериализуются вне Main thread, поступающие строки публикуются в UI пакетами, а раскрытый список виртуализирован.
 - SSH terminal использует lifecycle-bound coroutine scope на `Dispatchers.IO`; вывод читается пакетами до 32 KiB.
 - VPN connection loop выполняется на `Dispatchers.IO`. В production-коде нет `GlobalScope` и `runBlocking`.
+- DNS forwarding использует fallback на DoH через SSH, чтобы не зависеть только от TCP/53 на стороне сервера/сети.
 
 Pagination не используется для списка приложений: источник является локальным `PackageManager`, не предоставляет page API, один раз кэшируется, а UI уже виртуализирован через `LazyColumn`.
 

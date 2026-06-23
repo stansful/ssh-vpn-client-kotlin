@@ -71,7 +71,7 @@ class VpnTunnelManager {
 
             VpnMode.SELECTED_APPS -> {
                 if (appSettings.selectedAppPackages.isEmpty()) {
-                    throw VpnConnectionException("Нет выбранных приложений")
+                    throw VpnConnectionException("No apps selected")
                 }
                 log(
                     "VPN app routing mode: selected-apps; " +
@@ -87,7 +87,7 @@ class VpnTunnelManager {
                     }
                 }
                 if (allowedApplications == 0) {
-                    throw VpnConnectionException("Нет выбранных приложений")
+                    throw VpnConnectionException("No apps selected")
                 }
             }
         }

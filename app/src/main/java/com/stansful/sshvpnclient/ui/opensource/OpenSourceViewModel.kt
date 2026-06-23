@@ -2,14 +2,19 @@ package com.stansful.sshvpnclient.ui.opensource
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.stansful.sshvpnclient.domain.model.AppSettings
+import com.stansful.sshvpnclient.domain.model.AppThemeMode
+import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSource
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSummary
 import com.stansful.sshvpnclient.domain.model.ProxyProtocol
 import com.stansful.sshvpnclient.domain.model.ProxyTestStatus
 import com.stansful.sshvpnclient.domain.model.ProxyTunnelTestResult
+import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
+import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.ProxyProfileRepository
 import com.stansful.sshvpnclient.domain.repository.ProxySourceSynchronizer
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
@@ -18,13 +23,17 @@ import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class ProxyEditorState(
     val profileId: String? = null,
@@ -44,6 +53,8 @@ data class OpenSourceUiState(
     val message: String? = null,
     val editor: ProxyEditorState? = null,
     val showBulkImport: Boolean = false,
+    val showNoSelectedAppsDialog: Boolean = false,
+    val appSettings: AppSettings = AppSettings(),
     val vpnState: VpnConnectionState = VpnConnectionState(),
     val xrayCoreAvailable: Boolean = false,
 ) {
@@ -56,25 +67,52 @@ data class OpenSourceUiState(
                 VpnConnectionStatus.CONNECTED,
                 VpnConnectionStatus.RECONNECTING,
             )
+    val sshActive: Boolean
+        get() = vpnState.activeTransport == VpnTransportType.SSH &&
+            vpnState.status in setOf(
+                VpnConnectionStatus.CONNECTING,
+                VpnConnectionStatus.CONNECTED,
+                VpnConnectionStatus.RECONNECTING,
+            )
+    val canStartOpenSource: Boolean
+        get() = selectedProfile != null &&
+            xrayCoreAvailable &&
+            vpnState.status != VpnConnectionStatus.DISCONNECTING
 }
 
 class OpenSourceViewModel(
     private val proxyProfileRepository: ProxyProfileRepository,
     private val proxySourceSynchronizer: ProxySourceSynchronizer,
     private val xrayCoreBridge: XrayCoreBridge,
+    private val appSettingsRepository: AppSettingsRepository,
     private val connectProxyVpnUseCase: ConnectProxyVpnUseCase,
     private val disconnectVpnUseCase: DisconnectVpnUseCase,
-    vpnConnectionRepository: VpnConnectionRepository,
+    private val vpnConnectionRepository: VpnConnectionRepository,
 ) : ViewModel() {
     private val query = MutableStateFlow("")
     private val protocolFilter = MutableStateFlow<ProxyProtocol?>(null)
     private val selectedIds = MutableStateFlow<Set<String>>(emptySet())
     private val operation = MutableStateFlow(OperationState())
     private val dialogState = MutableStateFlow(DialogState())
+    private val showNoSelectedAppsDialog = MutableStateFlow(false)
     private var checkJob: Job? = null
+    private var settingsReconnectJob: Job? = null
+    private var settingsReconnectStarted = false
 
     init {
         synchronize()
+        viewModelScope.launch {
+            var previousSplitTunnelSettings = appSettingsRepository.settings.value.splitTunnelSettings()
+            appSettingsRepository.settings
+                .drop(1)
+                .collect { settings ->
+                    val nextSplitTunnelSettings = settings.splitTunnelSettings()
+                    if (previousSplitTunnelSettings != nextSplitTunnelSettings) {
+                        applyVpnSettingsChange(settings)
+                    }
+                    previousSplitTunnelSettings = nextSplitTunnelSettings
+                }
+        }
     }
 
     private val profileListState = combine(
@@ -100,9 +138,16 @@ class OpenSourceViewModel(
         operation,
         dialogState,
         vpnConnectionRepository.state,
-    ) { operation, dialogs, vpnState -> AuxiliaryState(operation, dialogs, vpnState) }
+        showNoSelectedAppsDialog,
+    ) { operation, dialogs, vpnState, showNoSelectedApps ->
+        AuxiliaryState(operation, dialogs, vpnState, showNoSelectedApps)
+    }
 
-    val uiState = combine(profileListState, auxiliaryState) { profileState, auxiliary ->
+    val uiState = combine(
+        profileListState,
+        auxiliaryState,
+        appSettingsRepository.settings,
+    ) { profileState, auxiliary, appSettings ->
         val operation = auxiliary.operation
         val dialogs = auxiliary.dialogs
         OpenSourceUiState(
@@ -118,6 +163,8 @@ class OpenSourceViewModel(
             message = operation.message,
             editor = dialogs.editor,
             showBulkImport = dialogs.showBulkImport,
+            showNoSelectedAppsDialog = auxiliary.showNoSelectedAppsDialog,
+            appSettings = appSettings,
             vpnState = auxiliary.vpnState,
             xrayCoreAvailable = xrayCoreBridge.isAvailable,
         )
@@ -249,11 +296,52 @@ class OpenSourceViewModel(
     suspend fun rawUri(id: String): String = proxyProfileRepository.getById(id)?.rawUri.orEmpty()
 
     fun connect() {
-        viewModelScope.launch { connectProxyVpnUseCase() }
+        if (appSettingsRepository.settings.value.requiresSelectedAppsButHasNone()) {
+            showNoSelectedAppsDialog.value = true
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                connectProxyVpnUseCase()
+            }.onFailure { error ->
+                vpnConnectionRepository.setError(
+                    uiState.value.selectedProfile?.id,
+                    error.message ?: "Unknown connection error",
+                )
+            }
+        }
     }
 
     fun disconnect() {
         disconnectVpnUseCase()
+    }
+
+    fun dismissNoSelectedAppsDialog() {
+        showNoSelectedAppsDialog.value = false
+    }
+
+    fun setShowLogsOnOpenSource(show: Boolean) {
+        appSettingsRepository.setShowLogsOnOpenSource(show)
+    }
+
+    fun setShowOpenSourceWarningOnEnter(show: Boolean) {
+        appSettingsRepository.setShowOpenSourceWarningOnEnter(show)
+    }
+
+    fun setOpenSourceRiskBannerExpanded(expanded: Boolean) {
+        appSettingsRepository.setOpenSourceRiskBannerExpanded(expanded)
+    }
+
+    fun setThemeMode(themeMode: AppThemeMode) {
+        appSettingsRepository.setThemeMode(themeMode)
+    }
+
+    fun setCustomThemeColors(colors: CustomThemeColors) {
+        appSettingsRepository.setCustomThemeColors(colors)
+    }
+
+    fun setVpnMode(vpnMode: VpnMode) {
+        appSettingsRepository.setVpnMode(vpnMode)
     }
 
     fun checkSelected() {
@@ -279,6 +367,47 @@ class OpenSourceViewModel(
         viewModelScope.launch {
             val result = proxyProfileRepository.import(text, source)
             operation.update { it.copy(message = result.summary) }
+        }
+    }
+
+    private fun applyVpnSettingsChange(settings: AppSettings) {
+        if (settings.requiresSelectedAppsButHasNone()) {
+            showNoSelectedAppsDialog.value = true
+            return
+        }
+        if (settingsReconnectJob?.isActive == true) {
+            if (settingsReconnectStarted) return
+            settingsReconnectJob?.cancel()
+        }
+        if (!vpnConnectionRepository.currentState.isXrayActive()) return
+
+        settingsReconnectJob = viewModelScope.launch {
+            delay(SETTINGS_CHANGE_DEBOUNCE_MS)
+            val latestSettings = appSettingsRepository.settings.value
+            if (latestSettings.requiresSelectedAppsButHasNone()) {
+                showNoSelectedAppsDialog.value = true
+                return@launch
+            }
+            settingsReconnectStarted = true
+            try {
+                disconnectVpnUseCase()
+                withTimeoutOrNull(TRANSPORT_SWITCH_TIMEOUT_MS) {
+                    vpnConnectionRepository.state.first { state ->
+                        state.status == VpnConnectionStatus.DISCONNECTED ||
+                            state.activeTransport != VpnTransportType.XRAY
+                    }
+                }
+                runCatching {
+                    connectProxyVpnUseCase()
+                }.onFailure { error ->
+                    vpnConnectionRepository.setError(
+                        uiState.value.selectedProfile?.id,
+                        error.message ?: "Unknown connection error",
+                    )
+                }
+            } finally {
+                settingsReconnectStarted = false
+            }
         }
     }
 
@@ -349,9 +478,42 @@ private data class AuxiliaryState(
     val operation: OperationState,
     val dialogs: DialogState,
     val vpnState: VpnConnectionState,
+    val showNoSelectedAppsDialog: Boolean,
 )
 
 private fun ProxyProfileSummary.matches(query: String): Boolean {
     return listOf(name, host, protocol.name, transport.name, security.name)
         .any { value -> value.contains(query, ignoreCase = true) }
 }
+
+private fun AppSettings.requiresSelectedAppsButHasNone(): Boolean {
+    return vpnMode == VpnMode.SELECTED_APPS && selectedAppPackages.isEmpty()
+}
+
+private fun AppSettings.splitTunnelSettings(): SplitTunnelSettings {
+    return SplitTunnelSettings(
+        vpnMode = vpnMode,
+        selectedAppPackages = if (vpnMode == VpnMode.SELECTED_APPS) {
+            selectedAppPackages
+        } else {
+            emptySet()
+        },
+    )
+}
+
+private fun VpnConnectionState.isXrayActive(): Boolean {
+    return activeTransport == VpnTransportType.XRAY &&
+        status in setOf(
+            VpnConnectionStatus.CONNECTING,
+            VpnConnectionStatus.CONNECTED,
+            VpnConnectionStatus.RECONNECTING,
+        )
+}
+
+private data class SplitTunnelSettings(
+    val vpnMode: VpnMode,
+    val selectedAppPackages: Set<String>,
+)
+
+private const val SETTINGS_CHANGE_DEBOUNCE_MS = 250L
+private const val TRANSPORT_SWITCH_TIMEOUT_MS = 2_000L

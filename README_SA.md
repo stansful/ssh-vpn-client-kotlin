@@ -158,6 +158,8 @@ SSH transport может оставаться доступным после сн
 
 Механизм не использует wake lock, периодические ping или новый polling и не будит устройство во время сна.
 
+Если SSH session остаётся живой, но DNS или TUN forwarding начинают массово отказывать, приложение считает это деградацией forwarding layer. DNS сначала идёт как DNS-over-TCP через SSH к DNS-серверу из Android VPN settings. Если TCP/53 не отвечает, forwarder пробует DoH fallback к Cloudflare через SSH на порт 443. Если несколько DNS-запросов подряд не проходят даже после fallback, `SshVpnService` пересобирает Android VPN interface и Kotlin forwarder. Это закрывает сценарий, когда `Check tunnel` зелёный, но браузер и приложения не открывают сайты.
+
 ## Диагностика
 
 Diagnostics нужны для пользовательского debug без adb.
@@ -200,6 +202,8 @@ youtube.com:443
 - серый - проверка ещё не выполнялась;
 - зелёный - проверка успешна;
 - красный - проверка неуспешна.
+
+Важно: эта проверка подтверждает живость SSH transport. Она не является полной проверкой Android TUN, DNS forwarding и старых app sockets.
 
 ## SSH terminal
 

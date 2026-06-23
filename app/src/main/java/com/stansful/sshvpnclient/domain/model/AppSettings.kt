@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.domain.model
 
 data class AppSettings(
     val showLogsOnMain: Boolean = false,
+    val showLogsOnOpenSource: Boolean = false,
     val showTerminalOnMain: Boolean = false,
     val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
     val customThemeColors: CustomThemeColors = CustomThemeColors.defaultLight(),
@@ -9,6 +10,8 @@ data class AppSettings(
     val selectedAppPackages: Set<String> = emptySet(),
     val activeGlobalTab: GlobalTab = GlobalTab.SHADOW_SSH,
     val openSourceConsentVersion: Int = 0,
+    val showOpenSourceWarningOnEnter: Boolean = true,
+    val openSourceRiskBannerExpanded: Boolean = true,
 )
 
 enum class GlobalTab(

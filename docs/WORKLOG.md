@@ -1976,3 +1976,36 @@ Result:
 - Verified `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, APK Signature Scheme v2, 1 signer.
 - Debug APK built at `build/app/outputs/apk/debug/app-debug.apk` around 153M.
 - Release APK built at `build/app/outputs/apk/release/app-release.apk` around 134M.
+
+### 2026-06-23 - Before Block 56
+
+Plan:
+
+- Investigate why SSH `Check tunnel` stays successful while apps stop opening websites after the process has been alive for a while.
+- Fix stale TUN/DNS forwarding state so force stopping the app is no longer required.
+- Keep battery impact low: no wake lock, no extra periodic ping loop.
+- Preserve existing SSH business logic and reconnect behavior.
+- Rebuild and rerun tests/lint.
+
+Result:
+
+- Diagnosed attached logs:
+  - SSH authentication and transport were healthy;
+  - `Check tunnel` succeeded through direct SSH `direct-tcpip`;
+  - real app traffic failed because DNS-over-SSH inside Kotlin TUN forwarder started returning `channel is not opened` and `Unexpected EOF`.
+- Added forwarding health signal from `KotlinTunForwarder` to `Tun2SocksManager`.
+- `SshVpnService` now consumes TUN degradation signals and performs a full VPN interface + forwarder rebuild on the next reconnect attempt instead of reusing a degraded TUN pipeline.
+- Added DNS fallback:
+  - first attempt stays DNS-over-TCP through SSH to the DNS server from Android VPN settings;
+  - fallback uses DoH to Cloudflare through SSH on port 443;
+  - after consecutive DNS failures, the forwarder marks the tunnel degraded.
+- Increased forwarder stop wait from 500 ms to 2 seconds, so ordinary Disconnect has more time to drain/stop stale worker threads before a new Connect.
+- Updated `README.md` and `README_SA.md` with the distinction between SSH tunnel check and full TUN/DNS health.
+- Verified `git diff --check`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success.
+- Verified `./scripts/build-debug.sh`: success.
+- Verified `./scripts/build-release.sh`: success.
+- Verified `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, APK Signature Scheme v2, 1 signer.
+- Debug APK built at `build/app/outputs/apk/debug/app-debug.apk` around 154M.
+- Release APK built at `build/app/outputs/apk/release/app-release.apk` around 134M.

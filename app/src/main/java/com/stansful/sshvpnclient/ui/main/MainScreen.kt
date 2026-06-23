@@ -90,6 +90,7 @@ import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
@@ -327,8 +328,8 @@ private fun MainScreen(
                     Text("OK")
                 }
             },
-            title = { Text("VPN mode") },
-            text = { Text("нет выбранных приложений") },
+            title = { Text(stringResource(R.string.vpn_mode)) },
+            text = { Text(stringResource(R.string.error_no_selected_apps)) },
         )
     }
 

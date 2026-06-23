@@ -31,6 +31,13 @@ class SharedPreferencesAppSettingsRepository(
         currentSettings.value = currentSettings.value.copy(showLogsOnMain = show)
     }
 
+    override fun setShowLogsOnOpenSource(show: Boolean) {
+        preferences.edit {
+            putBoolean(KEY_SHOW_LOGS_ON_OPEN_SOURCE, show)
+        }
+        currentSettings.value = currentSettings.value.copy(showLogsOnOpenSource = show)
+    }
+
     override fun setShowTerminalOnMain(show: Boolean) {
         preferences.edit {
             putBoolean(KEY_SHOW_TERMINAL_ON_MAIN, show)
@@ -84,9 +91,20 @@ class SharedPreferencesAppSettingsRepository(
         currentSettings.value = currentSettings.value.copy(openSourceConsentVersion = version)
     }
 
+    override fun setShowOpenSourceWarningOnEnter(show: Boolean) {
+        preferences.edit { putBoolean(KEY_SHOW_OPEN_SOURCE_WARNING_ON_ENTER, show) }
+        currentSettings.value = currentSettings.value.copy(showOpenSourceWarningOnEnter = show)
+    }
+
+    override fun setOpenSourceRiskBannerExpanded(expanded: Boolean) {
+        preferences.edit { putBoolean(KEY_OPEN_SOURCE_RISK_BANNER_EXPANDED, expanded) }
+        currentSettings.value = currentSettings.value.copy(openSourceRiskBannerExpanded = expanded)
+    }
+
     private fun readSettings(): AppSettings {
         return AppSettings(
             showLogsOnMain = preferences.getBoolean(KEY_SHOW_LOGS_ON_MAIN, false),
+            showLogsOnOpenSource = preferences.getBoolean(KEY_SHOW_LOGS_ON_OPEN_SOURCE, false),
             showTerminalOnMain = preferences.getBoolean(KEY_SHOW_TERMINAL_ON_MAIN, false),
             themeMode = AppThemeMode.fromStorageValue(preferences.getString(KEY_THEME_MODE, null)),
             customThemeColors = readCustomThemeColors(),
@@ -99,6 +117,14 @@ class SharedPreferencesAppSettingsRepository(
                 preferences.getString(KEY_ACTIVE_GLOBAL_TAB, null),
             ),
             openSourceConsentVersion = preferences.getInt(KEY_OPEN_SOURCE_CONSENT_VERSION, 0),
+            showOpenSourceWarningOnEnter = preferences.getBoolean(
+                KEY_SHOW_OPEN_SOURCE_WARNING_ON_ENTER,
+                true,
+            ),
+            openSourceRiskBannerExpanded = preferences.getBoolean(
+                KEY_OPEN_SOURCE_RISK_BANNER_EXPANDED,
+                true,
+            ),
         )
     }
 
@@ -119,6 +145,7 @@ class SharedPreferencesAppSettingsRepository(
     private companion object {
         const val PREFERENCES_NAME = "ssh-vpn-client-settings"
         const val KEY_SHOW_LOGS_ON_MAIN = "show_logs_on_main"
+        const val KEY_SHOW_LOGS_ON_OPEN_SOURCE = "show_logs_on_open_source"
         const val KEY_SHOW_TERMINAL_ON_MAIN = "show_terminal_on_main"
         const val KEY_THEME_MODE = "theme_mode"
         const val KEY_CUSTOM_PRIMARY = "custom_primary"
@@ -133,5 +160,7 @@ class SharedPreferencesAppSettingsRepository(
         const val KEY_SELECTED_APP_PACKAGES = "selected_app_packages"
         const val KEY_ACTIVE_GLOBAL_TAB = "active_global_tab"
         const val KEY_OPEN_SOURCE_CONSENT_VERSION = "open_source_consent_version"
+        const val KEY_SHOW_OPEN_SOURCE_WARNING_ON_ENTER = "show_open_source_warning_on_enter"
+        const val KEY_OPEN_SOURCE_RISK_BANNER_EXPANDED = "open_source_risk_banner_expanded"
     }
 }
