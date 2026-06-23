@@ -31,6 +31,7 @@ import com.stansful.sshvpnclient.domain.repository.XrayCoreUpdateRepository
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectProxyVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
+import com.stansful.sshvpnclient.xray.XrayCoreInstallResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -561,18 +562,26 @@ class OpenSourceViewModel(
                 )
             }
             var downloadedFile: java.io.File? = null
+            var installResult: XrayCoreInstallResult? = null
             runCatching {
                 val file = xrayCoreUpdateRepository.download(asset)
                 downloadedFile = file
                 file.inputStream().use { input ->
-                    xrayCoreBridge.installCore(input)
+                    installResult = xrayCoreBridge.installCore(input)
                 }
             }.onSuccess {
                 xrayCoreUpdateState.update {
                     it.copy(
                         isDownloading = false,
                         downloadingAbi = null,
-                        statusMessage = "Xray core installed for ${asset.abi}",
+                        statusMessage = when (installResult) {
+                            XrayCoreInstallResult.ALREADY_INSTALLED ->
+                                "Xray core is already installed for ${asset.abi}"
+                            XrayCoreInstallResult.INSTALLED_AFTER_RESTART ->
+                                "Xray core updated for ${asset.abi}. Restart the app to use the new core."
+                            XrayCoreInstallResult.INSTALLED,
+                            null -> "Xray core installed for ${asset.abi}"
+                        },
                     )
                 }
             }.onFailure { error ->

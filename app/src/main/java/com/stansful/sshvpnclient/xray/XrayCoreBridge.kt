@@ -12,6 +12,7 @@ import java.io.InputStream
 import java.lang.reflect.Proxy
 import java.net.ServerSocket
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.util.Base64
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -35,19 +36,46 @@ class XrayCoreBridge(
     private var cachedBinding: XrayBinding? = null
     @Volatile
     private var bindingLoaded = false
+    @Volatile
+    private var coreRestartPending = false
 
     val isAvailable: Boolean
         get() = binding() != null
 
     fun isRunning(): Boolean = binding()?.isRunning() == true
 
-    suspend fun installCore(input: InputStream) = withContext(ioDispatcher) {
+    suspend fun installCore(input: InputStream): XrayCoreInstallResult = withContext(ioDispatcher) {
         synchronized(bindingLock) {
-            XrayCoreStore(appContext).install(input)
-            cachedBinding = null
-            bindingLoaded = false
-            cachedBinding = XrayBinding.loadInstalledRequired(appContext)
+            val previousBinding = cachedBinding.takeIf { bindingLoaded }
+            val result = XrayCoreStore(appContext).install(
+                input = input,
+                activeCoreLoaded = previousBinding != null,
+            )
+            var effectiveResult = if (coreRestartPending && result == XrayCoreInstallResult.ALREADY_INSTALLED) {
+                XrayCoreInstallResult.INSTALLED_AFTER_RESTART
+            } else {
+                result
+            }
+            val nextBinding = try {
+                when (effectiveResult) {
+                    XrayCoreInstallResult.INSTALLED -> XrayBinding.loadInstalledRequired(appContext)
+                    XrayCoreInstallResult.ALREADY_INSTALLED ->
+                        previousBinding ?: XrayBinding.loadInstalledRequired(appContext)
+                    XrayCoreInstallResult.INSTALLED_AFTER_RESTART ->
+                        previousBinding ?: XrayBinding.loadInstalledRequired(appContext)
+                }
+            } catch (error: Throwable) {
+                if (error.isXrayNativeLibraryAlreadyLoaded()) {
+                    effectiveResult = XrayCoreInstallResult.INSTALLED_AFTER_RESTART
+                    previousBinding
+                } else {
+                    throw error
+                }
+            }
+            cachedBinding = nextBinding
             bindingLoaded = true
+            coreRestartPending = effectiveResult == XrayCoreInstallResult.INSTALLED_AFTER_RESTART
+            effectiveResult
         }
     }
 
@@ -139,6 +167,12 @@ class XrayCoreBridge(
         private const val TEST_TIMEOUT_SECONDS = 5
         private const val TEST_URL = "https://www.youtube.com/generate_204"
     }
+}
+
+enum class XrayCoreInstallResult {
+    INSTALLED,
+    ALREADY_INSTALLED,
+    INSTALLED_AFTER_RESTART,
 }
 
 private class XrayBinding(private val apiClass: Class<*>) {
@@ -241,7 +275,7 @@ private class XrayBinding(private val apiClass: Class<*>) {
             val errors = mutableListOf<String>()
             val runtimeClassLoader = runCatching { XrayCoreStore(context).loadClassLoader() }
                 .onFailure { error ->
-                    errors += "runtime core prepare failed: ${error.message ?: error::class.java.simpleName}"
+                    errors += "runtime core prepare failed: ${error.xrayLoadMessage()}"
                 }
                 .getOrNull()
             runtimeClassLoader?.let { classLoader ->
@@ -262,7 +296,7 @@ private class XrayBinding(private val apiClass: Class<*>) {
             val errors = mutableListOf<String>()
             val runtimeClassLoader = runCatching { XrayCoreStore(context).loadClassLoader() }
                 .onFailure { error ->
-                    errors += "runtime core prepare failed: ${error.message ?: error::class.java.simpleName}"
+                    errors += "runtime core prepare failed: ${error.xrayLoadMessage()}"
                 }
                 .getOrNull()
             runtimeClassLoader?.let { classLoader ->
@@ -284,7 +318,7 @@ private class XrayBinding(private val apiClass: Class<*>) {
                 runCatching { Class.forName(className, true, classLoader) }
                     .onSuccess { apiClass -> return XrayBinding(apiClass) }
                     .onFailure { error ->
-                        errors += "$className: ${error.message ?: error::class.java.simpleName}"
+                        errors += "$className: ${error.xrayLoadMessage()}"
                     }
             }
             return null
@@ -307,7 +341,7 @@ private class XrayCoreStore(context: Context) {
     private val stampFile = File(preparedDir, STAMP_FILE_NAME)
     val coreFile = File(rootDir, CORE_FILE_NAME)
 
-    fun install(input: InputStream) {
+    fun install(input: InputStream, activeCoreLoaded: Boolean): XrayCoreInstallResult {
         rootDir.mkdirs()
         val downloadedFile = File(rootDir, "$CORE_FILE_NAME.download")
         val tempFile = File(rootDir, "$CORE_FILE_NAME.tmp")
@@ -318,11 +352,23 @@ private class XrayCoreStore(context: Context) {
         }
         val abi = validateCore(downloadedFile)
         writeSlimCore(downloadedFile, tempFile, abi)
+        val alreadyInstalled = coreFile.isFile &&
+            runCatching { corePayloadDigest(coreFile, abi) == corePayloadDigest(tempFile, abi) }
+                .getOrDefault(false)
+        if (alreadyInstalled) {
+            downloadedFile.delete()
+            tempFile.delete()
+            return XrayCoreInstallResult.ALREADY_INSTALLED
+        }
         if (coreFile.exists()) check(coreFile.delete()) { "Unable to replace existing Xray core" }
         check(tempFile.renameTo(coreFile)) { "Unable to install Xray core" }
         downloadedFile.delete()
+        if (activeCoreLoaded) {
+            return XrayCoreInstallResult.INSTALLED_AFTER_RESTART
+        }
         preparedDir.deleteRecursively()
         optimizedDexDir.deleteRecursively()
+        return XrayCoreInstallResult.INSTALLED
     }
 
     fun loadClassLoader(): ClassLoader? {
@@ -402,6 +448,25 @@ private class XrayCoreStore(context: Context) {
         }
     }
 
+    private fun corePayloadDigest(file: File, abi: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        ZipFile(file).use { zip ->
+            listOf(CLASSES_DEX_NAME, "jni/$abi/$NATIVE_LIBRARY_NAME").forEach { name ->
+                digest.update(name.toByteArray(StandardCharsets.UTF_8))
+                val entry = zip.getEntry(name) ?: error("Xray core archive is missing $name")
+                zip.getInputStream(entry).use { input ->
+                    val buffer = ByteArray(COPY_BUFFER_SIZE)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        digest.update(buffer, 0, read)
+                    }
+                }
+            }
+        }
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+    }
+
     private fun copyEntry(zip: ZipFile, name: String, output: ZipOutputStream) {
         val sourceEntry = zip.getEntry(name) ?: error("Xray core archive is missing $name")
         val targetEntry = ZipEntry(name).apply {
@@ -436,6 +501,7 @@ private class XrayCoreStore(context: Context) {
         const val CLASSES_DEX_NAME = "classes.dex"
         const val NATIVE_LIBRARY_NAME = "libgojni.so"
         const val STAMP_FILE_NAME = "stamp"
+        const val COPY_BUFFER_SIZE = 32 * 1_024
     }
 }
 
@@ -444,4 +510,23 @@ private fun defaultValue(type: Class<*>): Any? = when (type) {
     Int::class.javaPrimitiveType -> 0
     Long::class.javaPrimitiveType -> 0L
     else -> null
+}
+
+private fun Throwable.xrayLoadMessage(): String {
+    return if (isXrayNativeLibraryAlreadyLoaded()) {
+        "Xray native library is already loaded by a previous runtime loader. Restart the app to finish installing the core."
+    } else {
+        message ?: this::class.java.simpleName
+    }
+}
+
+private fun Throwable.isXrayNativeLibraryAlreadyLoaded(): Boolean {
+    var current: Throwable? = this
+    while (current != null) {
+        if (current.message?.contains("already opened by ClassLoader", ignoreCase = true) == true) {
+            return true
+        }
+        current = current.cause
+    }
+    return false
 }
