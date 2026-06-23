@@ -233,7 +233,7 @@ export SSH_VPN_RELEASE_KEY_PASSWORD='key-password'
 
 Release variant использует R8 minification и resource shrinking. Keep rules лежат в `app/proguard-rules.pro`.
 
-`build-debug.sh` и `build-release.sh` не включают Xray core в APK по умолчанию, чтобы universal APK оставался лёгким. `build-release.sh` дополнительно собирает ABI-specific `libXray-<version>-<abi>.aar` assets в release output рядом с APK. Эти AAR нужно загрузить в GitHub Release вместе с APK. Если нужен legacy APK с core внутри, запусти сборку с `SSH_VPN_BUNDLE_XRAY_CORE=1`; в этом режиме скрипты соберут `app/libs/libXray.aar`, если файла нет.
+`build-debug.sh` и `build-release.sh` не включают Xray core в APK по умолчанию, чтобы universal APK оставался лёгким. `build-release.sh` дополнительно собирает ABI-specific `libXray-<version>-<abi>.aar` assets в release output рядом с APK. Эти AAR содержат runtime-ready `classes.dex` и `libgojni.so` только для своей ABI; их нужно загрузить в GitHub Release вместе с APK. Если нужен legacy APK с core внутри, запусти сборку с `SSH_VPN_BUNDLE_XRAY_CORE=1`; в этом режиме скрипты соберут `app/libs/libXray.aar`, если файла нет.
 
 ## Xray core updates
 
@@ -243,7 +243,7 @@ Runtime core updater проверяет:
 https://api.github.com/repos/stansful/ssh-vpn-client-kotlin/releases/latest
 ```
 
-Он принимает только `libXray` AAR assets из release path этого репозитория. На экране показывается только один compatible asset под runtime ABI процесса (`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`). Если опубликован universal `libXray.aar`, приложение после скачивания сохраняет только `classes.jar` и `libgojni.so` для текущей runtime ABI.
+Он принимает только `libXray` AAR assets из release path этого репозитория. На экране показывается только один compatible asset под runtime ABI процесса (`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`). Asset должен содержать `classes.dex` и `jni/<abi>/libgojni.so`; старые AAR только с `classes.jar` будут отклонены как устаревшие. После скачивания приложение сохраняет только `classes.dex` и `libgojni.so` для текущей runtime ABI.
 
 ## Обновления приложения
 
@@ -278,7 +278,7 @@ apksigner verify --verbose build/app/outputs/apk/release/app-release.apk
 - `./scripts/build-debug.sh` - собирает debug APK.
 - `./scripts/build-release.sh` - собирает installable release APK и ABI-specific Xray core release assets.
 - `./scripts/build-xray-core.sh` - собирает официальный Xray Android binding из закреплённых исходников и кладёт `app/libs/libXray.aar` для release assets или `SSH_VPN_BUNDLE_XRAY_CORE=1`.
-- `./scripts/package-xray-core-assets.sh` - нарезает `libXray.aar` на ABI-specific release assets.
+- `./scripts/package-xray-core-assets.sh` - нарезает `libXray.aar` на ABI-specific release assets и конвертирует binding `classes.jar` в runtime `classes.dex` через D8.
 - `./scripts/install-debug.sh` - устанавливает debug APK на подключённое устройство.
 - `./scripts/lint.sh` - запускает Android lint для debug variant.
 - `./scripts/test.sh` - запускает unit tests.

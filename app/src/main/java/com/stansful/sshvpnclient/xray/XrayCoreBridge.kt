@@ -46,7 +46,7 @@ class XrayCoreBridge(
             XrayCoreStore(appContext).install(input)
             cachedBinding = null
             bindingLoaded = false
-            cachedBinding = XrayBinding.loadRequired(appContext)
+            cachedBinding = XrayBinding.loadInstalledRequired(appContext)
             bindingLoaded = true
         }
     }
@@ -237,11 +237,29 @@ private class XrayBinding(private val apiClass: Class<*>) {
             )
         }
 
+        fun loadInstalledRequired(context: Context): XrayBinding {
+            val errors = mutableListOf<String>()
+            val runtimeClassLoader = runCatching { XrayCoreStore(context).loadClassLoader() }
+                .onFailure { error ->
+                    errors += "runtime core prepare failed: ${error.message ?: error::class.java.simpleName}"
+                }
+                .getOrNull()
+            runtimeClassLoader?.let { classLoader ->
+                loadFromClassLoader(classLoader, errors)?.let { return it }
+            }
+            error(
+                buildString {
+                    append("Installed Xray core could not be loaded")
+                    if (errors.isNotEmpty()) {
+                        append(": ")
+                        append(errors.joinToString("; "))
+                    }
+                },
+            )
+        }
+
         private fun loadWithDetails(context: Context): XrayBindingLoadResult {
             val errors = mutableListOf<String>()
-            loadFromClassLoader(context.classLoader, errors)?.let {
-                return XrayBindingLoadResult(it, errors)
-            }
             val runtimeClassLoader = runCatching { XrayCoreStore(context).loadClassLoader() }
                 .onFailure { error ->
                     errors += "runtime core prepare failed: ${error.message ?: error::class.java.simpleName}"
@@ -251,6 +269,9 @@ private class XrayBinding(private val apiClass: Class<*>) {
                 loadFromClassLoader(classLoader, errors)?.let {
                     return XrayBindingLoadResult(it, errors)
                 }
+            }
+            loadFromClassLoader(context.classLoader, errors)?.let {
+                return XrayBindingLoadResult(it, errors)
             }
             return XrayBindingLoadResult(null, errors)
         }
@@ -308,7 +329,7 @@ private class XrayCoreStore(context: Context) {
         if (!coreFile.isFile) return null
         val prepared = prepareCore()
         return DexClassLoader(
-            prepared.classesJar.absolutePath,
+            prepared.dexFile.absolutePath,
             optimizedDexDir.apply { mkdirs() }.absolutePath,
             prepared.nativeLibraryDir.absolutePath,
             appContext.classLoader,
@@ -317,37 +338,37 @@ private class XrayCoreStore(context: Context) {
 
     private fun prepareCore(): PreparedCore {
         val stamp = coreStamp()
-        val classesJar = File(preparedDir, CLASSES_JAR_NAME)
+        val dexFile = File(preparedDir, CLASSES_DEX_NAME)
         val abi = runtimeAbi()
         val nativeLibraryDir = File(preparedDir, abi)
         val nativeLibrary = File(nativeLibraryDir, NATIVE_LIBRARY_NAME)
         if (
             stampFile.readTextOrNull() == stamp &&
-            classesJar.isFile &&
+            dexFile.isFile &&
             nativeLibrary.isFile
         ) {
-            markReadOnly(classesJar)
+            markReadOnly(dexFile)
             markReadOnly(nativeLibrary)
-            return PreparedCore(classesJar, nativeLibraryDir)
+            return PreparedCore(dexFile, nativeLibraryDir)
         }
 
         preparedDir.deleteRecursively()
         nativeLibraryDir.mkdirs()
         ZipFile(coreFile).use { zip ->
-            extractEntry(zip, CLASSES_JAR_NAME, classesJar)
+            extractEntry(zip, CLASSES_DEX_NAME, dexFile)
             extractEntry(zip, "jni/$abi/$NATIVE_LIBRARY_NAME", nativeLibrary)
         }
-        markReadOnly(classesJar)
+        markReadOnly(dexFile)
         markReadOnly(nativeLibrary)
         stampFile.writeText(stamp)
-        return PreparedCore(classesJar, nativeLibraryDir)
+        return PreparedCore(dexFile, nativeLibraryDir)
     }
 
     private fun validateCore(file: File): String {
         val abi = runtimeAbi()
         ZipFile(file).use { zip ->
-            require(zip.getEntry(CLASSES_JAR_NAME) != null) {
-                "Xray core archive does not contain $CLASSES_JAR_NAME"
+            require(zip.getEntry(CLASSES_DEX_NAME) != null) {
+                "Xray core archive is outdated: missing $CLASSES_DEX_NAME. Rebuild release assets."
             }
             require(zip.getEntry("jni/$abi/$NATIVE_LIBRARY_NAME") != null) {
                 "Xray core archive does not contain native library for runtime ABI $abi"
@@ -375,7 +396,7 @@ private class XrayCoreStore(context: Context) {
     private fun writeSlimCore(source: File, destination: File, abi: String) {
         ZipFile(source).use { zip ->
             ZipOutputStream(destination.outputStream()).use { output ->
-                copyEntry(zip, CLASSES_JAR_NAME, output)
+                copyEntry(zip, CLASSES_DEX_NAME, output)
                 copyEntry(zip, "jni/$abi/$NATIVE_LIBRARY_NAME", output)
             }
         }
@@ -403,7 +424,7 @@ private class XrayCoreStore(context: Context) {
     }
 
     private data class PreparedCore(
-        val classesJar: File,
+        val dexFile: File,
         val nativeLibraryDir: File,
     )
 
@@ -412,7 +433,7 @@ private class XrayCoreStore(context: Context) {
         const val PREPARED_DIRECTORY_NAME = "prepared"
         const val OPTIMIZED_DEX_DIRECTORY_NAME = "dex"
         const val CORE_FILE_NAME = "libXray.aar"
-        const val CLASSES_JAR_NAME = "classes.jar"
+        const val CLASSES_DEX_NAME = "classes.dex"
         const val NATIVE_LIBRARY_NAME = "libgojni.so"
         const val STAMP_FILE_NAME = "stamp"
     }

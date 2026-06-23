@@ -16,6 +16,7 @@ import java.io.FileInputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.zip.ZipFile
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -50,8 +51,16 @@ class GitHubXrayCoreUpdateRepository(
             ?.forEach { oldFile -> runCatching { oldFile.delete() } }
 
         val targetFile = File(downloadDir, asset.safeFileName())
-        if (targetFile.isFile && targetFile.length() > 0L && targetFile.matchesDigest(asset.sha256Digest)) {
+        if (
+            targetFile.isFile &&
+            targetFile.length() > 0L &&
+            targetFile.matchesDigest(asset.sha256Digest) &&
+            targetFile.isUsableXrayCoreAsset(asset.abi)
+        ) {
             return@withContext targetFile
+        }
+        if (targetFile.isFile) {
+            runCatching { targetFile.delete() }
         }
         val tempFile = File(downloadDir, "${targetFile.name}.tmp")
         runCatching { tempFile.delete() }
@@ -98,6 +107,12 @@ class GitHubXrayCoreUpdateRepository(
         if (!expectedDigest.isNullOrBlank() && actualDigest != expectedDigest.lowercase()) {
             tempFile.delete()
             throw AppUpdateException("Downloaded Xray core SHA-256 verification failed")
+        }
+        if (!tempFile.isUsableXrayCoreAsset(asset.abi)) {
+            tempFile.delete()
+            throw AppUpdateException(
+                "Downloaded Xray core asset is outdated or invalid: missing classes.dex or native library for ${asset.abi}",
+            )
         }
         if (targetFile.exists()) targetFile.delete()
         check(tempFile.renameTo(targetFile)) { "Unable to store downloaded Xray core" }
@@ -206,6 +221,15 @@ class GitHubXrayCoreUpdateRepository(
         return sha256() == expectedDigest.lowercase()
     }
 
+    private fun File.isUsableXrayCoreAsset(abi: String): Boolean {
+        return runCatching {
+            ZipFile(this).use { zip ->
+                zip.getEntry(CLASSES_DEX_NAME) != null &&
+                    zip.getEntry("jni/$abi/$NATIVE_LIBRARY_NAME") != null
+            }
+        }.getOrDefault(false)
+    }
+
     private fun File.sha256(): String {
         val digest = MessageDigest.getInstance("SHA-256")
         FileInputStream(this).use { input ->
@@ -275,5 +299,7 @@ class GitHubXrayCoreUpdateRepository(
         const val RESPONSE_BUFFER_SIZE = 8 * 1_024
         const val DOWNLOAD_BUFFER_SIZE = 32 * 1_024
         const val SHA256_PREFIX = "sha256:"
+        const val CLASSES_DEX_NAME = "classes.dex"
+        const val NATIVE_LIBRARY_NAME = "libgojni.so"
     }
 }
