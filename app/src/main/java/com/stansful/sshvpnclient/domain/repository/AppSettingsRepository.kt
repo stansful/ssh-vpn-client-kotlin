@@ -31,4 +31,6 @@ interface AppSettingsRepository {
     fun setShowOpenSourceWarningOnEnter(show: Boolean)
 
     fun setOpenSourceRiskBannerExpanded(expanded: Boolean)
+
+    fun setOpenSourceAutoUpdateEnabled(enabled: Boolean)
 }

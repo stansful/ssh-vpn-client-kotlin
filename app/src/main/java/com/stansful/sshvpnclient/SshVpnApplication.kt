@@ -13,9 +13,12 @@ class SshVpnApplication : Application() {
         container = AppContainer(this)
         if (
             container.appSettingsRepository.settings.value.openSourceConsentVersion >=
-            OpenSourcePolicy.CONSENT_VERSION
+            OpenSourcePolicy.CONSENT_VERSION &&
+            container.appSettingsRepository.settings.value.openSourceAutoUpdateEnabled
         ) {
             ProxySourceSyncWorker.schedule(this)
+        } else {
+            ProxySourceSyncWorker.cancel(this)
         }
     }
 }

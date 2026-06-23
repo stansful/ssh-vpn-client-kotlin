@@ -73,6 +73,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -124,6 +125,7 @@ import com.stansful.sshvpnclient.ui.main.CustomThemeColorsEditor
 import com.stansful.sshvpnclient.ui.settings.SettingsSwitchRow
 import com.stansful.sshvpnclient.ui.settings.ThemeModeSelector
 import com.stansful.sshvpnclient.ui.settings.VpnModeSelector
+import com.stansful.sshvpnclient.work.ProxySourceSyncWorker
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -187,6 +189,14 @@ fun OpenSourceRoute(
         },
         onOpenUpdateRelease = { update -> uriHandler.openUri(update.releaseUrl) },
         onInstallUpdate = requestUpdateInstall,
+        onAutoUpdateChange = { enabled ->
+            viewModel.setOpenSourceAutoUpdateEnabled(enabled)
+            if (enabled) {
+                ProxySourceSyncWorker.schedule(container.applicationContext)
+            } else {
+                ProxySourceSyncWorker.cancel(container.applicationContext)
+            }
+        },
     )
 }
 
@@ -198,6 +208,7 @@ private fun OpenSourceScreen(
     onConnect: () -> Unit,
     onOpenUpdateRelease: (AppUpdateInfo) -> Unit,
     onInstallUpdate: () -> Unit,
+    onAutoUpdateChange: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboard.current
@@ -256,25 +267,38 @@ private fun OpenSourceScreen(
                 onCancelChecks = viewModel::cancelChecks,
                 onConnect = if (state.xrayConnected) viewModel::disconnect else onConnect,
             )
-            AnimatedVisibility(visible = searchVisible || state.query.isNotBlank()) {
-                OutlinedTextField(
-                    value = state.query,
-                    onValueChange = viewModel::setQuery,
-                    label = { Text("Search configurations") },
-                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                    trailingIcon = {
-                        IconButton(
-                            onClick = {
-                                viewModel.setQuery("")
-                                searchVisible = false
-                            },
-                        ) {
-                            Icon(Icons.Default.Close, contentDescription = "Close search")
-                        }
-                    },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+            AnimatedVisibility(visible = searchVisible || state.query.isNotBlank() || state.pinnedOnly) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = state.query,
+                        onValueChange = viewModel::setQuery,
+                        label = { Text("Search configurations") },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                        trailingIcon = {
+                            IconButton(
+                                onClick = {
+                                    viewModel.setQuery("")
+                                    viewModel.setPinnedOnly(false)
+                                    searchVisible = false
+                                },
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Close search")
+                            }
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    FilterChip(
+                        selected = state.pinnedOnly,
+                        onClick = { viewModel.setPinnedOnly(!state.pinnedOnly) },
+                        label = { Text("Pinned") },
+                        leadingIcon = if (state.pinnedOnly) {
+                            { Icon(Icons.Default.PushPin, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                        } else {
+                            null
+                        },
+                    )
+                }
             }
             state.message?.let { message ->
                 Text(
@@ -399,6 +423,7 @@ private fun OpenSourceScreen(
                 settingsVisible = false
                 openAppPicker()
             },
+            onAutoUpdateChange = onAutoUpdateChange,
             updateState = state.updateState,
             onCheckForUpdates = viewModel::checkForUpdates,
             onInstallUpdate = onInstallUpdate,
@@ -617,6 +642,7 @@ private fun OpenSourceSettingsSheet(
     onCustomThemeColorsChange: (CustomThemeColors) -> Unit,
     onVpnModeChange: (VpnMode) -> Unit,
     onOpenAppPicker: () -> Unit,
+    onAutoUpdateChange: (Boolean) -> Unit,
     updateState: OpenSourceUpdateUiState,
     onCheckForUpdates: () -> Unit,
     onInstallUpdate: () -> Unit,
@@ -655,6 +681,11 @@ private fun OpenSourceSettingsSheet(
                 title = stringResource(R.string.show_warning_dialog),
                 checked = settings.showOpenSourceWarningOnEnter,
                 onCheckedChange = onShowWarningDialogChange,
+            )
+            SettingsSwitchRow(
+                title = "Auto-refresh public configurations",
+                checked = settings.openSourceAutoUpdateEnabled,
+                onCheckedChange = onAutoUpdateChange,
             )
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))

@@ -101,6 +101,11 @@ class SharedPreferencesAppSettingsRepository(
         currentSettings.value = currentSettings.value.copy(openSourceRiskBannerExpanded = expanded)
     }
 
+    override fun setOpenSourceAutoUpdateEnabled(enabled: Boolean) {
+        preferences.edit { putBoolean(KEY_OPEN_SOURCE_AUTO_UPDATE_ENABLED, enabled) }
+        currentSettings.value = currentSettings.value.copy(openSourceAutoUpdateEnabled = enabled)
+    }
+
     private fun readSettings(): AppSettings {
         return AppSettings(
             showLogsOnMain = preferences.getBoolean(KEY_SHOW_LOGS_ON_MAIN, false),
@@ -123,6 +128,10 @@ class SharedPreferencesAppSettingsRepository(
             ),
             openSourceRiskBannerExpanded = preferences.getBoolean(
                 KEY_OPEN_SOURCE_RISK_BANNER_EXPANDED,
+                true,
+            ),
+            openSourceAutoUpdateEnabled = preferences.getBoolean(
+                KEY_OPEN_SOURCE_AUTO_UPDATE_ENABLED,
                 true,
             ),
         )
@@ -162,5 +171,6 @@ class SharedPreferencesAppSettingsRepository(
         const val KEY_OPEN_SOURCE_CONSENT_VERSION = "open_source_consent_version"
         const val KEY_SHOW_OPEN_SOURCE_WARNING_ON_ENTER = "show_open_source_warning_on_enter"
         const val KEY_OPEN_SOURCE_RISK_BANNER_EXPANDED = "open_source_risk_banner_expanded"
+        const val KEY_OPEN_SOURCE_AUTO_UPDATE_ENABLED = "open_source_auto_update_enabled"
     }
 }

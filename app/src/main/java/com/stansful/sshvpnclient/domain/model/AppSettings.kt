@@ -12,6 +12,7 @@ data class AppSettings(
     val openSourceConsentVersion: Int = 0,
     val showOpenSourceWarningOnEnter: Boolean = true,
     val openSourceRiskBannerExpanded: Boolean = true,
+    val openSourceAutoUpdateEnabled: Boolean = true,
 )
 
 enum class GlobalTab(

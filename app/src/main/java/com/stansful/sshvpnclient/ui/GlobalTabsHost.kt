@@ -115,7 +115,9 @@ fun GlobalTabsHost(
                             OpenSourcePolicy.CONSENT_VERSION,
                         )
                         container.appSettingsRepository.setActiveGlobalTab(GlobalTab.OPEN_SOURCE)
-                        ProxySourceSyncWorker.schedule(container.applicationContext)
+                        if (container.appSettingsRepository.settings.value.openSourceAutoUpdateEnabled) {
+                            ProxySourceSyncWorker.schedule(container.applicationContext)
+                        }
                         showConsent = false
                     },
                 ) { Text(stringResource(R.string.open_source_warning_continue)) }

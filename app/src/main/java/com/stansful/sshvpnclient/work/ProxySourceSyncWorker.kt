@@ -20,7 +20,8 @@ class ProxySourceSyncWorker(
         val container = (applicationContext as SshVpnApplication).container
         if (
             container.appSettingsRepository.settings.value.openSourceConsentVersion <
-            OpenSourcePolicy.CONSENT_VERSION
+            OpenSourcePolicy.CONSENT_VERSION ||
+            !container.appSettingsRepository.settings.value.openSourceAutoUpdateEnabled
         ) {
             return Result.success()
         }
@@ -53,6 +54,10 @@ class ProxySourceSyncWorker(
                 ExistingPeriodicWorkPolicy.UPDATE,
                 request,
             )
+        }
+
+        fun cancel(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_WORK_NAME)
         }
 
         private const val REPEAT_INTERVAL_HOURS = 6L

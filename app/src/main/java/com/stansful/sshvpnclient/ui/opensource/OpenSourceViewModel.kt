@@ -51,6 +51,7 @@ data class OpenSourceUiState(
     val profiles: List<ProxyProfileSummary> = emptyList(),
     val allProfileIds: Set<String> = emptySet(),
     val query: String = "",
+    val pinnedOnly: Boolean = false,
     val protocolFilter: ProxyProtocol? = null,
     val selectedIds: Set<String> = emptySet(),
     val isSyncing: Boolean = false,
@@ -107,6 +108,7 @@ class OpenSourceViewModel(
     private val appUpdateDownloader: AppUpdateDownloader,
 ) : ViewModel() {
     private val query = MutableStateFlow("")
+    private val pinnedOnly = MutableStateFlow(false)
     private val protocolFilter = MutableStateFlow<ProxyProtocol?>(null)
     private val selectedIds = MutableStateFlow<Set<String>>(emptySet())
     private val operation = MutableStateFlow(OperationState())
@@ -163,17 +165,20 @@ class OpenSourceViewModel(
     private val profileListState = combine(
         proxyProfileRepository.observeSummaries(),
         query,
+        pinnedOnly,
         protocolFilter,
         selectedIds,
-    ) { profiles, queryValue, filter, selected ->
+    ) { profiles, queryValue, pinnedOnlyValue, filter, selected ->
         val filteredProfiles = profiles.filter { profile ->
             (filter == null || profile.protocol == filter) &&
+                (!pinnedOnlyValue || profile.isPinned) &&
                 (queryValue.isBlank() || profile.matches(queryValue))
         }
         ProfileListState(
             profiles = filteredProfiles,
             allProfileIds = profiles.mapTo(linkedSetOf(), ProxyProfileSummary::id),
             query = queryValue,
+            pinnedOnly = pinnedOnlyValue,
             protocolFilter = filter,
             selectedIds = selected.intersect(profiles.mapTo(hashSetOf(), ProxyProfileSummary::id)),
         )
@@ -200,6 +205,7 @@ class OpenSourceViewModel(
             profiles = profileState.profiles,
             allProfileIds = profileState.allProfileIds,
             query = profileState.query,
+            pinnedOnly = profileState.pinnedOnly,
             protocolFilter = profileState.protocolFilter,
             selectedIds = profileState.selectedIds,
             isSyncing = operation.isSyncing,
@@ -223,6 +229,10 @@ class OpenSourceViewModel(
 
     fun setQuery(value: String) {
         query.value = value
+    }
+
+    fun setPinnedOnly(value: Boolean) {
+        pinnedOnly.value = value
     }
 
     fun setProtocolFilter(value: ProxyProtocol?) {
@@ -385,6 +395,10 @@ class OpenSourceViewModel(
 
     fun setOpenSourceRiskBannerExpanded(expanded: Boolean) {
         appSettingsRepository.setOpenSourceRiskBannerExpanded(expanded)
+    }
+
+    fun setOpenSourceAutoUpdateEnabled(enabled: Boolean) {
+        appSettingsRepository.setOpenSourceAutoUpdateEnabled(enabled)
     }
 
     fun setThemeMode(themeMode: AppThemeMode) {
@@ -622,6 +636,7 @@ private data class ProfileListState(
     val profiles: List<ProxyProfileSummary>,
     val allProfileIds: Set<String>,
     val query: String,
+    val pinnedOnly: Boolean,
     val protocolFilter: ProxyProtocol?,
     val selectedIds: Set<String>,
 )
