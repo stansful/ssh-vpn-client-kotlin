@@ -12,6 +12,7 @@ import com.stansful.sshvpnclient.domain.model.SshConfigSummary
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnMode
+import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
 import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
@@ -50,24 +51,53 @@ data class MainUiState(
     val terminalState: TerminalUiState = TerminalUiState(),
     val updateState: AppUpdateUiState = AppUpdateUiState(),
 ) {
+    private val isSshTransportState: Boolean
+        get() = vpnState.activeTransport == VpnTransportType.SSH
+
+    private val isSshErrorState: Boolean
+        get() = vpnState.activeTransport == null &&
+            vpnState.status == VpnConnectionStatus.ERROR &&
+            (vpnState.activeConfigId == selectedConfig?.id ||
+                (vpnState.activeConfigId == null && selectedConfig == null))
+
+    val sshStatus: VpnConnectionStatus
+        get() = if (isSshTransportState || isSshErrorState) {
+            vpnState.status
+        } else {
+            VpnConnectionStatus.DISCONNECTED
+        }
+
+    val sshErrorMessage: String?
+        get() = if (isSshTransportState || isSshErrorState) vpnState.errorMessage else null
+
+    val isOpenSourceActive: Boolean
+        get() = vpnState.activeTransport == VpnTransportType.XRAY &&
+            (vpnState.status == VpnConnectionStatus.CONNECTING ||
+                vpnState.status == VpnConnectionStatus.CONNECTED ||
+                vpnState.status == VpnConnectionStatus.RECONNECTING)
+
+    val showSshDiagnostics: Boolean
+        get() = vpnState.activeTransport != VpnTransportType.XRAY && vpnState.diagnostics.isNotEmpty()
+
     val isBusy: Boolean
-        get() = vpnState.status == VpnConnectionStatus.DISCONNECTING
+        get() = sshStatus == VpnConnectionStatus.DISCONNECTING
 
     val isConnected: Boolean
-        get() = vpnState.status == VpnConnectionStatus.CONNECTED
+        get() = sshStatus == VpnConnectionStatus.CONNECTED
 
     val canDisconnect: Boolean
-        get() = vpnState.status == VpnConnectionStatus.CONNECTING ||
-            vpnState.status == VpnConnectionStatus.CONNECTED ||
-            vpnState.status == VpnConnectionStatus.RECONNECTING
+        get() = sshStatus == VpnConnectionStatus.CONNECTING ||
+            sshStatus == VpnConnectionStatus.CONNECTED ||
+            sshStatus == VpnConnectionStatus.RECONNECTING
 
     val canConnect: Boolean
         get() = selectedConfig != null &&
-            (vpnState.status == VpnConnectionStatus.DISCONNECTED ||
-                vpnState.status == VpnConnectionStatus.ERROR)
+            vpnState.status != VpnConnectionStatus.DISCONNECTING &&
+            (sshStatus == VpnConnectionStatus.DISCONNECTED ||
+                sshStatus == VpnConnectionStatus.ERROR)
 
     val canCheckTunnel: Boolean
-        get() = vpnState.status == VpnConnectionStatus.CONNECTED && !isTunnelCheckRunning
+        get() = isConnected && !isTunnelCheckRunning
 }
 
 data class TerminalUiState(
@@ -161,7 +191,9 @@ class MainViewModel(
         }
         viewModelScope.launch {
             vpnState.collect { state ->
-                if (state.status != VpnConnectionStatus.CONNECTED) {
+                if (state.activeTransport != VpnTransportType.SSH ||
+                    state.status != VpnConnectionStatus.CONNECTED
+                ) {
                     tunnelCheckResult.value = TunnelCheckResult.IDLE
                     isTunnelCheckRunning.value = false
                     closeTerminalSession(resetState = true)
@@ -231,12 +263,12 @@ class MainViewModel(
                 sshConnectionManager.checkTcpForward(
                     log = vpnConnectionRepository::appendDiagnostic,
                 )
-                if (vpnState.value.status == VpnConnectionStatus.CONNECTED) {
+                if (vpnState.value.isConnectedSsh()) {
                     tunnelCheckResult.value = TunnelCheckResult.SUCCESS
                 }
             } catch (_: Exception) {
                 // Detailed failure is already written to diagnostics by SshConnectionManager.
-                if (vpnState.value.status == VpnConnectionStatus.CONNECTED) {
+                if (vpnState.value.isConnectedSsh()) {
                     tunnelCheckResult.value = TunnelCheckResult.FAILURE
                 }
             } finally {
@@ -464,9 +496,15 @@ class MainViewModel(
     }
 
     private fun VpnConnectionState.canDisconnect(): Boolean {
-        return status == VpnConnectionStatus.CONNECTING ||
-            status == VpnConnectionStatus.CONNECTED ||
-            status == VpnConnectionStatus.RECONNECTING
+        return activeTransport == VpnTransportType.SSH &&
+            (status == VpnConnectionStatus.CONNECTING ||
+                status == VpnConnectionStatus.CONNECTED ||
+                status == VpnConnectionStatus.RECONNECTING)
+    }
+
+    private fun VpnConnectionState.isConnectedSsh(): Boolean {
+        return activeTransport == VpnTransportType.SSH &&
+            status == VpnConnectionStatus.CONNECTED
     }
 
     private fun appendTerminalOutput(output: String) {

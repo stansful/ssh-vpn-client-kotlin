@@ -3,6 +3,7 @@ package com.stansful.sshvpnclient.ui.apppicker
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -12,10 +13,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -30,10 +33,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stansful.sshvpnclient.AppContainer
@@ -175,9 +183,10 @@ private fun AppRow(
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            AppIcon(packageName = app.packageName)
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
@@ -208,3 +217,38 @@ private fun AppRow(
         }
     }
 }
+
+@Composable
+private fun AppIcon(packageName: String) {
+    val context = LocalContext.current
+    val packageManager = context.packageManager
+    val iconSizePx = with(LocalDensity.current) { APP_ICON_SIZE.roundToPx() }
+    val iconBitmap = remember(packageName, iconSizePx) {
+        runCatching {
+            packageManager
+                .getApplicationIcon(packageName)
+                .toBitmap(width = iconSizePx, height = iconSizePx)
+                .asImageBitmap()
+        }.getOrNull()
+    }
+    val modifier = Modifier
+        .size(APP_ICON_SIZE)
+        .clip(RoundedCornerShape(8.dp))
+
+    if (iconBitmap == null) {
+        Icon(
+            Icons.Default.Apps,
+            contentDescription = null,
+            modifier = modifier.padding(8.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    } else {
+        Image(
+            bitmap = iconBitmap,
+            contentDescription = null,
+            modifier = modifier,
+        )
+    }
+}
+
+private val APP_ICON_SIZE = 40.dp

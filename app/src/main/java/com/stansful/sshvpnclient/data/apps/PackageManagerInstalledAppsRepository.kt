@@ -43,7 +43,8 @@ class PackageManagerInstalledAppsRepository(
         val sortedApps = withContext(Dispatchers.Default) {
             apps.distinctBy { it.packageName }
                 .sortedWith(
-                    compareBy<InstalledAppInfo> { it.label.lowercase() }
+                    compareBy<InstalledAppInfo> { it.isSystem }
+                        .thenBy { it.label.lowercase() }
                         .thenBy { it.packageName },
                 )
         }

@@ -33,22 +33,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.LightMode
-import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -67,7 +61,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -111,6 +104,9 @@ import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
 import com.stansful.sshvpnclient.ui.common.ErrorMessage
+import com.stansful.sshvpnclient.ui.settings.SettingsSwitchRow
+import com.stansful.sshvpnclient.ui.settings.ThemeModeSelector
+import com.stansful.sshvpnclient.ui.settings.VpnModeSelector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -275,7 +271,7 @@ private fun MainScreen(
             )
 
             AnimatedVisibility(
-                visible = state.appSettings.showLogsOnMain && state.vpnState.diagnostics.isNotEmpty(),
+                visible = state.appSettings.showLogsOnMain && state.showSshDiagnostics,
                 enter = fadeIn(tween(180)) + slideInVertically(tween(180)) { it / 4 },
                 exit = fadeOut(tween(140)) + slideOutVertically(tween(140)) { it / 4 },
             ) {
@@ -355,9 +351,9 @@ private fun ConnectionPanel(
     onDisconnect: () -> Unit,
     onCheckTunnel: () -> Unit,
 ) {
-    val statusText = state.vpnState.status.label()
+    val statusText = state.sshStatus.label()
     val statusColor by animateColorAsState(
-        targetValue = state.vpnState.status.statusColor(),
+        targetValue = state.sshStatus.statusColor(),
         animationSpec = tween(240),
         label = "status-color",
     )
@@ -388,7 +384,7 @@ private fun ConnectionPanel(
                 StatusBadge(text = statusText, color = statusColor)
             }
 
-            ErrorMessage(state.vpnState.errorMessage)
+            ErrorMessage(state.sshErrorMessage)
 
             ConnectionActionButton(
                 state = state,
@@ -502,6 +498,11 @@ private fun ConnectionActionButton(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
+    val buttonText = when {
+        state.canDisconnect -> "Disconnect"
+        state.isOpenSourceActive -> "Switch to SSH"
+        else -> "Connect"
+    }
     val scale by androidx.compose.animation.core.animateFloatAsState(
         targetValue = if (pressed) 0.97f else 1f,
         animationSpec = tween(120),
@@ -511,7 +512,7 @@ private fun ConnectionActionButton(
     Button(
         onClick = if (state.canDisconnect) onDisconnect else onConnect,
         enabled = if (state.canDisconnect) {
-            state.vpnState.status != VpnConnectionStatus.DISCONNECTING
+            state.sshStatus != VpnConnectionStatus.DISCONNECTING
         } else {
             state.canConnect
         },
@@ -538,7 +539,7 @@ private fun ConnectionActionButton(
     ) {
         Icon(Icons.Default.PowerSettingsNew, contentDescription = null)
         Text(
-            text = if (state.canDisconnect) "Disconnect" else "Connect",
+            text = buttonText,
             modifier = Modifier.padding(start = 8.dp),
             fontWeight = FontWeight.SemiBold,
         )
@@ -1131,247 +1132,6 @@ private fun GitHubLinkRow(
 }
 
 @Composable
-private fun VpnModeSelector(
-    selected: VpnMode,
-    selectedAppsCount: Int,
-    onSelected: (VpnMode) -> Unit,
-    onOpenAppPicker: () -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .selectableGroup(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            VpnMode.entries.forEach { mode ->
-                VpnModeTile(
-                    mode = mode,
-                    selected = mode == selected,
-                    onSelected = { onSelected(mode) },
-                    modifier = Modifier.weight(1f),
-                )
-            }
-        }
-
-        AnimatedVisibility(visible = selected == VpnMode.SELECTED_APPS) {
-            FilledTonalButton(
-                onClick = onOpenAppPicker,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
-            ) {
-                Icon(Icons.Default.Apps, contentDescription = null)
-                Text(
-                    "Select apps ($selectedAppsCount)",
-                    modifier = Modifier.padding(start = 8.dp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun VpnModeTile(
-    mode: VpnMode,
-    selected: Boolean,
-    onSelected: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressed by interactionSource.collectIsPressedAsState()
-    val scale by androidx.compose.animation.core.animateFloatAsState(
-        targetValue = if (pressed) 0.97f else 1f,
-        animationSpec = tween(120),
-        label = "vpn-mode-tile-scale",
-    )
-    val background by animateColorAsState(
-        targetValue = if (selected) {
-            MaterialTheme.colorScheme.primaryContainer
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        },
-        animationSpec = tween(180),
-        label = "vpn-mode-tile-background",
-    )
-
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = background,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        border = BorderStroke(
-            width = 1.dp,
-            color = if (selected) {
-                MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
-            } else {
-                MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)
-            },
-        ),
-        modifier = modifier
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .selectable(
-                selected = selected,
-                role = Role.RadioButton,
-                interactionSource = interactionSource,
-                indication = null,
-                onClick = onSelected,
-            ),
-    ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Icon(
-                imageVector = mode.icon(),
-                contentDescription = null,
-                tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = mode.label,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-            )
-            AnimatedVisibility(visible = selected) {
-                Icon(
-                    Icons.Default.Check,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingsSwitchRow(
-    title: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(title, style = MaterialTheme.typography.bodyLarge)
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-        )
-    }
-}
-
-@Composable
-private fun ThemeModeSelector(
-    selected: AppThemeMode,
-    onSelected: (AppThemeMode) -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .selectableGroup(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        AppThemeMode.entries.chunked(THEME_TILE_COLUMNS).forEach { rowModes ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                rowModes.forEach { mode ->
-                    ThemeModeTile(
-                        mode = mode,
-                        selected = mode == selected,
-                        onSelected = { onSelected(mode) },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-                repeat(THEME_TILE_COLUMNS - rowModes.size) {
-                    Box(modifier = Modifier.weight(1f))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ThemeModeTile(
-    mode: AppThemeMode,
-    selected: Boolean,
-    onSelected: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressed by interactionSource.collectIsPressedAsState()
-    val scale by androidx.compose.animation.core.animateFloatAsState(
-        targetValue = if (pressed) 0.97f else 1f,
-        animationSpec = tween(120),
-        label = "theme-tile-scale",
-    )
-    val background by animateColorAsState(
-        targetValue = if (selected) {
-            MaterialTheme.colorScheme.primaryContainer
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        },
-        animationSpec = tween(180),
-        label = "theme-tile-background",
-    )
-
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = background,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        border = BorderStroke(
-            width = 1.dp,
-            color = if (selected) {
-                MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
-            } else {
-                MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)
-            },
-        ),
-        modifier = modifier
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .selectable(
-                selected = selected,
-                role = Role.RadioButton,
-                interactionSource = interactionSource,
-                indication = null,
-                onClick = onSelected,
-            ),
-    ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Icon(
-                imageVector = mode.icon(),
-                contentDescription = null,
-                tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = mode.label,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-            )
-            AnimatedVisibility(visible = selected) {
-                Icon(
-                    Icons.Default.Check,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                )
-            }
-        }
-    }
-}
-
-@Composable
 internal fun GlassPanel(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
@@ -1444,22 +1204,6 @@ private fun VpnConnectionStatus.statusColor(): Color {
     }
 }
 
-private fun AppThemeMode.icon(): ImageVector {
-    return when (this) {
-        AppThemeMode.SYSTEM -> Icons.Default.Settings
-        AppThemeMode.LIGHT -> Icons.Default.LightMode
-        AppThemeMode.DARK -> Icons.Default.DarkMode
-        AppThemeMode.CUSTOM -> Icons.Default.Palette
-    }
-}
-
-private fun VpnMode.icon(): ImageVector {
-    return when (this) {
-        VpnMode.PROXY -> Icons.Default.Settings
-        VpnMode.SELECTED_APPS -> Icons.Default.Apps
-    }
-}
-
 private fun formatFileSize(sizeBytes: Long): String {
     val mebibytes = sizeBytes.toDouble() / (1_024.0 * 1_024.0)
     return String.format(Locale.US, "%.1f MiB", mebibytes)
@@ -1475,5 +1219,4 @@ private fun openUpdateInstaller(context: Context, contentUri: String): Result<Un
 
 private const val GITHUB_REPOSITORY_URL =
     "https://github.com/stansful/ssh-vpn-client-kotlin/tree/master"
-private const val THEME_TILE_COLUMNS = 2
 private const val APK_MIME_TYPE = "application/vnd.android.package-archive"

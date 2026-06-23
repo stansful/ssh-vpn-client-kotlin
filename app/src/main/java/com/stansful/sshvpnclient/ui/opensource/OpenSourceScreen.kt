@@ -34,19 +34,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
-import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.LightMode
-import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SelectAll
@@ -54,11 +50,11 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -68,7 +64,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -80,7 +75,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
@@ -96,13 +90,15 @@ import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSummary
-import com.stansful.sshvpnclient.domain.model.ProxyProtocol
 import com.stansful.sshvpnclient.domain.model.ProxyTestStatus
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
 import com.stansful.sshvpnclient.ui.main.CustomThemeColorsEditor
+import com.stansful.sshvpnclient.ui.settings.SettingsSwitchRow
+import com.stansful.sshvpnclient.ui.settings.ThemeModeSelector
+import com.stansful.sshvpnclient.ui.settings.VpnModeSelector
 import kotlinx.coroutines.launch
 
 @Composable
@@ -192,7 +188,6 @@ private fun OpenSourceScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            ProtocolFilters(state.protocolFilter, viewModel::setProtocolFilter)
             state.message?.let { message ->
                 Text(
                     text = message,
@@ -208,7 +203,7 @@ private fun OpenSourceScreen(
                 DiagnosticsLogPanel(state.vpnState.diagnostics)
             }
             if (state.profiles.isEmpty()) {
-                EmptyProxyList(onRefresh = viewModel::synchronize, onAdd = { viewModel.openEditor() })
+                EmptyProxyList()
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -316,11 +311,7 @@ private fun RiskBanner(
     onExpandedChange: (Boolean) -> Unit,
 ) {
     Surface(
-        color = if (expanded) {
-            MaterialTheme.colorScheme.errorContainer
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f)
-        },
+        color = MaterialTheme.colorScheme.errorContainer,
         contentColor = MaterialTheme.colorScheme.onErrorContainer,
         shape = RoundedCornerShape(8.dp),
     ) {
@@ -340,11 +331,7 @@ private fun RiskBanner(
                     text = stringResource(R.string.open_source_banner_title),
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (expanded) {
-                        MaterialTheme.colorScheme.onErrorContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    color = MaterialTheme.colorScheme.onErrorContainer,
                 )
                 IconButton(
                     onClick = { onExpandedChange(!expanded) },
@@ -360,7 +347,7 @@ private fun RiskBanner(
                         tint = if (expanded) {
                             MaterialTheme.colorScheme.onErrorContainer
                         } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                            MaterialTheme.colorScheme.onErrorContainer
                         },
                     )
                 }
@@ -480,6 +467,7 @@ private fun OpenSourceSettingsSheet(
         onDismissRequest = onDismiss,
         containerColor = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface,
+        scrimColor = Color.Black.copy(alpha = 0.42f),
         dragHandle = { BottomSheetDefaults.DragHandle(color = MaterialTheme.colorScheme.outline) },
         shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
     ) {
@@ -540,98 +528,6 @@ private fun OpenSourceSettingsSheet(
 }
 
 @Composable
-private fun SettingsSwitchRow(
-    title: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(title, style = MaterialTheme.typography.bodyLarge)
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-        )
-    }
-}
-
-@Composable
-private fun VpnModeSelector(
-    selected: VpnMode,
-    selectedAppsCount: Int,
-    onSelected: (VpnMode) -> Unit,
-    onOpenAppPicker: () -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            VpnMode.entries.forEach { mode ->
-                FilterChip(
-                    selected = selected == mode,
-                    onClick = { onSelected(mode) },
-                    label = { Text(mode.label) },
-                    leadingIcon = if (selected == mode) {
-                        { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
-                    } else {
-                        null
-                    },
-                    modifier = Modifier.weight(1f),
-                )
-            }
-        }
-
-        AnimatedVisibility(visible = selected == VpnMode.SELECTED_APPS) {
-            FilledTonalButton(
-                onClick = onOpenAppPicker,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
-            ) {
-                Icon(Icons.Default.Apps, contentDescription = null)
-                Text(
-                    text = stringResource(R.string.select_apps_count, selectedAppsCount),
-                    modifier = Modifier.padding(start = 8.dp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ThemeModeSelector(
-    selected: AppThemeMode,
-    onSelected: (AppThemeMode) -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        AppThemeMode.entries.chunked(THEME_CHIP_COLUMNS).forEach { rowModes ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                rowModes.forEach { mode ->
-                    FilterChip(
-                        selected = selected == mode,
-                        onClick = { onSelected(mode) },
-                        label = { Text(mode.label) },
-                        leadingIcon = {
-                            Icon(mode.icon(), contentDescription = null, modifier = Modifier.size(18.dp))
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-                repeat(THEME_CHIP_COLUMNS - rowModes.size) {
-                    Box(modifier = Modifier.weight(1f))
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun OpenSourceActions(
     state: OpenSourceUiState,
     onRefresh: () -> Unit,
@@ -640,11 +536,12 @@ private fun OpenSourceActions(
     onCancelChecks: () -> Unit,
     onConnect: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         state.selectedProfile?.let { profile ->
             Text(
                 text = "Selected: ${profile.name}",
-                style = MaterialTheme.typography.titleSmall,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
             )
         }
@@ -654,8 +551,22 @@ private fun OpenSourceActions(
         ) {
             Button(
                 onClick = onConnect,
-                enabled = state.canStartOpenSource,
+                enabled = state.xrayConnected || state.canStartOpenSource,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (state.xrayConnected) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                    contentColor = if (state.xrayConnected) {
+                        MaterialTheme.colorScheme.onError
+                    } else {
+                        MaterialTheme.colorScheme.onPrimary
+                    },
+                ),
+                contentPadding = ButtonDefaults.ContentPadding,
                 modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(8.dp),
             ) {
                 Icon(Icons.Default.PowerSettingsNew, contentDescription = null)
                 Text(
@@ -665,16 +576,29 @@ private fun OpenSourceActions(
                         else -> "Connect"
                     },
                     modifier = Modifier.padding(start = 6.dp),
+                    style = MaterialTheme.typography.labelLarge,
                 )
             }
             FilledTonalButton(
                 onClick = onRefresh,
                 enabled = !state.isSyncing,
                 modifier = Modifier.weight(1f),
+                contentPadding = ButtonDefaults.ContentPadding,
+                shape = RoundedCornerShape(8.dp),
             ) {
-                if (state.isSyncing) CircularProgressIndicator(modifier = Modifier.padding(2.dp))
-                else Icon(Icons.Default.Refresh, contentDescription = null)
-                Text("Refresh", modifier = Modifier.padding(start = 6.dp))
+                if (state.isSyncing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(Icons.Default.Refresh, contentDescription = null)
+                }
+                Text(
+                    "Refresh",
+                    modifier = Modifier.padding(start = 6.dp),
+                    style = MaterialTheme.typography.labelLarge,
+                )
             }
         }
         Row(
@@ -685,11 +609,17 @@ private fun OpenSourceActions(
                 onClick = onCheckSelected,
                 enabled = state.selectedProfile != null && !state.isChecking && state.xrayCoreAvailable,
                 modifier = Modifier.weight(1f),
-            ) { Text("Check selected") }
+                contentPadding = ButtonDefaults.ContentPadding,
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Text("Check selected", style = MaterialTheme.typography.labelLarge)
+            }
             FilledTonalButton(
                 onClick = if (state.isChecking) onCancelChecks else onCheckAll,
                 enabled = state.allProfileIds.isNotEmpty() && state.xrayCoreAvailable,
                 modifier = Modifier.weight(1f),
+                contentPadding = ButtonDefaults.ContentPadding,
+                shape = RoundedCornerShape(8.dp),
             ) {
                 Icon(
                     if (state.isChecking) Icons.Default.Cancel else Icons.Default.Check,
@@ -698,6 +628,7 @@ private fun OpenSourceActions(
                 Text(
                     if (state.isChecking) "Cancel" else "Check all",
                     modifier = Modifier.padding(start = 6.dp),
+                    style = MaterialTheme.typography.labelLarge,
                 )
             }
         }
@@ -724,20 +655,6 @@ private fun OpenSourceActions(
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
-            )
-        }
-    }
-}
-
-@Composable
-private fun ProtocolFilters(selected: ProxyProtocol?, onSelected: (ProxyProtocol?) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        FilterChip(selected = selected == null, onClick = { onSelected(null) }, label = { Text("All") })
-        ProxyProtocol.entries.forEach { protocol ->
-            FilterChip(
-                selected = selected == protocol,
-                onClick = { onSelected(protocol) },
-                label = { Text(protocol.name) },
             )
         }
     }
@@ -826,12 +743,12 @@ private fun StatusLabel(text: String, color: Color) {
 }
 
 @Composable
-private fun EmptyProxyList(onRefresh: () -> Unit, onAdd: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("No public configurations yet")
-        FilledTonalButton(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) { Text("Refresh configs") }
-        FilledTonalButton(onClick = onAdd, modifier = Modifier.fillMaxWidth()) { Text("Add config") }
-    }
+private fun EmptyProxyList() {
+    Text(
+        text = "No public configurations yet",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -898,14 +815,3 @@ private fun sensitiveClipData(label: String, value: String): ClipData {
         }
     }
 }
-
-private fun AppThemeMode.icon(): ImageVector {
-    return when (this) {
-        AppThemeMode.SYSTEM -> Icons.Default.Settings
-        AppThemeMode.LIGHT -> Icons.Default.LightMode
-        AppThemeMode.DARK -> Icons.Default.DarkMode
-        AppThemeMode.CUSTOM -> Icons.Default.Palette
-    }
-}
-
-private const val THEME_CHIP_COLUMNS = 2
