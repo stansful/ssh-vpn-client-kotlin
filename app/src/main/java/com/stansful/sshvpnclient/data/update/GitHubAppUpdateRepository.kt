@@ -6,6 +6,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Build
 import androidx.core.content.edit
+import com.stansful.sshvpnclient.domain.model.AndroidAbi
 import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
 import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
 import com.stansful.sshvpnclient.domain.model.SemanticVersion
@@ -259,20 +260,7 @@ private fun apkAssetScore(
 }
 
 private fun String.matchesAbi(abi: String): Boolean {
-    if (abi.equals("x86", ignoreCase = true)) {
-        return contains("x86") && !contains("x86_64") && !contains("x86-64")
-    }
-    return abiMarkers(abi).any { marker -> contains(marker) }
-}
-
-private fun abiMarkers(abi: String): List<String> {
-    return when (abi.lowercase()) {
-        "arm64-v8a" -> listOf("arm64-v8a", "arm64", "aarch64")
-        "armeabi-v7a" -> listOf("armeabi-v7a", "armv7", "arm32")
-        "x86_64" -> listOf("x86_64", "x86-64", "x64")
-        "x86" -> listOf("x86")
-        else -> listOf(abi.lowercase())
-    }
+    return AndroidAbi.assetNameMatchesAbi(this, abi)
 }
 
 private data class ApkAssetScore(

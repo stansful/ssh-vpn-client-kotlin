@@ -29,6 +29,7 @@ class AppViewModelFactory(
                 vpnConnectionRepository = container.vpnConnectionRepository,
                 appUpdateRepository = container.appUpdateRepository,
                 appUpdateDownloader = container.appUpdateDownloader,
+                xrayCoreUpdateRepository = container.xrayCoreUpdateRepository,
             )
 
             modelClass.isAssignableFrom(MainViewModel::class.java) -> MainViewModel(

@@ -119,6 +119,7 @@ import com.stansful.sshvpnclient.domain.model.ProxyProfileSummary
 import com.stansful.sshvpnclient.domain.model.ProxyTestStatus
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnMode
+import com.stansful.sshvpnclient.domain.model.XrayCoreAsset
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
 import com.stansful.sshvpnclient.ui.main.CustomThemeColorsEditor
@@ -424,6 +425,11 @@ private fun OpenSourceScreen(
                 openAppPicker()
             },
             onAutoUpdateChange = onAutoUpdateChange,
+            xrayCoreAvailable = state.xrayCoreAvailable,
+            xrayCoreUpdateState = state.xrayCoreUpdateState,
+            xrayActive = state.xrayConnected,
+            onCheckXrayCoreUpdates = viewModel::checkXrayCoreUpdates,
+            onDownloadXrayCore = viewModel::downloadXrayCore,
             updateState = state.updateState,
             onCheckForUpdates = viewModel::checkForUpdates,
             onInstallUpdate = onInstallUpdate,
@@ -643,6 +649,11 @@ private fun OpenSourceSettingsSheet(
     onVpnModeChange: (VpnMode) -> Unit,
     onOpenAppPicker: () -> Unit,
     onAutoUpdateChange: (Boolean) -> Unit,
+    xrayCoreAvailable: Boolean,
+    xrayCoreUpdateState: XrayCoreUpdateUiState,
+    xrayActive: Boolean,
+    onCheckXrayCoreUpdates: () -> Unit,
+    onDownloadXrayCore: (XrayCoreAsset) -> Unit,
     updateState: OpenSourceUpdateUiState,
     onCheckForUpdates: () -> Unit,
     onInstallUpdate: () -> Unit,
@@ -686,6 +697,16 @@ private fun OpenSourceSettingsSheet(
                 title = "Auto-refresh public configurations",
                 checked = settings.openSourceAutoUpdateEnabled,
                 onCheckedChange = onAutoUpdateChange,
+            )
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+
+            XrayCoreUpdateSection(
+                xrayCoreAvailable = xrayCoreAvailable,
+                state = xrayCoreUpdateState,
+                xrayActive = xrayActive,
+                onCheckUpdates = onCheckXrayCoreUpdates,
+                onDownload = onDownloadXrayCore,
             )
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
@@ -765,6 +786,168 @@ private fun OpenSourceSettingsSheet(
             )
 
             Box(modifier = Modifier.padding(bottom = 12.dp))
+        }
+    }
+}
+
+@Composable
+private fun XrayCoreUpdateSection(
+    xrayCoreAvailable: Boolean,
+    state: XrayCoreUpdateUiState,
+    xrayActive: Boolean,
+    onCheckUpdates: () -> Unit,
+    onDownload: (XrayCoreAsset) -> Unit,
+) {
+    val uriHandler = LocalUriHandler.current
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Xray runtime core", style = MaterialTheme.typography.labelLarge)
+        Text(
+            text = if (xrayCoreAvailable) {
+                "Installed for this app. Runtime ABI: ${state.runtimeAbi}"
+            } else {
+                "Not installed. Download the official libXray core for ${state.runtimeAbi}."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        FilledTonalButton(
+            onClick = onCheckUpdates,
+            enabled = !state.isChecking && !state.isDownloading,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+        ) {
+            if (state.isChecking) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                )
+            } else {
+                Icon(Icons.Default.Refresh, contentDescription = null)
+            }
+            Text(
+                text = if (state.isChecking) "Checking core updates" else "Check Xray core updates",
+                modifier = Modifier.padding(start = 8.dp),
+            )
+        }
+
+        state.release?.let { release ->
+            val runtimeAsset = release.assets.firstOrNull { asset -> asset.abi == release.runtimeAbi }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Release ${release.versionName}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = "Compatible core for ${release.runtimeAbi}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = { uriHandler.openUri(release.releaseUrl) }) {
+                    Text("Open")
+                }
+            }
+
+            XrayCoreAssetRow(
+                asset = runtimeAsset,
+                runtimeAbi = state.runtimeAbi,
+                downloading = state.isDownloading && state.downloadingAbi == state.runtimeAbi,
+                enabled = !xrayActive && !state.isChecking && !state.isDownloading,
+                onDownload = onDownload,
+            )
+        }
+
+        state.statusMessage?.let { message ->
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (message.contains("failed", ignoreCase = true) ||
+                    message.contains("unable", ignoreCase = true) ||
+                    message.contains("no ", ignoreCase = true)
+                ) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+        if (xrayActive) {
+            Text(
+                text = "Disconnect opensource VPN before updating the Xray core.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
+}
+
+@Composable
+private fun XrayCoreAssetRow(
+    asset: XrayCoreAsset?,
+    runtimeAbi: String,
+    downloading: Boolean,
+    enabled: Boolean,
+    onDownload: (XrayCoreAsset) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = runtimeAbi,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = when {
+                        asset == null -> "No compatible Xray core asset is published for this release"
+                        asset.universal -> "Universal AAR · ${formatFileSize(asset.sizeBytes)}"
+                        else -> "${asset.name} · ${formatFileSize(asset.sizeBytes)}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                )
+            }
+            FilledTonalButton(
+                onClick = { asset?.let(onDownload) },
+                enabled = asset != null && enabled,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                if (downloading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                }
+                Text(
+                    text = when {
+                        downloading -> "Loading"
+                        asset == null -> "Missing"
+                        else -> "Download"
+                    },
+                    modifier = Modifier.padding(start = 6.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
         }
     }
 }
@@ -1127,7 +1310,7 @@ private fun OpenSourceActions(
         }
         if (!state.xrayCoreAvailable) {
             Text(
-                text = "Xray core is not packaged. Run scripts/build-xray-core.sh.",
+                text = "Xray runtime core is not installed. Download it in settings.",
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
             )

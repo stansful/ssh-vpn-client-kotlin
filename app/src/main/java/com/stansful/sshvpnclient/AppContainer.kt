@@ -15,6 +15,7 @@ import com.stansful.sshvpnclient.data.secret.TinkSecretStorage
 import com.stansful.sshvpnclient.data.settings.SharedPreferencesAppSettingsRepository
 import com.stansful.sshvpnclient.data.update.AndroidAppUpdateDownloader
 import com.stansful.sshvpnclient.data.update.GitHubAppUpdateRepository
+import com.stansful.sshvpnclient.data.update.GitHubXrayCoreUpdateRepository
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
 import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
@@ -24,6 +25,7 @@ import com.stansful.sshvpnclient.domain.repository.ProxySourceSynchronizer
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.SshPrivateKeyRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
+import com.stansful.sshvpnclient.domain.repository.XrayCoreUpdateRepository
 import com.stansful.sshvpnclient.domain.usecase.config.AddSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.DeleteSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.GetSshConfigByIdUseCase
@@ -115,6 +117,9 @@ class AppContainer(
             context = appContext,
             applicationScope = applicationScope,
         )
+    }
+    val xrayCoreUpdateRepository: XrayCoreUpdateRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        GitHubXrayCoreUpdateRepository(context = appContext)
     }
 
     val sshConnectionManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { SshConnectionManager() }

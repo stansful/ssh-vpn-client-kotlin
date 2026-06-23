@@ -22,6 +22,9 @@ val releaseSigningConfigured = listOf(
     releaseKeyAlias,
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
+val bundleXrayCore = providers.gradleProperty("bundleXrayCore")
+    .map(String::toBoolean)
+    .orElse(false)
 val appVersionName = "2.4.0"
 val appVersionParts = appVersionName.split('.').map(String::toInt)
 require(appVersionParts.size == 3 && appVersionParts.drop(1).all { it in 0..999 }) {
@@ -139,7 +142,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     val xrayAar = file("libs/libXray.aar")
-    if (xrayAar.isFile) {
+    if (bundleXrayCore.get() && xrayAar.isFile) {
         implementation(files(xrayAar))
     }
 

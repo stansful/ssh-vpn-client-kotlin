@@ -174,14 +174,14 @@ Pagination не используется для списка приложени�
 - Quick Settings tile нельзя автоматически поставить в конкретное место шторки: пользователь должен добавить плитку через редактирование быстрых настроек Android.
 - Release APK, подписанный локальным ignored keystore, подходит для установки на устройство, но не для production-дистрибуции.
 - Публичные `opensource` конфигурации используются на риск пользователя: приложение не может гарантировать безопасность чужого proxy-сервера.
-- Xray-core значительно увеличивает размер APK, потому что внутри находится нативная Go-библиотека.
+- Xray runtime core не включается в APK по умолчанию: opensource settings скачивает совместимый `libXray` core из release assets этого же репозитория.
 
 ## Требования
 
 - macOS или Linux.
 - Android Studio с JBR 17+ или отдельный JDK 17+.
 - Android SDK с API 37.
-- Android NDK, Go toolchain и gomobile нужны для сборки `libXray.aar`.
+- Android NDK, Go toolchain и gomobile нужны только для сборки `libXray.aar`.
 - Gradle Wrapper 9.5.1 из проекта. Gradle 9.6 пока не используется: AGP 9.2.1 вызывает в нём deprecated API.
 - Android emulator или физическое устройство с включенным USB debugging.
 
@@ -195,7 +195,6 @@ sdk.dir=/Users/<user>/Library/Android/sdk
 
 ```bash
 ./scripts/check-env.sh
-./scripts/build-xray-core.sh
 ./scripts/build-debug.sh
 ./scripts/install-debug.sh
 ```
@@ -234,7 +233,17 @@ export SSH_VPN_RELEASE_KEY_PASSWORD='key-password'
 
 Release variant использует R8 minification и resource shrinking. Keep rules лежат в `app/proguard-rules.pro`.
 
-`build-debug.sh` и `build-release.sh` автоматически запускают `build-xray-core.sh`, если `app/libs/libXray.aar` отсутствует.
+`build-debug.sh` и `build-release.sh` не включают Xray core в APK по умолчанию, чтобы universal APK оставался лёгким. `build-release.sh` дополнительно собирает ABI-specific `libXray-<version>-<abi>.aar` assets в release output рядом с APK. Эти AAR нужно загрузить в GitHub Release вместе с APK. Если нужен legacy APK с core внутри, запусти сборку с `SSH_VPN_BUNDLE_XRAY_CORE=1`; в этом режиме скрипты соберут `app/libs/libXray.aar`, если файла нет.
+
+## Xray core updates
+
+Runtime core updater проверяет:
+
+```text
+https://api.github.com/repos/stansful/ssh-vpn-client-kotlin/releases/latest
+```
+
+Он принимает только `libXray` AAR assets из release path этого репозитория. На экране показывается только один compatible asset под runtime ABI процесса (`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`). Если опубликован universal `libXray.aar`, приложение после скачивания сохраняет только `classes.jar` и `libgojni.so` для текущей runtime ABI.
 
 ## Обновления приложения
 
@@ -267,8 +276,9 @@ apksigner verify --verbose build/app/outputs/apk/release/app-release.apk
 - `./scripts/check-env.sh` - проверяет Java, Android SDK и Gradle/Wrapper.
 - `./scripts/create-gradle-wrapper.sh` - создаёт Gradle Wrapper через доступный Gradle или cached distribution.
 - `./scripts/build-debug.sh` - собирает debug APK.
-- `./scripts/build-release.sh` - собирает installable release APK.
-- `./scripts/build-xray-core.sh` - собирает официальный Xray Android binding из закреплённых исходников и кладёт `app/libs/libXray.aar`.
+- `./scripts/build-release.sh` - собирает installable release APK и ABI-specific Xray core release assets.
+- `./scripts/build-xray-core.sh` - собирает официальный Xray Android binding из закреплённых исходников и кладёт `app/libs/libXray.aar` для release assets или `SSH_VPN_BUNDLE_XRAY_CORE=1`.
+- `./scripts/package-xray-core-assets.sh` - нарезает `libXray.aar` на ABI-specific release assets.
 - `./scripts/install-debug.sh` - устанавливает debug APK на подключённое устройство.
 - `./scripts/lint.sh` - запускает Android lint для debug variant.
 - `./scripts/test.sh` - запускает unit tests.

@@ -3,8 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/env.sh"
-if [[ ! -f "$ROOT_DIR/app/libs/libXray.aar" ]]; then
-  "$ROOT_DIR/scripts/build-xray-core.sh"
+bundle_xray_core=false
+if [[ "${SSH_VPN_BUNDLE_XRAY_CORE:-0}" == "1" ]]; then
+  if [[ ! -f "$ROOT_DIR/app/libs/libXray.aar" ]]; then
+    "$ROOT_DIR/scripts/build-xray-core.sh"
+  fi
+  bundle_xray_core=true
 fi
 GRADLE="$("$ROOT_DIR/scripts/resolve-gradle.sh")"
 LOCAL_SIGNING_DIR="$ROOT_DIR/.local/signing"
@@ -142,7 +146,15 @@ fi
 release_output_dir="$ROOT_DIR/build/app/outputs/apk/release"
 rm -rf "$release_output_dir"
 
-"$GRADLE" -p "$ROOT_DIR" :app:assembleRelease
+if [[ "$bundle_xray_core" == "true" ]]; then
+  "$GRADLE" -p "$ROOT_DIR" -PbundleXrayCore=true :app:assembleRelease
+else
+  "$GRADLE" -p "$ROOT_DIR" :app:assembleRelease
+fi
+
+if [[ "${SSH_VPN_SKIP_XRAY_RELEASE_ASSETS:-0}" != "1" ]]; then
+  "$ROOT_DIR/scripts/package-xray-core-assets.sh" "$release_output_dir"
+fi
 
 release_apks=()
 while IFS= read -r apk_path; do

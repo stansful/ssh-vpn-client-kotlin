@@ -19,12 +19,15 @@ import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
+import com.stansful.sshvpnclient.domain.model.XrayCoreAsset
+import com.stansful.sshvpnclient.domain.model.XrayCoreRelease
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
 import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
 import com.stansful.sshvpnclient.domain.repository.ProxyProfileRepository
 import com.stansful.sshvpnclient.domain.repository.ProxySourceSynchronizer
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
+import com.stansful.sshvpnclient.domain.repository.XrayCoreUpdateRepository
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectProxyVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
@@ -66,6 +69,7 @@ data class OpenSourceUiState(
     val vpnState: VpnConnectionState = VpnConnectionState(),
     val xrayCoreAvailable: Boolean = false,
     val updateState: OpenSourceUpdateUiState = OpenSourceUpdateUiState(),
+    val xrayCoreUpdateState: XrayCoreUpdateUiState = XrayCoreUpdateUiState(),
 ) {
     val selectionMode: Boolean get() = selectedIds.isNotEmpty()
     val selectedProfile: ProxyProfileSummary? get() = profiles.firstOrNull(ProxyProfileSummary::isSelected)
@@ -96,6 +100,15 @@ data class OpenSourceUpdateUiState(
     val downloadState: AppUpdateDownloadState = AppUpdateDownloadState.Idle,
 )
 
+data class XrayCoreUpdateUiState(
+    val runtimeAbi: String = "",
+    val isChecking: Boolean = false,
+    val isDownloading: Boolean = false,
+    val downloadingAbi: String? = null,
+    val release: XrayCoreRelease? = null,
+    val statusMessage: String? = null,
+)
+
 class OpenSourceViewModel(
     private val proxyProfileRepository: ProxyProfileRepository,
     private val proxySourceSynchronizer: ProxySourceSynchronizer,
@@ -106,6 +119,7 @@ class OpenSourceViewModel(
     private val vpnConnectionRepository: VpnConnectionRepository,
     private val appUpdateRepository: AppUpdateRepository,
     private val appUpdateDownloader: AppUpdateDownloader,
+    private val xrayCoreUpdateRepository: XrayCoreUpdateRepository,
 ) : ViewModel() {
     private val query = MutableStateFlow("")
     private val pinnedOnly = MutableStateFlow(false)
@@ -115,6 +129,9 @@ class OpenSourceViewModel(
     private val dialogState = MutableStateFlow(DialogState())
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
     private val appUpdateState = MutableStateFlow(OpenSourceUpdateUiState())
+    private val xrayCoreUpdateState = MutableStateFlow(
+        XrayCoreUpdateUiState(runtimeAbi = xrayCoreUpdateRepository.runtimeAbi),
+    )
     private var checkJob: Job? = null
     private var updateCheckJob: Job? = null
     private var settingsReconnectJob: Job? = null
@@ -198,7 +215,8 @@ class OpenSourceViewModel(
         auxiliaryState,
         appSettingsRepository.settings,
         appUpdateState,
-    ) { profileState, auxiliary, appSettings, updateState ->
+        xrayCoreUpdateState,
+    ) { profileState, auxiliary, appSettings, updateState, coreUpdateState ->
         val operation = auxiliary.operation
         val dialogs = auxiliary.dialogs
         OpenSourceUiState(
@@ -220,6 +238,7 @@ class OpenSourceViewModel(
             vpnState = auxiliary.vpnState,
             xrayCoreAvailable = xrayCoreBridge.isAvailable,
             updateState = updateState,
+            xrayCoreUpdateState = coreUpdateState,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -477,6 +496,94 @@ class OpenSourceViewModel(
 
     fun onUpdateActionFailed(message: String) {
         appUpdateState.update { it.copy(statusMessage = message) }
+    }
+
+    fun checkXrayCoreUpdates() {
+        if (xrayCoreUpdateState.value.isChecking) return
+        viewModelScope.launch {
+            xrayCoreUpdateState.update { it.copy(isChecking = true, statusMessage = null) }
+            runCatching {
+                xrayCoreUpdateRepository.loadLatestRelease()
+            }.onSuccess { release ->
+                val runtimeAsset = release.assets.firstOrNull { asset -> asset.abi == release.runtimeAbi }
+                xrayCoreUpdateState.update {
+                    it.copy(
+                        isChecking = false,
+                        release = release,
+                        statusMessage = when {
+                            release.assets.isEmpty() ->
+                                "No Xray core assets were published in ${release.versionName}"
+                            runtimeAsset == null ->
+                                "No Xray core asset for runtime ABI ${release.runtimeAbi}"
+                            else ->
+                                "Xray core ${release.versionName} is ready for ${release.runtimeAbi}"
+                        },
+                    )
+                }
+            }.onFailure { error ->
+                xrayCoreUpdateState.update {
+                    it.copy(
+                        isChecking = false,
+                        statusMessage = error.message ?: "Unable to check Xray core updates",
+                    )
+                }
+            }
+        }
+    }
+
+    fun downloadXrayCore(asset: XrayCoreAsset) {
+        val state = xrayCoreUpdateState.value
+        if (state.isDownloading || state.isChecking) return
+        if (vpnConnectionRepository.currentState.isXrayActive()) {
+            xrayCoreUpdateState.update {
+                it.copy(statusMessage = "Disconnect opensource VPN before updating Xray core")
+            }
+            return
+        }
+        if (asset.abi != xrayCoreUpdateRepository.runtimeAbi) {
+            xrayCoreUpdateState.update {
+                it.copy(
+                    statusMessage = "Xray core ${asset.abi} is not compatible with runtime ABI " +
+                        xrayCoreUpdateRepository.runtimeAbi,
+                )
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            xrayCoreUpdateState.update {
+                it.copy(
+                    isDownloading = true,
+                    downloadingAbi = asset.abi,
+                    statusMessage = "Downloading Xray core for ${asset.abi}",
+                )
+            }
+            var downloadedFile: java.io.File? = null
+            runCatching {
+                val file = xrayCoreUpdateRepository.download(asset)
+                downloadedFile = file
+                file.inputStream().use { input ->
+                    xrayCoreBridge.installCore(input)
+                }
+            }.onSuccess {
+                xrayCoreUpdateState.update {
+                    it.copy(
+                        isDownloading = false,
+                        downloadingAbi = null,
+                        statusMessage = "Xray core installed for ${asset.abi}",
+                    )
+                }
+            }.onFailure { error ->
+                xrayCoreUpdateState.update {
+                    it.copy(
+                        isDownloading = false,
+                        downloadingAbi = null,
+                        statusMessage = error.message ?: "Unable to install Xray core",
+                    )
+                }
+            }
+            downloadedFile?.delete()
+        }
     }
 
     private fun importText(text: String, source: ProxyProfileSource) {
