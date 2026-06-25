@@ -331,6 +331,7 @@ private fun OpenSourceScreen(
                                 profile = profile,
                                 checked = profile.id in state.selectedIds,
                                 selectionMode = state.selectionMode,
+                                hostPingMs = state.hostPingMs[profile.id],
                                 onClick = { viewModel.selectProfile(profile.id) },
                                 onLongClick = { viewModel.beginBulkSelection(profile.id) },
                                 onCopy = {
@@ -1439,6 +1440,7 @@ private fun ProxyProfileCard(
     profile: ProxyProfileSummary,
     checked: Boolean,
     selectionMode: Boolean,
+    hostPingMs: Long?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onCopy: () -> Unit,
@@ -1506,18 +1508,30 @@ private fun ProxyProfileCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (profile.isPinned) StatusLabel("Pinned", MaterialTheme.colorScheme.tertiary)
-                if (profile.isStale) StatusLabel("Stale", MaterialTheme.colorScheme.error)
-                when (profile.lastTestStatus) {
-                    ProxyTestStatus.AVAILABLE -> StatusLabel(
-                        profile.lastLatencyMs?.let { "${it}ms" } ?: "Available",
-                        MaterialTheme.colorScheme.secondary,
-                    )
-                    ProxyTestStatus.UNAVAILABLE -> StatusLabel("Unavailable", MaterialTheme.colorScheme.error)
-                    ProxyTestStatus.RUNNING -> StatusLabel("Checking", MaterialTheme.colorScheme.primary)
-                    ProxyTestStatus.UNSUPPORTED -> StatusLabel("Unsupported", MaterialTheme.colorScheme.error)
-                    ProxyTestStatus.NOT_TESTED -> Unit
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (profile.isPinned) StatusLabel("Pinned", MaterialTheme.colorScheme.tertiary)
+                    if (profile.isStale) StatusLabel("Stale", MaterialTheme.colorScheme.error)
+                    when (profile.lastTestStatus) {
+                        ProxyTestStatus.AVAILABLE -> StatusLabel(
+                            profile.lastLatencyMs?.let { "${it}ms" } ?: "Available",
+                            MaterialTheme.colorScheme.secondary,
+                        )
+                        ProxyTestStatus.UNAVAILABLE -> StatusLabel("Unavailable", MaterialTheme.colorScheme.error)
+                        ProxyTestStatus.RUNNING -> StatusLabel("Checking", MaterialTheme.colorScheme.primary)
+                        ProxyTestStatus.UNSUPPORTED -> StatusLabel("Unsupported", MaterialTheme.colorScheme.error)
+                        ProxyTestStatus.NOT_TESTED -> Unit
+                    }
+                }
+                hostPingMs?.let { latencyMs ->
+                    StatusLabel("ping $latencyMs ms", MaterialTheme.colorScheme.primary)
                 }
             }
         }

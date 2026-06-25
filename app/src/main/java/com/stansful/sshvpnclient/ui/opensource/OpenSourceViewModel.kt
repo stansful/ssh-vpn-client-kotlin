@@ -32,9 +32,16 @@ import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectProxyVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
 import com.stansful.sshvpnclient.xray.XrayCoreInstallResult
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -44,6 +51,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -63,6 +72,7 @@ data class OpenSourceUiState(
     val isChecking: Boolean = false,
     val checkCompleted: Int = 0,
     val checkTotal: Int = 0,
+    val hostPingMs: Map<String, Long> = emptyMap(),
     val message: String? = null,
     val editor: ProxyEditorState? = null,
     val showBulkImport: Boolean = false,
@@ -233,6 +243,7 @@ class OpenSourceViewModel(
             isChecking = operation.isChecking,
             checkCompleted = operation.checkCompleted,
             checkTotal = operation.checkTotal,
+            hostPingMs = operation.hostPingMs,
             message = operation.message,
             editor = dialogs.editor,
             showBulkImport = dialogs.showBulkImport,
@@ -437,11 +448,11 @@ class OpenSourceViewModel(
 
     fun checkSelected() {
         val profileId = uiState.value.selectedProfile?.id ?: return
-        runChecks(listOf(profileId))
+        runChecks(listOf(profileId), pingEndpoints = false)
     }
 
     fun checkAll() {
-        runChecks(uiState.value.profiles.map(ProxyProfileSummary::id))
+        runChecks(uiState.value.profiles.map(ProxyProfileSummary::id), pingEndpoints = true)
     }
 
     fun cancelChecks() {
@@ -662,7 +673,7 @@ class OpenSourceViewModel(
         }
     }
 
-    private fun runChecks(profileIds: List<String>) {
+    private fun runChecks(profileIds: List<String>, pingEndpoints: Boolean) {
         val distinctProfileIds = profileIds.distinct()
         if (checkJob?.isActive == true) return
         if (distinctProfileIds.isEmpty()) {
@@ -674,13 +685,32 @@ class OpenSourceViewModel(
             var completedNormally = false
             try {
                 val summariesById = uiState.value.profiles.associateBy(ProxyProfileSummary::id)
+                val totalWorkMultiplier = if (pingEndpoints) {
+                    2
+                } else {
+                    1
+                }
+                val totalWork = distinctProfileIds.size * totalWorkMultiplier
                 operation.update {
                     it.copy(
                         isChecking = true,
                         checkCompleted = 0,
-                        checkTotal = distinctProfileIds.size,
-                        message = null,
+                        checkTotal = totalWork,
+                        hostPingMs = if (pingEndpoints) {
+                            it.hostPingMs - distinctProfileIds.toSet()
+                        } else {
+                            it.hostPingMs
+                        },
+                        message = if (pingEndpoints) "Pinging endpoints" else null,
                     )
+                }
+                val pinged = if (pingEndpoints) {
+                    pingProfileEndpoints(distinctProfileIds, summariesById)
+                } else {
+                    0
+                }
+                if (pingEndpoints) {
+                    operation.update { it.copy(message = "Checking tunnels") }
                 }
                 var available = 0
                 var unavailable = 0
@@ -728,14 +758,20 @@ class OpenSourceViewModel(
                         ProxyTestStatus.NOT_TESTED,
                         -> Unit
                     }
-                    operation.update { it.copy(checkCompleted = index + 1) }
+                    val completed = if (pingEndpoints) distinctProfileIds.size + index + 1 else index + 1
+                    operation.update { it.copy(checkCompleted = completed) }
                 }
                 completedNormally = true
                 operation.update {
                     it.copy(
                         isChecking = false,
-                        message = "Tunnel check completed: " +
-                            "$available available, $unavailable unavailable, $unsupported unsupported",
+                        message = if (pingEndpoints) {
+                            "Ping completed: $pinged/${distinctProfileIds.size}; tunnel check completed: " +
+                                "$available available, $unavailable unavailable, $unsupported unsupported"
+                        } else {
+                            "Tunnel check completed: " +
+                                "$available available, $unavailable unavailable, $unsupported unsupported"
+                        },
                     )
                 }
             } finally {
@@ -752,6 +788,44 @@ class OpenSourceViewModel(
             }
         }
     }
+
+    private suspend fun pingProfileEndpoints(
+        profileIds: List<String>,
+        summariesById: Map<String, ProxyProfileSummary>,
+    ): Int = coroutineScope {
+        val completed = AtomicInteger(0)
+        val successful = AtomicInteger(0)
+        val semaphore = Semaphore(HOST_PING_CONCURRENCY)
+        profileIds.map { profileId ->
+            async {
+                val summary = summariesById[profileId]
+                val latencyMs = summary?.let { profile ->
+                    semaphore.withPermit {
+                        pingEndpoint(profile.host, profile.port)
+                    }
+                }
+                if (latencyMs != null) {
+                    successful.incrementAndGet()
+                    operation.update { state ->
+                        state.copy(hostPingMs = state.hostPingMs + (profileId to latencyMs))
+                    }
+                }
+                val completedCount = completed.incrementAndGet()
+                operation.update { it.copy(checkCompleted = completedCount) }
+            }
+        }.awaitAll()
+        successful.get()
+    }
+
+    private suspend fun pingEndpoint(host: String, port: Int): Long? = withContext(Dispatchers.IO) {
+        runCatching {
+            val startedAt = System.nanoTime()
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(host, port), HOST_PING_TIMEOUT_MS)
+            }
+            ((System.nanoTime() - startedAt) / NANOS_IN_MILLIS).coerceAtLeast(1L)
+        }.getOrNull()
+    }
 }
 
 private data class OperationState(
@@ -759,6 +833,7 @@ private data class OperationState(
     val isChecking: Boolean = false,
     val checkCompleted: Int = 0,
     val checkTotal: Int = 0,
+    val hostPingMs: Map<String, Long> = emptyMap(),
     val message: String? = null,
 )
 
@@ -818,4 +893,7 @@ private data class SplitTunnelSettings(
 )
 
 private const val SETTINGS_CHANGE_DEBOUNCE_MS = 250L
+private const val HOST_PING_TIMEOUT_MS = 1_500
+private const val HOST_PING_CONCURRENCY = 12
+private const val NANOS_IN_MILLIS = 1_000_000L
 private const val TRANSPORT_SWITCH_TIMEOUT_MS = 2_000L
