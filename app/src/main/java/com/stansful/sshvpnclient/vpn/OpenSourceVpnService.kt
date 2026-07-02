@@ -96,7 +96,7 @@ class OpenSourceVpnService : android.net.VpnService() {
                 cleanup()
                 val vpnInterface = appContainer.vpnTunnelManager.establish(
                     service = this,
-                    sessionName = "opensource: ${profile.name}",
+                    sessionName = VPN_SESSION_NAME,
                     appSettings = settings,
                     log = repository::appendDiagnostic,
                 )
@@ -176,6 +176,7 @@ class OpenSourceVpnService : android.net.VpnService() {
         private const val EXTRA_PROFILE_ID = "com.stansful.sshvpnclient.extra.PROXY_PROFILE_ID"
         private const val CHANNEL_ID = "ssh_vpn_connection"
         private const val NOTIFICATION_ID = 3002
+        private const val VPN_SESSION_NAME = "Secure connection"
         private const val CONNECTION_MONITOR_INTERVAL_MS = 5_000L
         private const val INITIAL_RECONNECT_DELAY_MS = 250L
         private const val MAX_RECONNECT_DELAY_MS = 5_000L

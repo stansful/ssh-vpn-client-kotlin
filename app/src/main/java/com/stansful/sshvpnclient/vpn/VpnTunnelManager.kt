@@ -21,7 +21,7 @@ class VpnTunnelManager {
     ): ParcelFileDescriptor {
         return establish(
             service = service,
-            sessionName = "SSH VPN: ${config.name}",
+            sessionName = VPN_SESSION_NAME,
             appSettings = appSettings,
             log = log,
         )
@@ -101,5 +101,6 @@ class VpnTunnelManager {
         const val DEFAULT_ROUTE_PREFIX = 0
         const val CLOUDFLARE_DNS = "1.1.1.1"
         const val GOOGLE_DNS = "8.8.8.8"
+        const val VPN_SESSION_NAME = "Secure connection"
     }
 }
