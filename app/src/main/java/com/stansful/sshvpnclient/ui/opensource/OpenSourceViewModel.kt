@@ -151,7 +151,9 @@ class OpenSourceViewModel(
     private var settingsReconnectStarted = false
 
     init {
-        synchronize(force = false)
+        if (appSettingsRepository.settings.value.openSourceAutoUpdateEnabled) {
+            synchronize(force = false)
+        }
         viewModelScope.launch {
             var previousSplitTunnelSettings = appSettingsRepository.settings.value.splitTunnelSettings()
             appSettingsRepository.settings

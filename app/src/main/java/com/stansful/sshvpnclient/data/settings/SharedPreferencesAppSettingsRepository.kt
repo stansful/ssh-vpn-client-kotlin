@@ -107,6 +107,7 @@ class SharedPreferencesAppSettingsRepository(
     }
 
     private fun readSettings(): AppSettings {
+        applyOpenSourceAutoUpdateDefaultMigration()
         return AppSettings(
             showLogsOnMain = preferences.getBoolean(KEY_SHOW_LOGS_ON_MAIN, false),
             showLogsOnOpenSource = preferences.getBoolean(KEY_SHOW_LOGS_ON_OPEN_SOURCE, false),
@@ -132,9 +133,17 @@ class SharedPreferencesAppSettingsRepository(
             ),
             openSourceAutoUpdateEnabled = preferences.getBoolean(
                 KEY_OPEN_SOURCE_AUTO_UPDATE_ENABLED,
-                true,
+                false,
             ),
         )
+    }
+
+    private fun applyOpenSourceAutoUpdateDefaultMigration() {
+        if (preferences.getBoolean(KEY_OPEN_SOURCE_AUTO_UPDATE_DEFAULT_DISABLED_MIGRATION, false)) return
+        preferences.edit {
+            putBoolean(KEY_OPEN_SOURCE_AUTO_UPDATE_ENABLED, false)
+            putBoolean(KEY_OPEN_SOURCE_AUTO_UPDATE_DEFAULT_DISABLED_MIGRATION, true)
+        }
     }
 
     private fun readCustomThemeColors(): CustomThemeColors {
@@ -172,5 +181,7 @@ class SharedPreferencesAppSettingsRepository(
         const val KEY_SHOW_OPEN_SOURCE_WARNING_ON_ENTER = "show_open_source_warning_on_enter"
         const val KEY_OPEN_SOURCE_RISK_BANNER_EXPANDED = "open_source_risk_banner_expanded"
         const val KEY_OPEN_SOURCE_AUTO_UPDATE_ENABLED = "open_source_auto_update_enabled"
+        const val KEY_OPEN_SOURCE_AUTO_UPDATE_DEFAULT_DISABLED_MIGRATION =
+            "open_source_auto_update_default_disabled_migration"
     }
 }

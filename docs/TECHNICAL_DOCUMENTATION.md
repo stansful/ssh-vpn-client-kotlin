@@ -121,7 +121,7 @@ UI не создает инфраструктуру напрямую. Экран
 - `openSourceConsentVersion` - принятая версия предупреждения OpenSource.
 - `showOpenSourceWarningOnEnter` - показывать warning dialog при переходе на OpenSource.
 - `openSourceRiskBannerExpanded` - раскрытость warning banner.
-- `openSourceAutoUpdateEnabled` - автообновление public configs.
+- `openSourceAutoUpdateEnabled` - автообновление public configs, по умолчанию выключено.
 
 Настройки хранятся в `SharedPreferencesAppSettingsRepository` в файле `ssh-vpn-client-settings`.
 
@@ -469,7 +469,7 @@ Background sync:
 - Flex interval: 1 час.
 - Constraints: connected network, battery not low.
 - Max retry: 3.
-- Работает только если consent принят и auto-refresh включен.
+- Работает только если consent принят и auto-refresh включен пользователем.
 
 Manual refresh всегда force-запрос и не должен полагаться на cached ETag.
 
@@ -791,7 +791,7 @@ Backup:
 - Xray core вынесен из APK и скачивается по ABI.
 - Release build включает R8 и resource shrinking.
 - PackageManager app list кешируется на 5 минут.
-- Public config auto-refresh через WorkManager с constraints `network connected` и `battery not low`.
+- Public config auto-refresh выключен по умолчанию; если пользователь включает его, WorkManager запускается с constraints `network connected` и `battery not low`.
 - Нет постоянного wake lock.
 - SSH wake recovery event-driven: только screen on/off receiver во время foreground service.
 - Diagnostics публикуются в UI батчами.
