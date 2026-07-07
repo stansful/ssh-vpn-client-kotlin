@@ -24,6 +24,7 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import javax.net.ssl.SSLSocket
@@ -45,6 +46,7 @@ internal class KotlinTunForwarder(
     private val executors = ForwarderExecutors(diagnostics)
     private val packetId = AtomicInteger(1)
     private val dnsFailureStreak = AtomicInteger(0)
+    private val dnsTcpRetryAfterMs = AtomicLong(0L)
     private val degradationReported = AtomicBoolean(false)
     private val writeLock = Any()
 
@@ -307,22 +309,36 @@ internal class KotlinTunForwarder(
         val sshSession = sshSessionReference.get()?.takeIf { it.isConnected } ?: return
         val dnsServer = addressToString(dnsServerAddress)
         try {
-            val response = try {
-                resolveDnsOverTcp(
-                    sshSession = sshSession,
-                    query = query,
-                    dnsServer = dnsServer,
-                    clientAddress = clientAddress,
-                    clientPort = clientPort,
-                )
-            } catch (tcpError: Exception) {
+            val now = elapsedRealtimeMs()
+            val response = if (now < dnsTcpRetryAfterMs.get()) {
                 resolveDnsOverHttps(
                     sshSession = sshSession,
                     query = query,
                     clientAddress = clientAddress,
                     clientPort = clientPort,
-                    tcpError = tcpError,
+                    tcpError = null,
                 )
+            } else {
+                try {
+                    resolveDnsOverTcp(
+                        sshSession = sshSession,
+                        query = query,
+                        dnsServer = dnsServer,
+                        clientAddress = clientAddress,
+                        clientPort = clientPort,
+                    ).also {
+                        dnsTcpRetryAfterMs.set(0L)
+                    }
+                } catch (tcpError: Exception) {
+                    dnsTcpRetryAfterMs.set(now + DNS_TCP_FAILURE_COOLDOWN_MS)
+                    resolveDnsOverHttps(
+                        sshSession = sshSession,
+                        query = query,
+                        clientAddress = clientAddress,
+                        clientPort = clientPort,
+                        tcpError = tcpError,
+                    )
+                }
             }
             sendUdpPacket(
                 sourceAddress = dnsServerAddress,
@@ -382,12 +398,14 @@ internal class KotlinTunForwarder(
         query: ByteArray,
         clientAddress: Int,
         clientPort: Int,
-        tcpError: Exception,
+        tcpError: Exception?,
     ): ByteArray {
         var channel: ChannelDirectTCPIP? = null
         var tlsSocket: SSLSocket? = null
         try {
-            diagnostics.logDnsFallback(tcpError.message ?: tcpError::class.java.simpleName)
+            if (tcpError != null) {
+                diagnostics.logDnsFallback(tcpError.message ?: tcpError::class.java.simpleName)
+            }
             channel = openDirectTcpChannel(
                 sshSession = sshSession,
                 host = DOH_ENDPOINT_ADDRESS,
@@ -1602,6 +1620,7 @@ internal class KotlinTunForwarder(
         const val DNS_TCP_LENGTH_SIZE = 2
         const val DNS_MAX_RESPONSE_SIZE = 4_096
         const val DNS_DEGRADATION_FAILURE_THRESHOLD = 3
+        const val DNS_TCP_FAILURE_COOLDOWN_MS = 60_000L
         const val DOH_ENDPOINT_ADDRESS = "1.1.1.1"
         const val DOH_ENDPOINT_HOST = "cloudflare-dns.com"
         const val DOH_ENDPOINT_PORT = 443

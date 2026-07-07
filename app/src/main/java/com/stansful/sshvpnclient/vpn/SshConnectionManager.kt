@@ -346,10 +346,6 @@ class SshConnectionManager {
         }
     }
 
-    private fun isExpectedDisconnectLog(message: String): Boolean {
-        return message.contains("leaving main loop due to Socket closed", ignoreCase = true)
-    }
-
     private companion object {
         const val DEFAULT_CONNECT_TIMEOUT_MS = 20_000
         const val MAX_EFFECTIVE_KEEP_ALIVE_INTERVAL_SEC = 60
@@ -381,7 +377,7 @@ class SshConnectionManager {
                     override fun log(level: Int, message: String?) {
                         val value = message?.trim().orEmpty()
                         if (value.isBlank()) return
-                        if (isExpectedDisconnectLog(value)) return
+                        if (isExpectedJschDisconnectLog(value)) return
                         jschThreadLog.get()?.invoke("JSch ${levelLabel(level)}: $value")
                     }
                 },
@@ -406,4 +402,10 @@ class SshConnectionManager {
             }
         }
     }
+}
+
+internal fun isExpectedJschDisconnectLog(message: String): Boolean {
+    return message.contains("leaving main loop due to Socket closed", ignoreCase = true) ||
+        message.contains("leaving main loop due to Software caused connection abort", ignoreCase = true) ||
+        message.contains("leaving main loop due to Connection reset", ignoreCase = true)
 }
