@@ -24,6 +24,7 @@ class SshTerminalSession internal constructor(
 ) : Closeable {
     private val isOpen = AtomicBoolean(true)
     private val readerScope = CoroutineScope(SupervisorJob() + readerDispatcher)
+    private val closeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var readerJob: Job? = null
 
     val isActive: Boolean
@@ -43,21 +44,29 @@ class SshTerminalSession internal constructor(
     }
 
     override fun close() {
-        if (isOpen.getAndSet(false)) {
-            runCatching { channel.disconnect() }
+        if (!isOpen.getAndSet(false)) {
+            return
         }
         readerScope.cancel()
+        closeScope.launch {
+            try {
+                runCatching { channel.disconnect() }
+            } finally {
+                closeScope.cancel()
+            }
+        }
     }
 
     private fun readLoop() {
         val buffer = ByteArray(BUFFER_SIZE)
+        val output = ByteArrayOutputStream(MAX_OUTPUT_BATCH_SIZE)
         try {
             while (isOpen.get()) {
                 val bytesRead = inputStream.read(buffer)
                 if (bytesRead < 0) break
                 if (bytesRead == 0) continue
 
-                val output = ByteArrayOutputStream(MAX_OUTPUT_BATCH_SIZE)
+                output.reset()
                 output.write(buffer, 0, bytesRead)
                 while (inputStream.available() > 0 && output.size() < MAX_OUTPUT_BATCH_SIZE) {
                     val nextRead = inputStream.read(

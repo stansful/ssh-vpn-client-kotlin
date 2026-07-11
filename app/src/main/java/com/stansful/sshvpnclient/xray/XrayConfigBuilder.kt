@@ -10,6 +10,11 @@ import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyShareLinkParser
 import org.json.JSONArray
 import org.json.JSONObject
 
+data class XrayBatchSocksTestEntry(
+    val profile: ProxyProfile,
+    val username: String,
+)
+
 class XrayConfigBuilder(
     private val parser: ProxyShareLinkParser,
 ) {
@@ -43,6 +48,62 @@ class XrayConfigBuilder(
         ).toString()
     }
 
+    fun buildBatchSocksTestConfig(
+        entries: List<XrayBatchSocksTestEntry>,
+        socksPort: Int,
+        password: String,
+    ): String {
+        require(entries.isNotEmpty()) { "At least one test entry is required" }
+        require(entries.all { it.username.isNotBlank() }) { "Test usernames must not be blank" }
+        require(entries.map(XrayBatchSocksTestEntry::username).distinct().size == entries.size) {
+            "Test usernames must be unique"
+        }
+        require(password.isNotBlank()) { "Test password must not be blank" }
+
+        val inbound = JSONObject()
+            .put("listen", "127.0.0.1")
+            .put("port", socksPort)
+            .put("protocol", "socks")
+            .put("tag", BATCH_TEST_INBOUND_TAG)
+            .put(
+                "settings",
+                JSONObject()
+                    .put("auth", "password")
+                    .put(
+                        "accounts",
+                        JSONArray(
+                            entries.map { entry ->
+                                JSONObject()
+                                    .put("user", entry.username)
+                                    .put("pass", password)
+                            },
+                        ),
+                    )
+                    .put("udp", false),
+            )
+        val outbounds = JSONArray(
+            entries.mapIndexed { index, entry ->
+                buildOutbound(parse(entry.profile), tag = batchOutboundTag(index))
+            },
+        )
+        val routingRules = JSONArray(
+            entries.mapIndexed { index, entry ->
+                JSONObject()
+                    .put("type", "field")
+                    .put("inboundTag", JSONArray().put(BATCH_TEST_INBOUND_TAG))
+                    .put("user", JSONArray().put(entry.username))
+                    .put("outboundTag", batchOutboundTag(index))
+            },
+        )
+
+        return JSONObject()
+            .put("log", JSONObject().put("loglevel", "warning"))
+            .put("inbounds", JSONArray().put(inbound))
+            .put("outbounds", outbounds)
+            .put("routing", JSONObject().put("rules", routingRules))
+            .toString()
+    }
+
     private fun parse(profile: ProxyProfile): ParsedProxyProfile {
         return (parser.parse(profile.rawUri) as? ProxyParseResult.Success)?.profile
             ?: error("Stored proxy configuration is invalid")
@@ -55,12 +116,15 @@ class XrayConfigBuilder(
             .put("outbounds", JSONArray().put(outbound))
     }
 
-    private fun buildOutbound(profile: ParsedProxyProfile): JSONObject {
+    private fun buildOutbound(
+        profile: ParsedProxyProfile,
+        tag: String = "proxy-out",
+    ): JSONObject {
         require(profile.transport != ProxyTransport.UNKNOWN) { "Unsupported transport" }
         require(profile.security != ProxySecurity.UNKNOWN) { "Unsupported transport security" }
         return JSONObject()
             .put("protocol", profile.protocol.scheme)
-            .put("tag", "proxy-out")
+            .put("tag", tag)
             .put("settings", buildProtocolSettings(profile))
             .put("streamSettings", buildStreamSettings(profile))
     }
@@ -173,6 +237,12 @@ class XrayConfigBuilder(
             .putIfNotBlank("host", parameters["host"])
             .put("path", parameters["path"] ?: fromExtra.optString("path", "/"))
             .putIfNotBlank("mode", parameters["mode"])
+    }
+
+    private fun batchOutboundTag(index: Int): String = "probe-out-$index"
+
+    private companion object {
+        const val BATCH_TEST_INBOUND_TAG = "batch-test-in"
     }
 }
 

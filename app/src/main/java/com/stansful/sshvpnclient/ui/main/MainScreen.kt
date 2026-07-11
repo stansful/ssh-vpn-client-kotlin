@@ -10,7 +10,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -64,12 +63,16 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -83,8 +86,9 @@ import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -121,9 +125,24 @@ fun MainRoute(
 ) {
     val viewModel: MainViewModel = viewModel(factory = AppViewModelFactory(container))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     var pendingUpdateInstallUri by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(viewModel, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                viewModel.closeTerminal()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.closeTerminal()
+        }
+    }
+
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -202,6 +221,7 @@ fun MainRoute(
         onVpnModeChange = viewModel::setVpnMode,
         onDismissNoSelectedApps = viewModel::dismissNoSelectedAppsDialog,
         onOpenTerminal = viewModel::openTerminal,
+        onCloseTerminal = viewModel::closeTerminal,
         onTerminalInputChange = viewModel::setTerminalInput,
         onSubmitTerminalInput = viewModel::submitTerminalInput,
         onCheckForUpdates = viewModel::checkForUpdates,
@@ -229,6 +249,7 @@ private fun MainScreen(
     onVpnModeChange: (VpnMode) -> Unit,
     onDismissNoSelectedApps: () -> Unit,
     onOpenTerminal: () -> Unit,
+    onCloseTerminal: () -> Unit,
     onTerminalInputChange: (String) -> Unit,
     onSubmitTerminalInput: () -> Unit,
     onCheckForUpdates: () -> Unit,
@@ -290,6 +311,7 @@ private fun MainScreen(
                 TerminalPanel(
                     state = state,
                     onOpenTerminal = onOpenTerminal,
+                    onCloseTerminal = onCloseTerminal,
                     onTerminalInputChange = onTerminalInputChange,
                     onSubmitTerminalInput = onSubmitTerminalInput,
                 )
@@ -691,9 +713,7 @@ private fun DiagnosticsPanel(state: MainUiState) {
 
     GlassPanel {
         Column(
-            modifier = Modifier
-                .padding(16.dp)
-                .animateContentSize(),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
@@ -704,7 +724,11 @@ private fun DiagnosticsPanel(state: MainUiState) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Connection Diagnostics", style = MaterialTheme.typography.labelLarge)
                     Text(
-                        "${state.vpnState.diagnostics.size} lines",
+                        pluralStringResource(
+                            R.plurals.diagnostics_line_count,
+                            diagnostics.size,
+                            diagnostics.size,
+                        ),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

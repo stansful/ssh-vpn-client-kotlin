@@ -1,6 +1,6 @@
 # shadow-ssh Android: техническая документация
 
-Дата ревью проекта: 2026-07-03.
+Дата ревью проекта: 2026-07-11.
 
 Документ описывает текущее устройство Android-приложения `shadow-ssh`: архитектуру, основные сценарии, хранение данных, VPN runtime, OpenSource/Xray runtime, обновления, сборку, безопасность и известные ограничения.
 
@@ -235,8 +235,9 @@ Entities:
 Особенности:
 
 - Состояние живет в памяти через `MutableStateFlow`.
-- Diagnostics буферизуются и публикуются в UI батчами раз в 100 мс.
+- Diagnostics буферизуются и публикуются в UI батчами раз в 250 мс.
 - Diagnostics сохраняются в SharedPreferences `ssh-vpn-connection-state`.
+- Diagnostics ограничены 500 строками, 131 072 символами суммарного текста и 2 048 символами на запись; TUN destination metadata редактируется до persistence.
 - Persistence diagnostics ограничена интервалом 15 секунд, кроме forced updates.
 - При `setConnecting()` diagnostics очищаются.
 - При `setDisconnected()` transport сбрасывается в `null`.
@@ -272,11 +273,12 @@ UI должен учитывать `activeTransport`. SSH экран показ�
 `VpnTunnelManager` создает Android TUN:
 
 - Session name: `Secure connection`.
-- MTU: `1500`.
-- Private address: `10.10.0.2/32`.
-- Default route: `0.0.0.0/0`.
-- DNS: `1.1.1.1`, `8.8.8.8`.
+- MTU/mode: SSH `8500` + blocking I/O, Xray `1500` + nonblocking I/O.
+- IPv4 для обоих режимов: address `10.10.0.2/32`, route `0.0.0.0/0`, DNS `1.1.1.1`/`8.8.8.8`.
+- IPv6 только для Xray: address `fd00:10:10::2/128`, route `::/0`, Cloudflare/Google IPv6 DNS. SSH остаётся IPv4-only, поскольку Kotlin forwarder не реализует IPv6.
 - Android Q+: `setMetered(false)`.
+- TUN owner token не позволяет cleanup старого service/run закрыть новый interface.
+- Физическая сеть задаётся через `setUnderlyingNetworks` и должна иметь `INTERNET + NOT_VPN`; `VALIDATED` предпочтителен, но не обязателен для cellular fallback.
 - Split tunneling через `addAllowedApplication()` для `Selected apps`.
 
 Один `VpnTunnelManager` общий для SSH и OpenSource runtime.
@@ -311,15 +313,17 @@ MainViewModel.connect()
 - При private key auth загружает ключ из Tink-backed repository.
 - Настраивает BouncyCastle-backed EdDSA support.
 - Настраивает `PreferredAuthentications`: `password` или `publickey`.
-- Отключает `StrictHostKeyChecking` на уровне JSch, но после подключения отдельно проверяет configured fingerprint, если он задан.
-- Настраивает server alive interval, максимум 60 секунд.
-- Использует `VpnProtectedSocketFactory`, чтобы защитить SSH socket от маршрутизации обратно в VPN.
+- Использует `StrictHostKeyChecking=yes` и custom `HostKeyRepository`: configured fingerprint проверяется во время key exchange до user authentication.
+- Увеличивает JSch `max_input_buffer_size` до 4 MiB; буфер стартует малым и растёт динамически.
+- Настраивает server alive interval в диапазоне 15–300 секунд; при выключенном экране effective interval не менее 120 секунд и восстанавливается без reconnect после `SCREEN_ON`.
+- Использует `VpnProtectedSocketFactory`: DNS выполняется выбранной физической сетью, затем socket проходит `bind -> protect -> connect` с общим deadline и fallback по A/AAAA адресам.
 
 Fingerprint behavior:
 
 - Фактический server host key fingerprint логируется.
-- Если expected fingerprint пустой, проверка пропускается.
-- Если expected fingerprint задан и не совпадает после нормализации, session отключается и выбрасывается `Fingerprint mismatch`.
+- Если expected fingerprint пустой, совместимость сохраняется, но UI/diagnostics показывают явное предупреждение о непроверенной host identity.
+- Поддерживаются OpenSSH SHA-256 и legacy MD5; сравнение digest выполняется constant-time.
+- При mismatch authentication не запускается, возвращается `Fingerprint mismatch`.
 
 ## 15. Kotlin TUN forwarder
 
@@ -335,25 +339,38 @@ Fingerprint behavior:
 Ограничения:
 
 - Произвольный non-DNS UDP не проксируется.
-- `enableUdpForwarding` остается experimental flag. При включении runtime логирует, что custom forwarder поддерживает TCP и DNS UDP/53.
+- Legacy-поле `enableUdpForwarding` осталось только для совместимости схемы; no-op переключатель удалён из UI.
 
 Оптимизации forwarder:
 
-- Отдельные thread pools для control tasks, remote reads и cleanup.
-- Ограниченные очереди.
-- Session maintenance раз в 20 секунд.
-- Idle cleanup под нагрузкой.
+- Отдельные bounded executors для control tasks, DNS и remote reads; deadline/cleanup scheduler queues логически ограничены числом активных операций, а отменённые futures удаляются через `removeOnCancelPolicy`.
+- Blocking TUN использует один bounded writer; переполнение переводит forwarding layer в degraded/rebuild вместо неограниченного роста памяти.
+- MSS вычисляется из TUN MTU (`8460` при MTU `8500`), TCP/IP packet строится без промежуточной копии payload.
+- Во всех профилях JSch local channel receive window, outer SSH socket request и dynamic input-buffer ceiling равны 4 MiB; upload queue — 512 KiB на flow, TUN write queue — 256 пакетов. Это сохраняет минимум `2 × BDP` для 100 Мбит/с при RTT 106 мс и не урезает активную передачу в Battery Saver.
+- Normal/Battery Saver/Android low-RAM уменьшают только session cap `128/64/32` и retained packet pool `64/32/32`. Профиль применяется при построении нового TUN pipeline.
+- Upload queue управляет advertised TCP window. Любое отправленное нулевое окно остаётся sticky до отдельного положительного reopen ACK на актуальном sequence; обычный positive packet со старым sequence не может ошибочно снять latch. FIN закрывает SSH output после drain очереди.
+- Принятые payload coalesce-ятся в максимум восемь блоков по 64 KiB при capacity 512 KiB; два завершённых блока кешируются для повторного использования. Byte capacity является единственным advertised limit, поэтому мелкие сегменты не сжимают окно раньше времени. Rejected/duplicate/zero-window payload проверяется до копирования.
+- Upload flush пишет максимум один 64 KiB блок за control task и повторно ставит flow в хвост executor, сохраняя fairness между параллельными upload и корректный FIN drain.
+- Outbound IPv4/TCP кеширует и переиспользует до 64 возвращённых полных MTU-буферов; буфер возвращается в cache только после TUN write/drop, а payload не создаёт отдельный packet-sized массив. Лимит 64 относится к retained cache, а не к общему числу transient allocations при backlog.
+- `TcpPacketSender` имеет primitive JVM signature без `Function11` boxing; advertised window снимается под сериализованным outbound/session lock.
+- TUN writer блокируется на `take()` и zero-window reader на `Condition.await()`, поэтому idle path не создаёт периодических wakeups.
+- DNS query имеет hard timeout 10 секунд; timeout disconnects соответствующий channel.
+- DNS timeout core threads завершаются после idle.
+- Periodic session maintenance отсутствует: client/remote FIN cleanup планируется событийно, сохранённые futures отменяются при close/reschedule, pressure cleanup запускается single-flight только при превышении порога. Client-FIN cleanup использует 60 секунд именно бездействия после последней half-close активности, remote-FIN TTL — 30 секунд; cleanup worker также освобождает thread stack после 60 секунд idle.
 - Лимит подробных diagnostic logs.
 - TCP reset для stale sessions после wake recovery.
 
 ## 16. SSH reconnect и wake recovery
 
-`SshVpnService` работает как foreground service и возвращает `START_STICKY`.
+`SshVpnService` работает как foreground service и возвращает `START_NOT_STICKY`. Connect/disconnect сериализованы через lifecycle `Mutex`; монотонные command/run id, захваченный конкретным run process-wide runtime lease и service-owner identity отсекают устаревшие команды до захвата общих SSH/TUN/VPN managers. Terminal transition выполняется на main thread и меняет state/foreground только после успешного `stopSelfResult(startId)`, поэтому старый disconnect/failure не может остановить уже поставленный Android новый start. При disconnect SSH transport сначала закрывается на `Dispatchers.IO`, после чего отменённый connection job получает ограниченное время на завершение; `onDestroy` также ставит тяжёлый teardown в IO service scope. Xray runtime дополнительно привязан к generation, и stale cleanup может останавливать только generation своей попытки.
 
 Reconnect:
 
 - Initial delay: 250 мс.
-- Max delay: 5000 мс.
+- Max delay: 30000 мс.
+- Backoff сбрасывается только после стабильного соединения минимум 30 секунд; короткие flapping-сессии не образуют hot reconnect loop.
+- Если usable `INTERNET + NOT_VPN` physical network отсутствует, loop suspend-ится на `StateFlow` до network callback.
+- Active monitor использует cadence 5 секунд при screen-on и 30 секунд при screen-off; handoff и screen events доставляются conflated signal немедленно.
 - До первого успешного подключения unrecoverable auth/key/fingerprint ошибки переводят state в `ERROR`.
 - После первого успешного подключения сервис старается восстановиться автоматически.
 - Если TUN pipeline жив, SSH reconnect может пройти без пересоздания Android VPN interface.
@@ -362,12 +379,10 @@ Reconnect:
 Wake recovery:
 
 - Сервис регистрирует dynamic receiver на `SCREEN_OFF` и `SCREEN_ON`.
-- Wake recovery запускается только если экран был выключен минимум 60 секунд.
-- Wake lock не используется.
-- После wake:
-  - сбрасываются TCP sessions, idle минимум 30 секунд;
-  - выполняется короткий SSH transport health-check через `direct-tcpip` к `1.1.1.1:443`;
-  - если transport stale, SSH session отключается, что запускает reconnect loop.
+- Wake recovery запускается только если экран был выключен минимум 5 минут и после `SCREEN_ON` ждёт 2 секунды стабилизации сети.
+- Wake recovery не захватывает собственный wake lock; во время screen-off нет дополнительного polling.
+- После wake сначала выполняется короткий SSH transport health-check через `direct-tcpip` к `1.1.1.1:443`.
+- Только если transport stale, сбрасываются TCP sessions с idle минимум 2 минуты и SSH session отключается, что запускает reconnect loop.
 
 Это решает кейс, когда после сна SSH session формально жива, но старые app sockets больше не проводят трафик.
 
@@ -389,8 +404,8 @@ Terminal:
 
 - Включается настройкой `showTerminalOnMain`.
 - Открывает JSch shell channel с PTY type `xterm`.
-- Output хранится в UI state, максимум 120000 символов.
-- Закрывается при disconnect или смене active transport.
+- Output хранится chunk-буфером максимум 65 536 символов и публикуется в UI не чаще раза в 250 мс.
+- Shell закрывается при collapse панели, `Activity.ON_STOP`, disposal, disconnect или смене active transport; late callbacks отсекаются generation token.
 
 ## 18. Quick Settings tile
 
@@ -438,7 +453,7 @@ Tile управляет только SSH подключением. OpenSource tr
 
 Parser:
 
-- Максимальная длина одной ссылки: 64 KiB.
+- Максимальная длина одной ссылки: 65 536 символов.
 - Максимум строк при bulk import: 10000.
 - Пустые строки и строки `#...` игнорируются.
 - Для VLESS/Trojan используется URI parser.
@@ -452,6 +467,7 @@ Repository import:
 - Metadata сохраняется в Room.
 - Для remote source старые профили, отсутствующие в новом sync, помечаются stale.
 - Если выбранный профиль удален или stale, repository выбирает первый доступный профиль.
+- Fingerprint lookup и массовое удаление разбиваются на SQLite-пакеты максимум по 900 bind-параметров; delete/fallback остаются одной Room-транзакцией даже для импорта/выбора до 10000 профилей.
 
 Public sync:
 
@@ -461,15 +477,20 @@ Public sync:
 - Timeout: connect 10 секунд, read 15 секунд.
 - Response size limit: 2 MiB.
 - Поддерживается ETag через `If-None-Match`, кроме forced refresh.
+- Structured cancellation watcher вызывает `HttpURLConnection.disconnect()` при отмене, поэтому blocking `responseCode`/`read` не удерживает worker до сетевого timeout; normal/error path также всегда закрывает connection и watcher.
 
 Background sync:
 
 - Work name: `public-proxy-source-sync`.
-- Periodic interval: 6 часов.
-- Flex interval: 1 час.
-- Constraints: connected network, battery not low.
+- Periodic interval: 12 часов.
+- Flex interval: 4 часа.
+- WorkManager constraints: unmetered network, battery not low.
+- Перед запросом worker независимо выбирает физическую сеть с `INTERNET + VALIDATED + NOT_VPN + NOT_METERED`; Android VPN, объявленная через `setMetered(false)`, не считается подходящим transport.
+- HTTP открывается через `selectedPhysicalNetwork.openConnection(url)`, поэтому public sync не маршрутизируется обратно в VPN. Если подходящей физической сети нет, worker завершает текущий запуск успешно без retry.
+- Retry backoff: exponential, старт 30 минут, только для I/O и transient HTTP 408/429/5xx; permanent 4xx/parser/import ошибки не повторяются в текущем запуске.
 - Max retry: 3.
 - Работает только если consent принят и auto-refresh включен пользователем.
+- VPN runtime не держит ради sync собственный long-lived wake lock; WorkManager/Android могут использовать кратковременный управляемый wake lock во время исполнения worker.
 
 Manual refresh всегда force-запрос и не должен полагаться на cached ETag.
 
@@ -484,6 +505,7 @@ OpenSource экран поддерживает:
 - Long press multi-select.
 - `Select all`, исключающий pinned profiles.
 - Delete selected.
+- `Remove all unavailable tunnels except pinned`: confirmation, полный unfiltered count и атомарное удаление только `UNAVAILABLE && !isPinned` с cleanup encrypted secrets.
 - Pin/unpin profile.
 - Add/edit manual profile.
 - Bulk import from clipboard/text.
@@ -500,14 +522,20 @@ Pinned behavior:
 
 Check operations:
 
-- `Check selected` проверяет выбранный active profile через Xray test.
-- `Check all` сначала делает endpoint ping для всех видимых profiles, затем Xray tunnel check.
-- Endpoint ping - TCP connect к `host:port`, timeout 1500 мс.
-- Concurrency endpoint ping: 12.
-- UI показывает `ping <number> ms` на карточке.
-- Xray tunnel check выполняет `XrayCoreBridge.test()` и сохраняет status/latency в Room.
-- Итоговый message содержит количество successful ping и counts по tunnel result: available, unavailable, unsupported.
-- Проверки можно отменить.
+- `Check selected` передаёт выбранный profile в тот же batch pipeline, что и `Check all`; `Check all` bulk-загружает все profile secrets через repository batch API.
+- На весь batch создаётся один Xray runtime. Это сохраняет требование pinned core «не более одного Server» и не запускает несколько process-global Xray instances.
+- `XrayConfigBuilder` создаёт один authenticated SOCKS inbound на `127.0.0.1`, отдельный tagged outbound для каждого profile и точное routing rule `SOCKS username -> outbound tag`. Пароль batch генерируется криптографически случайно.
+- Lightweight clients параллельно проходят SOCKS5 auth, выполняют `CONNECT www.youtube.com:443`, TLS hostname verification и `HEAD /generate_204`. SOCKS reply без последующего TLS/HTTP ответа не считается успешной проверкой.
+- Timeout одного probe — до 2 секунд. Worker pool является transient, непрерывно занимает освободившиеся slots и имеет concurrency не выше 128; nominal limits составляют 64 slots в Battery Saver и 32 на Android low-RAM. Deadline floor может минимально поднять nominal limit для очень большого batch, чтобы все двухсекундные slots помещались в оставшийся 60-секундный budget. После завершения или отмены фоновых probe workers не остаётся.
+- Для примерно 500 profiles целевой end-to-end результат — около 10 секунд. Внешний защитный budget составляет 60 секунд; profile, не получивший полноценное окно до hard deadline, возвращается как `NOT_TESTED`, а не `UNAVAILABLE`.
+- Некорректный config изолируется рекурсивным делением batch: rejected profile получает `UNSUPPORTED`, а остальные продолжают проверяться, пока остаётся budget. Runtime-start, physical-network bind и общие локальные ошибки дают `NOT_TESTED`, чтобы не создавать массовый false-negative.
+- Dialer file descriptors сначала проходят `VpnService.protect`, затем best-effort `Network.bindSocket` к выбранной physical network. Selection использует active physical -> sticky current -> validated fallback -> любую `INTERNET + NOT_VPN`, поэтому delayed cellular validation и старый Wi-Fi не создают VPN loop/ложный handoff.
+- Callback каждого завершения обновляет live `Checking tunnels X/N`; count coalesce ограничивает Compose churn, не скрывая медленные завершения.
+- Во время probes прежние persisted statuses сохраняются: промежуточные `RUNNING` rows не записываются. После batch все terminal results фиксируются одной Room-транзакцией с общим timestamp.
+- Закреплённый native binding выполняет start/stop через blocking JNI без cancellable context. Поэтому цель около 10 секунд и защитный 60-секундный budget являются best-effort при аномально зависшем native-вызове; безопасно «убить» его из Kotlin нельзя без отдельного Android process или изменения libXray API.
+- Checks запрещены, пока Xray runtime принадлежит VPN, включая disconnect teardown. Отмена закрывает активные Java sockets, затем дожидается обязательного native cleanup перед новым запуском.
+- Итоговый message содержит elapsed time и counts `available`, `unavailable`, `unsupported`, `not tested`.
+- Проверки автоматически отменяются при `Activity.ON_STOP` и disposal OpenSource route.
 
 ## 22. Xray config generation
 
@@ -523,13 +551,13 @@ TUN config:
 - `destOverride`: `http`, `tls`, `quic`.
 - Outbound строится из выбранного `ProxyProfile`.
 
-SOCKS test config:
+Batch SOCKS test config:
 
-- Inbound protocol: `socks`.
-- Listen: `127.0.0.1`.
-- Dynamic port.
-- UDP enabled.
-- Outbound такой же, как в TUN config.
+- Один inbound protocol `socks` слушает динамический порт только на `127.0.0.1`.
+- Authentication: username/password; общий пароль криптографически случайный и живёт только во время batch.
+- UDP выключен: каждый probe выполняет TCP CONNECT, TLS verification и HTTP HEAD.
+- Для каждого profile создаются уникальные username, outbound tag и routing rule по authenticated user.
+- Один rejected outbound изолируется от остальных profiles вместо падения всей проверки.
 
 Supported outbound protocols:
 
@@ -620,20 +648,25 @@ OpenSourceViewModel.connect()
 `OpenSourceVpnService`:
 
 - Foreground service.
+- Lifecycle-команды сериализуются через `Mutex` и защищаются command/run id; остановка native core разблокирует connection loop до ожидания его завершения, а teardown выполняется в IO service scope.
+- Blocking native `runFromJson`/`stopXray` дополнительно проходят через один reentrant lifecycle gate. Disconnect ждёт завершения текущего native start, а отменённый start перед освобождением gate останавливает свою generation; поздно стартовавший unowned core остаться не может.
 - Проверяет выбранный profile.
 - Проверяет наличие Xray core.
 - Проверяет selected apps.
 - Создает Android VPN interface.
-- Регистрирует socket protector в Xray binding.
+- Регистрирует один стабильный socket-protector controller на binding и при reconnect заменяет только текущий delegate, чтобы native controller list не накапливал Java Proxy/старые service closures.
+- Для каждого запуска берёт DNS endpoint из `LinkProperties` выбранной physical network и вызывает Android `libXray.initDns` через тот же protected dialer controller; cleanup вызывает `resetDns`.
+- Dialer и listener используют разные delegates: outbound проходит protect + best-effort bind, listener только `protect`.
 - Передает TUN fd в Xray binding.
 - Запускает Xray из inline JSON config.
-- Мониторит `xrayCoreBridge.isRunning()` каждые 5 секунд.
+- Мониторит `xrayCoreBridge.isRunning()` и generation-scoped socket-routing failure каждые 10 секунд при screen-on и 30 секунд при screen-off; screen/network/protector event прерывает ожидание conflated signal.
 - При unexpected stop запускает reconnect loop.
+- При отсутствии usable `INTERNET + NOT_VPN` physical network suspend-ится до callback без reconnect polling.
 
 Reconnect:
 
 - Initial delay: 250 мс.
-- Max delay: 5000 мс.
+- Max delay: 30000 мс.
 - На ошибке service чистит Xray runtime и Android VPN interface.
 
 ## 25. Обновление приложения
@@ -694,7 +727,7 @@ Install:
 
 Release APK:
 
-- `appVersionName = 2.5.3`.
+- `appVersionName = 2.5.4`.
 - `versionCode = major * 1_000_000 + minor * 1_000 + patch`.
 - ABI splits включены для:
   - `arm64-v8a`.
@@ -780,7 +813,7 @@ Backup:
 
 - Public proxy configurations являются third-party. Приложение не может гарантировать безопасность public endpoints.
 - `QUERY_ALL_PACKAGES` используется для app picker и может требовать обоснования при публикации.
-- JSch host key strict checking отключен, но optional fingerprint verification реализована отдельно.
+- Configured JSch host key pin проверяется до authentication; профиль без pin остаётся совместимым, но явно помечается небезопасным.
 - Если fingerprint не задан, SSH host authenticity не закреплена.
 - Xray runtime core доверяется release repository и Android package sandbox, но это исполняемый native code.
 
@@ -791,19 +824,24 @@ Backup:
 - Xray core вынесен из APK и скачивается по ABI.
 - Release build включает R8 и resource shrinking.
 - PackageManager app list кешируется на 5 минут.
-- Public config auto-refresh выключен по умолчанию; если пользователь включает его, WorkManager запускается с constraints `network connected` и `battery not low`.
-- Нет постоянного wake lock.
-- SSH wake recovery event-driven: только screen on/off receiver во время foreground service.
-- Diagnostics публикуются в UI батчами.
+- Package icons декодируются максимум двумя параллельными `Dispatchers.IO` задачами, одинаковые запросы объединяются single-flight, результат хранится в LRU до 4 MiB.
+- Public proxy import получает существующие fingerprints batch-запросами, staging secrets делает одним durable Tink commit, а Room switch выполняет одной транзакцией.
+- Public config auto-refresh выключен по умолчанию; если пользователь включает его, WorkManager запускается раз в 12 часов с flex 4 часа и constraints `network unmetered` + `battery not low`. Worker дополнительно требует физическую `VALIDATED + NOT_VPN + NOT_METERED` сеть и открывает HTTP через `Network.openConnection`.
+- VPN runtime не держит собственный long-lived wake/wifi lock. WorkManager/Android могут использовать кратковременный управляемый wake lock на время worker.
+- SSH wake recovery event-driven: только screen on/off receiver во время foreground service, один probe после сна от 5 минут.
+- SSH/Xray local monitor замедляется при screen-off; SSH keepalive увеличивается минимум до 120 секунд.
+- TUN writer и zero-window TCP используют blocking wait; periodic session maintenance отсутствует.
+- Outbound TCP кеширует до 64 возвращённых MTU-буферов в normal и до 32 в Battery Saver/low-RAM; sender не выполняет primitive boxing. Профили используют соответственно 128/64/32 flow, но одинаковые bounded 512 KiB upload queues и TUN queue 256. Retained-pool cap не является пределом transient allocations при backlog.
+- Diagnostics и terminal output публикуются в UI батчами раз в 250 мс; terminal ring ограничен 65 536 символами и имеет отдельный revision для auto-scroll после заполнения.
 - Diagnostics persistence throttled до 15 секунд.
-- Xray/OpenSource checks имеют bounded endpoint ping concurrency.
+- Xray/OpenSource checks используют один native runtime и bounded transient pool до 128 authenticated SOCKS/TLS probes с timeout до 2 секунд. Для примерно 500 profiles pipeline целится примерно в 10 секунд при защитном 60-секундном budget, публикует live coalesced progress и сохраняет terminal results одной Room-транзакцией без `RUNNING`. Проверки не пересекаются с Xray VPN runtime.
 - ViewModel flows используют `SharingStarted.WhileSubscribed(5_000)` там, где это подходит UI.
 
 Потенциально дорогие операции:
 
-- `Check all` может запускать много TCP endpoint pings и Xray tunnel checks.
-- Xray tunnel checks выполняют реальный network probe через temporary SOCKS inbound.
-- Package icon rendering в app picker идет из PackageManager, но bitmap кешируется через Compose `remember`.
+- `Check all` может кратковременно открыть до 128 параллельных local SOCKS/TLS probes и соответствующих Xray outbound connections.
+- Xray tunnel checks выполняют реальный network probe через один temporary authenticated SOCKS inbound; после операции workers и runtime закрываются.
+- Package icon rendering в app picker идет из PackageManager, но concurrency ограничен и bitmap кешируется bounded LRU.
 - Kotlin TUN forwarder держит worker pools, пока активен SSH VPN.
 
 ## 30. Локализация
@@ -825,7 +863,9 @@ Backup:
 
 ## 31. Тестовая поверхность
 
-Unit tests:
+Точное количество тестов в документации намеренно не фиксируется: источником истины служит отчёт актуального запуска `scripts/test.sh`.
+
+Основные unit test suites:
 
 - `ProxyShareLinkParserTest` - parser VLESS/VMess/Trojan, limits, failures.
 - `XrayConfigBuilderTest` - генерация Xray JSON.
@@ -836,6 +876,12 @@ Unit tests:
 - `SshPrivateKeyValidatorTest` - private key validation.
 - `WakeRecoveryPolicyTest` - screen off/on policy.
 - `ReconnectBackoffTest` - exponential backoff.
+- `ConnectionPowerPolicyTest` - cadence, network handoff и stable-connection backoff policy.
+- `TunPacketWriterTest` - ownership/recycle pooled packets и корректная длина TUN write.
+- `CoalescedActivityTimestampTest` - ограничение частоты activity timestamp updates.
+- `TunForwarderConfigTest` - normal/low-RAM flow limits и pressure thresholds.
+- `BoundedTerminalOutputBufferTest` - ограничение terminal output по символам и chunks.
+- `ProxySourceSyncNetworkSelectionTest` - выбор физической validated non-VPN unmetered сети для background sync.
 
 Что не покрыто автоматикой:
 
@@ -848,7 +894,7 @@ Unit tests:
 ## 32. Основные известные ограничения
 
 - SSH режим полноценно проксирует TCP и DNS. Произвольный UDP не поддержан.
-- `enableUdpForwarding` в SSH config остается experimental и не означает full UDP forwarding.
+- Legacy `enableUdpForwarding` не показывается в UI и не означает full UDP forwarding.
 - OpenSource зависит от скачанного Xray runtime core. Без core подключение заблокировано.
 - Обновление уже загруженного Xray native core может требовать restart приложения.
 - Public source может отдавать stale/unsupported configs. Они импортируются с metadata и помечаются status checks.
@@ -877,9 +923,10 @@ Unit tests:
 4. Если активен SSH, он отключается.
 5. Проверяется установленный Xray core.
 6. `OpenSourceVpnService` стартует как foreground service.
-7. Android TUN interface создается через `VpnTunnelManager`.
-8. Xray binding получает socket protector, TUN fd и JSON config.
-9. `VpnConnectionRepository` публикует `CONNECTED` с `activeTransport = XRAY`.
+7. Выбирается active/sticky physical `INTERNET + NOT_VPN` network и её DNS из `LinkProperties`.
+8. Android TUN interface создается через `VpnTunnelManager` с IPv4+IPv6 routes.
+9. Xray binding получает protected dialer, listener protector, physical DNS, TUN fd и JSON config.
+10. `VpnConnectionRepository` публикует `CONNECTED` с `activeTransport = XRAY`; поздний socket-protection failure будит monitor и запускает reconnect.
 
 ### Refresh public configs
 
@@ -892,13 +939,19 @@ Unit tests:
 
 ### Check all OpenSource configs
 
-1. `OpenSourceViewModel.checkAll()` берет видимые profiles.
-2. Сбрасывает old host ping для этих ids.
-3. Параллельно пингует endpoints `host:port`.
-4. Пишет `ping <ms>` в UI state карточек.
-5. Последовательно запускает Xray tunnel checks.
-6. Сохраняет `lastTestStatus`, `lastLatencyMs`, `lastTestAt`.
-7. Показывает итоговый summary.
+1. `OpenSourceViewModel.checkAll()` берёт полный набор profile ids независимо от search/filter.
+2. Repository одним batch загружает Room rows и расшифровывает raw URIs.
+3. Один временный Xray runtime создаёт authenticated SOCKS inbound и отдельный user -> outbound route для каждого profile.
+4. Bounded worker pool параллельно выполняет SOCKS/TLS/HTTP probes до 2 секунд и публикует live completed/total.
+5. Terminal results сохраняются одной Room-транзакцией; revision fingerprint не позволяет результату старого URI обновить отредактированный profile.
+6. Normal target для ~500 profiles — около 10 секунд, safety budget — 60 секунд; непроверенный хвост остаётся `NOT_TESTED`.
+
+### Remove unavailable OpenSource tunnels
+
+1. UI считает `UNAVAILABLE && !isPinned` по полному unfiltered списку и показывает кнопку только при count > 0.
+2. После confirmation ViewModel блокирует concurrent check/sync/cleanup.
+3. Room-транзакция повторно выбирает подходящие rows, удаляет их пакетами до 900 ids и выбирает fallback, если active row удалён.
+4. Соответствующие Tink secrets очищаются best-effort; pinned и все статусы кроме `UNAVAILABLE` сохраняются.
 
 ## 34. Правила для будущих изменений
 

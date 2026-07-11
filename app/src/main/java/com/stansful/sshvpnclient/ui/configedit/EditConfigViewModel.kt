@@ -136,7 +136,8 @@ class EditConfigViewModel(
             privateKeyId = privateKeyId.orEmpty(),
             fingerprint = fingerprint.orEmpty(),
             keepAliveIntervalSec = keepAliveIntervalSec.toString(),
-            enableUdpForwarding = enableUdpForwarding,
+            // DNS UDP/53 is always handled; general UDP is not representable by SSH direct-tcpip.
+            enableUdpForwarding = false,
             note = note.orEmpty(),
             createdAt = createdAt,
         )

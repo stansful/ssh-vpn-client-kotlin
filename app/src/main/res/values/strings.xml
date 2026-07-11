@@ -26,10 +26,21 @@
     <string name="show_warning_dialog">Show warning dialog</string>
     <string name="vpn_mode">VPN mode</string>
     <string name="theme">Theme</string>
-    <string name="select_apps_count">Select apps (%1$d)</string>
     <string name="connection_diagnostics">Connection diagnostics</string>
-    <string name="diagnostics_line_count">%1$d lines</string>
+    <plurals name="diagnostics_line_count">
+        <item quantity="one">%1$d line</item>
+        <item quantity="other">%1$d lines</item>
+    </plurals>
     <string name="copy_diagnostics">Copy diagnostics</string>
     <string name="show_diagnostics">Show diagnostics</string>
     <string name="hide_diagnostics">Hide diagnostics</string>
+    <string name="open_source_remove_unavailable_button">Remove all unavailable tunnels except pinned (%1$d)</string>
+    <string name="open_source_removing_unavailable">Removing unavailable tunnels</string>
+    <string name="open_source_remove_unavailable_title">Remove unavailable tunnels?</string>
+    <plurals name="open_source_remove_unavailable_confirmation">
+        <item quantity="one">Remove %1$d unavailable tunnel? Pinned tunnels will be kept.</item>
+        <item quantity="other">Remove %1$d unavailable tunnels? Pinned tunnels will be kept.</item>
+    </plurals>
+    <string name="open_source_remove_confirm">Remove</string>
+    <string name="open_source_remove_cancel">Cancel</string>
 </resources>

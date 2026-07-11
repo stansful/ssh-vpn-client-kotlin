@@ -33,6 +33,7 @@ data class ProxyProfileSummary(
     val transport: ProxyTransport,
     val security: ProxySecurity,
     val flow: String?,
+    val fingerprint: String,
     val source: ProxyProfileSource,
     val isSelected: Boolean,
     val isPinned: Boolean,
@@ -148,4 +149,5 @@ data class ProxyTunnelTestResult(
     val status: ProxyTestStatus,
     val latencyMs: Long? = null,
     val message: String? = null,
+    val profileFingerprint: String? = null,
 )

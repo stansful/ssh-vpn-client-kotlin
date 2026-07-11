@@ -71,8 +71,8 @@ flowchart TD
 Импорт и синхронизация:
 
 - Публичный список загружается из `https://hub.mos.ru/zieng2/wl/raw/main/list_universal.txt`.
-- Автосинхронизация выключена по умолчанию. Если пользователь включает её в настройках, WorkManager запускает sync каждые 6 часов с flex-окном 1 час при наличии сети, не низком заряде батареи и принятом предупреждении.
-- Устройство специально не пробуждается, wake lock не используется.
+- Автосинхронизация выключена по умолчанию. Если пользователь включает её в настройках, WorkManager планирует sync каждые 12 часов с flex-окном 4 часа при unmetered-сети, не низком заряде батареи и принятом предупреждении. Worker дополнительно выбирает физическую сеть с `INTERNET + VALIDATED + NOT_VPN + NOT_METERED` и открывает HTTP через `Network.openConnection`; при отсутствии такой сети запуск пропускается без retry.
+- VPN runtime не держит для sync собственный long-lived wake lock; WorkManager/Android могут использовать кратковременный управляемый ими wake lock только во время фактического выполнения worker.
 - Пользователь может нажать `Refresh` вручную.
 - Пользователь может добавить один share link вручную или импортировать bulk-текст из clipboard.
 - Поддерживаются share links `vless://`, `vmess://`, `trojan://`.
@@ -86,6 +86,7 @@ flowchart TD
 - Долгое нажатие включает multi-select.
 - В multi-select можно выбрать все профили и удалить выбранные.
 - Профили можно фильтровать поиском и по протоколу.
+- `Remove all unavailable tunnels except pinned` удаляет только неприкреплённые `UNAVAILABLE` profiles после подтверждения.
 
 Подключение и проверка:
 
@@ -97,7 +98,9 @@ flowchart TD
 6. Xray-core получает TUN fd и JSON-конфиг выбранного профиля.
 7. Статус приложения становится `Connected`.
 
-Проверка профиля открывает запрос к YouTube через временный Xray SOCKS endpoint. Проверка всех профилей выполняется последовательно, без массового параллелизма, чтобы не перегревать устройство и не создавать лишнюю нагрузку на сеть.
+Для OpenSource Android VPN получает IPv4 и IPv6 address/default routes/DNS. Physical network выбирается как active, затем уже используемая current network, затем validated fallback; временно unvalidated cellular с `INTERNET + NOT_VPN` не блокируется. libXray DNS направляется через DNS выбранной physical network, а outbound fd сначала защищается от VPN loop и только затем best-effort привязывается к `Network`.
+
+`Check selected` и `Check all` загружают нужные profiles одним batch и поднимают один временный Xray runtime. Authenticated SOCKS inbound слушает только `127.0.0.1`; уникальный username каждого profile маршрутизируется в его собственный tagged outbound. Через этот runtime приложение параллельно делает реальные HTTPS probes к YouTube с timeout до 2 секунд и transient concurrency не выше 128; Battery Saver использует nominal cap 64, Android low-RAM — 32, с минимальным повышением только если очень большой batch иначе не помещается в 60 секунд. Для примерно 500 profiles целевое время normal mode составляет около 10 секунд, защитный общий budget — 60 секунд. Непроверенный до hard deadline хвост получает `NOT_TESTED`, а не `UNAVAILABLE`. UI показывает live completed/total, invalid profile изолируется и не срывает весь batch, а terminal results сохраняются одной Room-транзакцией без persistent `RUNNING`. Xray sockets привязываются к физической `NOT_VPN` сети; после проверки probe workers не остаются в фоне. Поскольку native start/stop является blocking JNI, 10/60-секундные границы остаются best-effort при аномально зависшем вызове, который Kotlin не может безопасно уничтожить.
 
 ## Режимы VPN
 
@@ -146,7 +149,9 @@ Reconnect продолжается до явного `Disconnect`.
 4. После успешной аутентификации новая JSch `Session` подставляется в существующий forwarder.
 5. Статус возвращается в `Connected`.
 
-Повторные неудачи используют backoff от 250 ms до 5 секунд. SSH reconnect использует timeout 8 секунд. Если VPN interface или TUN forwarder недоступен, приложение выполняет полный rebuild pipeline.
+Повторные неудачи используют backoff от 250 ms до 30 секунд. SSH reconnect использует timeout 8 секунд. При отсутствии usable `INTERNET + NOT_VPN` physical network loop приостанавливается до callback, а не выполняет периодические попытки. Если VPN interface или TUN forwarder недоступен, приложение выполняет полный rebuild pipeline.
+
+SSH socket и DNS до подключения привязываются к Android-сети с `INTERNET + NOT_VPN`; `VALIDATED` предпочтителен, но cellular допускается как fallback. При handoff Wi-Fi/mobile сервис обновляет underlying network и пересоздаёт внешний SSH transport, не отправляя его обратно в VPN route.
 
 Существующие TCP/TLS flow не переносятся между SSH-сессиями и должны быть переоткрыты клиентским приложением. Новые SYN во время короткой паузы временно не отклоняются, поэтому TCP stack Android может повторить их после восстановления transport.
 
@@ -154,9 +159,9 @@ Reconnect продолжается до явного `Disconnect`.
 
 SSH transport может оставаться доступным после сна устройства, пока отдельные TCP/TLS/DoT соединения приложений уже стали недействительными из-за NAT timeout или приостановки сети. Поэтому успешный `Check tunnel` сам по себе не гарантирует жизнеспособность старых app sockets.
 
-Если экран был выключен не менее 60 секунд, приложение событийно проверяет текущие TUN-сессии и сбрасывает только те, которые простаивали не менее 30 секунд. Клиенты получают TCP RST и создают новые соединения через уже работающие VPN interface и SSH session. Недавно активные фоновые соединения сохраняются.
+Если экран был выключен не менее 5 минут, приложение после двухсекундной стабилизации сети один раз проверяет SSH transport. Только при неуспешной проверке сбрасываются TUN-сессии с idle не менее 2 минут и запускается reconnect; исправный короткий сон не создаёт сетевого churn.
 
-Механизм не использует wake lock, периодические ping или новый polling и не будит устройство во время сна.
+Сам механизм wake recovery не захватывает wake lock, не запускает периодические ping или новый polling и не будит устройство во время сна.
 
 Если SSH session остаётся живой, но DNS или TUN forwarding начинают массово отказывать, приложение считает это деградацией forwarding layer. DNS сначала идёт как DNS-over-TCP через SSH к DNS-серверу из Android VPN settings. Если TCP/53 не отвечает, forwarder пробует DoH fallback к Cloudflare через SSH на порт 443. Если несколько DNS-запросов подряд не проходят даже после fallback, `SshVpnService` пересобирает Android VPN interface и Kotlin forwarder. Это закрывает сценарий, когда `Check tunnel` зелёный, но браузер и приложения не открывают сайты.
 
@@ -186,6 +191,8 @@ Diagnostics нужны для пользовательского debug без ad
 - terminal remote output.
 
 Diagnostics по умолчанию скрыты на главном экране. В Settings есть переключатель `Debug logs`. Если он включён, на главном экране появляется свёрнутый блок diagnostics с кнопкой копирования.
+
+Буфер ограничен 500 строками / 131 072 символами, длинные записи обрезаются, а адреса назначения из per-flow TUN diagnostics не сохраняются.
 
 ## Check tunnel
 
@@ -219,6 +226,7 @@ Terminal - дополнительный пользовательский инс�
 - network write выполняется на IO-потоке, не на UI thread;
 - при Disconnect shell-channel закрывается;
 - terminal output хранится только в UI state и не попадает в diagnostics.
+- output ограничен 65 536 символами, публикуется в UI батчами раз в 250 ms, а shell закрывается при collapse, уходе Activity в background или удалении экрана.
 
 Терминал не является отдельным VPN-транспортом. Он использует ту же SSH-сессию, что и VPN.
 
@@ -314,9 +322,10 @@ Metadata проверки, незавершённой загрузки и про
 - Поддержаны TCP и DNS UDP/53.
 - Произвольный non-DNS UDP не проксируется.
 - SSH-серверная часть не меняется.
+- SSH TUN использует MTU 8500/MSS 8460, bounded upload backpressure и единый TUN writer; JSch channel/socket/input windows равны 4 MiB во всех режимах. Battery Saver/low-RAM больше не уменьшают transport credit. Все изменения находятся на клиенте.
 - Для `opensource` используется официальный Xray-core Android binding, собранный из закреплённых исходников.
 - Публичные proxy-серверы не контролируются приложением. Пользователь принимает риск до входа во вкладку, риск-баннер остаётся всегда.
-- Автосинхронизация публичных конфигов выключена по умолчанию; при включении выполняется не чаще одного раза в 6 часов и только при доступной сети и не низком заряде батареи.
+- Автосинхронизация публичных конфигов выключена по умолчанию; при включении планируется раз в 12 часов с flex 4 часа при unmetered-сети и не низком заряде, затем worker требует физическую `VALIDATED + NOT_VPN + NOT_METERED` сеть и привязывает HTTP к ней через `Network.openConnection`.
 - Производительность зависит от:
   - latency до SSH-сервера;
   - latency и качества публичного proxy-сервера;
@@ -330,11 +339,17 @@ Metadata проверки, незавершённой загрузки и про
 
 - Тяжёлые компоненты Room, Tink и VPN создаются лениво, поэтому не блокируют холодный старт до фактической необходимости.
 - UI-экраны читают только metadata. Расшифровка password/private key происходит на IO-потоке только для подключения или редактирования.
-- Diagnostics не ограничены по количеству строк до следующего Connect, но обрабатываются пакетно и показываются виртуализированным списком.
+- Diagnostics bounded, публикуются пакетно раз в 250 ms и показываются виртуализированным списком.
 - Неактивные Compose-экраны прекращают сбор Flow по lifecycle.
 - Поиск приложений имеет debounce 200 ms, а результат PackageManager кэшируется на 5 минут.
+- Иконки приложений декодируются максимум двумя параллельными IO-задачами с single-flight и сохраняются в bounded LRU; bulk-import proxy профилей использует batch secret persistence, SQLite-пакеты максимум по 900 id и одну Room-транзакцию.
 - Смена режима VPN или selected apps при активном соединении объединяется в один controlled reconnect; параллельные reconnect-задачи не создаются.
-- SSH terminal и VPN connection loop выполняют блокирующий I/O вне UI-потока и отменяются вместе с владельцем lifecycle/service.
+- SSH terminal и VPN connection loop выполняют блокирующий I/O вне UI-потока и отменяются вместе с владельцем lifecycle/service; невидимый terminal shell не остаётся активным.
+- OpenSource batch check использует один Xray runtime и до 128 transient HTTPS probes по уникальным authenticated SOCKS routes. UI получает live progress, результаты фиксируются одной terminal Room-транзакцией без `RUNNING`, а после завершения фоновых probe workers нет. Цель для примерно 500 profiles — около 10 секунд при защитном 60-секундном budget; timeout отдельного probe — до 2 секунд, hard-deadline tail остаётся `NOT_TESTED`. Проверка не запускается параллельно активному Xray VPN; отмена public sync принудительно закрывает blocking HTTP connection.
+- Xray native start/stop сериализованы lifecycle gate, а socket-protector controllers регистрируются один раз и меняют только текущий delegate. Это закрывает late-start race при disconnect и не накапливает callbacks/старые service closures после reconnect.
+- Idle TUN writer и zero-window TCP ждут события без polling; outbound TCP кеширует до 64 возвращённых MTU-буферов для повторного использования и применяет primitive sender без boxing. Upload coalesce-ится в bounded 64 KiB блоки, flush обрабатывает один блок за task, а sticky window tracker снимается только отдельным актуальным reopen ACK. FIN futures отменяются при раннем close, активный half-close продлевается по фактической активности, а stale half-close закрывается после 60 секунд idle; rejected/retransmitted upload payload не копируется. Это ограничение retained cache, а не всех transient allocations под нагрузкой.
+- SSH monitor работает с интервалом 5/30 секунд, Xray — 10/30 секунд для screen-on/off. Keepalive профиля ограничен безопасным диапазоном 15–300 секунд и увеличивается минимум до 120 секунд при выключенном экране.
+- Ресурсный профиль составляет `128/64/32 flow` для normal/Battery Saver/low-RAM, но во всех режимах сохраняет `4 MiB SSH window / 512 KiB upload / TUN queue 256`. Retained packet pool равен `64/32/32`. Постоянных декоративных GPU-анимаций нет, VPN runtime не держит собственные long-lived wake/wifi locks. WorkManager может кратковременно использовать управляемый wake lock во время выполнения worker.
 - В production-коде отсутствуют `GlobalScope` и `runBlocking`.
 
 Pagination для app picker не применяется: Android `PackageManager` возвращает локальный snapshot без page API, а отображение большого списка виртуализировано.
@@ -350,7 +365,7 @@ build/app/outputs/apk/debug/app-debug.apk
 Release APK:
 
 ```text
-build/app/outputs/apk/release/app-release.apk
+build/app/outputs/apk/release/app-universal-release.apk
 ```
 
 Release APK:
@@ -375,7 +390,7 @@ Release APK:
 - Дубли публичных профилей не размножаются в списке.
 - Пользователь может выбрать, скопировать, отредактировать и удалить публичный профиль.
 - Multi-select позволяет удалить несколько публичных профилей и выбрать все.
-- Check selected/check all проверяют публичные профили через Xray без массового параллелизма.
+- Check selected/check all показывают live completed/total, используют один Xray runtime с уникальными authenticated SOCKS user-to-outbound routes и параллельными probes до 2 секунд. Batch стремится проверить около 500 profiles примерно за 10 секунд, ограничен защитным 60-секундным budget и оставляет непроверенный хвост в `NOT_TESTED`.
 - Connect в `opensource` создаёт VPN через Xray-core и выбранный публичный профиль.
 - Diagnostics копируются в clipboard.
 - Check tunnel меняет состояние кнопки.

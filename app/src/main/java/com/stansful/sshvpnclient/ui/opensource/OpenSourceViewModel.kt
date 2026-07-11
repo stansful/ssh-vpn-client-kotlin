@@ -32,27 +32,35 @@ import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectProxyVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
 import com.stansful.sshvpnclient.xray.XrayCoreInstallResult
+import com.stansful.sshvpnclient.xray.XrayRuntimeBusyException
+import com.stansful.sshvpnclient.xray.XRAY_BATCH_TOTAL_BUDGET_MS
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReferenceArray
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -61,6 +69,11 @@ data class ProxyEditorState(
     val rawUri: String = "",
 )
 
+enum class ProxyCheckPhase(val displayName: String) {
+    PING_ENDPOINTS("Pinging endpoints"),
+    TUNNELS("Checking tunnels"),
+}
+
 data class OpenSourceUiState(
     val profiles: List<ProxyProfileSummary> = emptyList(),
     val allProfileIds: Set<String> = emptySet(),
@@ -68,14 +81,20 @@ data class OpenSourceUiState(
     val pinnedOnly: Boolean = false,
     val protocolFilter: ProxyProtocol? = null,
     val selectedIds: Set<String> = emptySet(),
+    val unavailableUnpinnedCount: Int = 0,
     val isSyncing: Boolean = false,
+    val isRemovingUnavailable: Boolean = false,
     val isChecking: Boolean = false,
     val checkCompleted: Int = 0,
     val checkTotal: Int = 0,
+    val checkPhase: ProxyCheckPhase? = null,
+    val checkPhaseCompleted: Int = 0,
+    val checkPhaseTotal: Int = 0,
     val hostPingMs: Map<String, Long> = emptyMap(),
     val message: String? = null,
     val editor: ProxyEditorState? = null,
     val showBulkImport: Boolean = false,
+    val showRemoveUnavailableConfirmation: Boolean = false,
     val showNoSelectedAppsDialog: Boolean = false,
     val appSettings: AppSettings = AppSettings(),
     val vpnState: VpnConnectionState = VpnConnectionState(),
@@ -83,7 +102,20 @@ data class OpenSourceUiState(
     val updateState: OpenSourceUpdateUiState = OpenSourceUpdateUiState(),
     val xrayCoreUpdateState: XrayCoreUpdateUiState = XrayCoreUpdateUiState(),
 ) {
+    val checkProgressText: String?
+        get() {
+            val phase = checkPhase ?: return null
+            return "${phase.displayName} $checkPhaseCompleted/$checkPhaseTotal · " +
+                "overall $checkCompleted/$checkTotal"
+        }
+
     val selectionMode: Boolean get() = selectedIds.isNotEmpty()
+    val canRemoveUnavailable: Boolean
+        get() = unavailableUnpinnedCount > 0 &&
+            !isSyncing &&
+            !isChecking &&
+            !isRemovingUnavailable &&
+            !xrayConnected
     val selectedProfile: ProxyProfileSummary? get() = profiles.firstOrNull(ProxyProfileSummary::isSelected)
     val xrayConnected: Boolean
         get() = vpnState.activeTransport == VpnTransportType.XRAY &&
@@ -102,6 +134,8 @@ data class OpenSourceUiState(
     val canStartOpenSource: Boolean
         get() = selectedProfile != null &&
             xrayCoreAvailable &&
+            !isChecking &&
+            !isRemovingUnavailable &&
             vpnState.status != VpnConnectionStatus.DISCONNECTING
 }
 
@@ -121,6 +155,7 @@ data class XrayCoreUpdateUiState(
     val statusMessage: String? = null,
 )
 
+@OptIn(FlowPreview::class)
 class OpenSourceViewModel(
     private val proxyProfileRepository: ProxyProfileRepository,
     private val proxySourceSynchronizer: ProxySourceSynchronizer,
@@ -134,6 +169,15 @@ class OpenSourceViewModel(
     private val xrayCoreUpdateRepository: XrayCoreUpdateRepository,
 ) : ViewModel() {
     private val query = MutableStateFlow("")
+    private val normalizedSearchQuery = query
+        .debounce(PROFILE_SEARCH_DEBOUNCE_MS)
+        .map { value -> value.trim() }
+        .distinctUntilChanged()
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = "",
+        )
     private val pinnedOnly = MutableStateFlow(false)
     private val protocolFilter = MutableStateFlow<ProxyProtocol?>(null)
     private val selectedIds = MutableStateFlow<Set<String>>(emptySet())
@@ -141,6 +185,7 @@ class OpenSourceViewModel(
     private val dialogState = MutableStateFlow(DialogState())
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
     private val appUpdateState = MutableStateFlow(OpenSourceUpdateUiState())
+    private val xrayCoreAvailable = MutableStateFlow(false)
     private val xrayCoreUpdateState = MutableStateFlow(
         XrayCoreUpdateUiState(runtimeAbi = xrayCoreUpdateRepository.runtimeAbi),
     )
@@ -151,8 +196,9 @@ class OpenSourceViewModel(
     private var settingsReconnectStarted = false
 
     init {
-        if (appSettingsRepository.settings.value.openSourceAutoUpdateEnabled) {
-            synchronize(force = false)
+        // Loading an installed runtime may touch disk and construct a DexClassLoader.
+        viewModelScope.launch(Dispatchers.IO) {
+            xrayCoreAvailable.value = xrayCoreBridge.isAvailable
         }
         viewModelScope.launch {
             var previousSplitTunnelSettings = appSettingsRepository.settings.value.splitTunnelSettings()
@@ -194,26 +240,40 @@ class OpenSourceViewModel(
         }
     }
 
-    private val profileListState = combine(
+    private val filteredProfileListState = combine(
         proxyProfileRepository.observeSummaries(),
-        query,
+        normalizedSearchQuery,
         pinnedOnly,
         protocolFilter,
         selectedIds,
-    ) { profiles, queryValue, pinnedOnlyValue, filter, selected ->
-        val filteredProfiles = profiles.filter { profile ->
-            (filter == null || profile.protocol == filter) &&
-                (!pinnedOnlyValue || profile.isPinned) &&
-                (queryValue.isBlank() || profile.matches(queryValue))
+    ) { profiles, normalizedQuery, pinnedOnlyValue, filter, selected ->
+        val filteredProfiles = if (filter == null && !pinnedOnlyValue && normalizedQuery.isBlank()) {
+            profiles
+        } else {
+            profiles.filter { profile ->
+                (filter == null || profile.protocol == filter) &&
+                    (!pinnedOnlyValue || profile.isPinned) &&
+                    (normalizedQuery.isBlank() || profile.matchesNormalized(normalizedQuery))
+            }
+        }
+        val allProfileIds = profiles.mapTo(linkedSetOf(), ProxyProfileSummary::id)
+        val unavailableUnpinnedCount = profiles.count { profile ->
+            !profile.isPinned && profile.lastTestStatus == ProxyTestStatus.UNAVAILABLE
         }
         ProfileListState(
             profiles = filteredProfiles,
-            allProfileIds = profiles.mapTo(linkedSetOf(), ProxyProfileSummary::id),
-            query = queryValue,
+            allProfileIds = allProfileIds,
+            query = normalizedQuery,
             pinnedOnly = pinnedOnlyValue,
             protocolFilter = filter,
-            selectedIds = selected.intersect(profiles.mapTo(hashSetOf(), ProxyProfileSummary::id)),
+            selectedIds = selected.filterTo(linkedSetOf()) { id -> id in allProfileIds },
+            unavailableUnpinnedCount = unavailableUnpinnedCount,
         )
+    }.flowOn(Dispatchers.Default)
+
+    // Text input remains immediate while only the expensive list filtering is debounced.
+    private val profileListState = combine(filteredProfileListState, query) { filtered, rawQuery ->
+        filtered.copy(query = rawQuery)
     }
 
     private val auxiliaryState = combine(
@@ -221,8 +281,9 @@ class OpenSourceViewModel(
         dialogState,
         vpnConnectionRepository.state,
         showNoSelectedAppsDialog,
-    ) { operation, dialogs, vpnState, showNoSelectedApps ->
-        AuxiliaryState(operation, dialogs, vpnState, showNoSelectedApps)
+        xrayCoreAvailable,
+    ) { operation, dialogs, vpnState, showNoSelectedApps, coreAvailable ->
+        AuxiliaryState(operation, dialogs, vpnState, showNoSelectedApps, coreAvailable)
     }
 
     val uiState = combine(
@@ -241,25 +302,31 @@ class OpenSourceViewModel(
             pinnedOnly = profileState.pinnedOnly,
             protocolFilter = profileState.protocolFilter,
             selectedIds = profileState.selectedIds,
+            unavailableUnpinnedCount = profileState.unavailableUnpinnedCount,
             isSyncing = operation.isSyncing,
+            isRemovingUnavailable = operation.isRemovingUnavailable,
             isChecking = operation.isChecking,
             checkCompleted = operation.checkCompleted,
             checkTotal = operation.checkTotal,
+            checkPhase = operation.checkPhase,
+            checkPhaseCompleted = operation.checkPhaseCompleted,
+            checkPhaseTotal = operation.checkPhaseTotal,
             hostPingMs = operation.hostPingMs,
             message = operation.message,
             editor = dialogs.editor,
             showBulkImport = dialogs.showBulkImport,
+            showRemoveUnavailableConfirmation = dialogs.showRemoveUnavailableConfirmation,
             showNoSelectedAppsDialog = auxiliary.showNoSelectedAppsDialog,
             appSettings = appSettings,
             vpnState = auxiliary.vpnState,
-            xrayCoreAvailable = xrayCoreBridge.isAvailable,
+            xrayCoreAvailable = auxiliary.xrayCoreAvailable,
             updateState = updateState,
             xrayCoreUpdateState = coreUpdateState,
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = OpenSourceUiState(xrayCoreAvailable = xrayCoreBridge.isAvailable),
+        initialValue = OpenSourceUiState(),
     )
 
     fun setQuery(value: String) {
@@ -275,7 +342,7 @@ class OpenSourceViewModel(
     }
 
     fun synchronize(force: Boolean = true) {
-        if (operation.value.isSyncing) return
+        if (operation.value.isSyncing || operation.value.isRemovingUnavailable) return
         viewModelScope.launch {
             operation.update { it.copy(isSyncing = true, message = null) }
             runCatching { proxySourceSynchronizer.synchronize(force = force) }
@@ -387,6 +454,49 @@ class OpenSourceViewModel(
         }
     }
 
+    fun requestRemoveUnavailable() {
+        if (!canRemoveUnavailableNow()) return
+        dialogState.update { it.copy(showRemoveUnavailableConfirmation = true) }
+    }
+
+    fun dismissRemoveUnavailableConfirmation() {
+        dialogState.update { it.copy(showRemoveUnavailableConfirmation = false) }
+    }
+
+    fun removeUnavailableExceptPinned() {
+        if (!canRemoveUnavailableNow()) {
+            dismissRemoveUnavailableConfirmation()
+            return
+        }
+        dismissRemoveUnavailableConfirmation()
+        viewModelScope.launch {
+            operation.update {
+                it.copy(isRemovingUnavailable = true, message = null)
+            }
+            try {
+                val removed = proxyProfileRepository.deleteUnavailableExceptPinned()
+                operation.update {
+                    it.copy(message = removedUnavailableMessage(removed))
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                operation.update {
+                    it.copy(
+                        message = "Unable to remove unavailable tunnels: " +
+                            (error.message ?: "unknown error"),
+                    )
+                }
+            } finally {
+                operation.update { it.copy(isRemovingUnavailable = false) }
+            }
+        }
+    }
+
+    private fun canRemoveUnavailableNow(): Boolean {
+        return uiState.value.canRemoveUnavailable
+    }
+
     fun setPinned(id: String, pinned: Boolean) {
         viewModelScope.launch {
             proxyProfileRepository.setPinned(id, pinned)
@@ -396,6 +506,10 @@ class OpenSourceViewModel(
     suspend fun rawUri(id: String): String = proxyProfileRepository.getById(id)?.rawUri.orEmpty()
 
     fun connect() {
+        if (operation.value.isChecking || checkJob?.isCompleted == false) {
+            operation.update { it.copy(message = "Cancel configuration checks before connecting") }
+            return
+        }
         if (appSettingsRepository.settings.value.requiresSelectedAppsButHasNone()) {
             showNoSelectedAppsDialog.value = true
             return
@@ -454,13 +568,18 @@ class OpenSourceViewModel(
     }
 
     fun checkAll() {
-        runChecks(uiState.value.profiles.map(ProxyProfileSummary::id), pingEndpoints = true)
+        // A full Xray batch probe supersedes the old duplicate TCP endpoint phase and keeps
+        // hundreds of profiles within a short, bounded foreground operation. Use the complete
+        // repository-backed ID set so an active search/filter cannot silently skip profiles.
+        runChecks(uiState.value.allProfileIds.toList(), pingEndpoints = false)
     }
 
     fun cancelChecks() {
-        checkJob?.cancel()
-        checkJob = null
-        operation.update { it.copy(isChecking = false, message = "Tunnel checks cancelled") }
+        val activeCheck = checkJob?.takeIf(Job::isActive) ?: return
+        activeCheck.cancel()
+        operation.update {
+            it.copy(message = "Cancelling configuration checks")
+        }
     }
 
     fun clearMessage() {
@@ -550,7 +669,7 @@ class OpenSourceViewModel(
     fun downloadXrayCore(asset: XrayCoreAsset) {
         val state = xrayCoreUpdateState.value
         if (xrayCoreDownloadJob?.isActive == true || state.isDownloading || state.isChecking) return
-        if (vpnConnectionRepository.currentState.isXrayActive()) {
+        if (vpnConnectionRepository.currentState.ownsXrayRuntime()) {
             xrayCoreUpdateState.update {
                 it.copy(statusMessage = "Disconnect opensource VPN before updating Xray core")
             }
@@ -583,6 +702,7 @@ class OpenSourceViewModel(
                     installResult = xrayCoreBridge.installCore(input)
                 }
             }.onSuccess {
+                xrayCoreAvailable.value = xrayCoreBridge.isAvailable
                 xrayCoreUpdateState.update {
                     it.copy(
                         isDownloading = false,
@@ -677,14 +797,23 @@ class OpenSourceViewModel(
 
     private fun runChecks(profileIds: List<String>, pingEndpoints: Boolean) {
         val distinctProfileIds = profileIds.distinct()
-        if (checkJob?.isActive == true) return
+        if (checkJob?.isCompleted == false) return
+        if (vpnConnectionRepository.currentState.ownsXrayRuntime()) {
+            operation.update {
+                it.copy(message = "Disconnect opensource VPN before checking configurations")
+            }
+            return
+        }
         if (distinctProfileIds.isEmpty()) {
             operation.update { it.copy(message = "No configurations to check") }
             return
         }
-        checkJob = viewModelScope.launch {
-            var runningProfileId: String? = null
+        lateinit var launchedJob: Job
+        launchedJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
             var completedNormally = false
+            val checksStartedAtNanos = System.nanoTime()
+            val checksDeadlineNanos = checksStartedAtNanos +
+                XRAY_BATCH_TOTAL_BUDGET_MS * NANOS_IN_MILLIS
             try {
                 val summariesById = uiState.value.profiles.associateBy(ProxyProfileSummary::id)
                 val totalWorkMultiplier = if (pingEndpoints) {
@@ -693,11 +822,25 @@ class OpenSourceViewModel(
                     1
                 }
                 val totalWork = distinctProfileIds.size * totalWorkMultiplier
+                val endpointPingProfileCount = if (pingEndpoints) {
+                    distinctProfileIds.count { profileId ->
+                        summariesById[profileId]?.host?.isNumericIpLiteral() == true
+                    }
+                } else {
+                    0
+                }
                 operation.update {
                     it.copy(
                         isChecking = true,
                         checkCompleted = 0,
                         checkTotal = totalWork,
+                        checkPhase = if (pingEndpoints) {
+                            ProxyCheckPhase.PING_ENDPOINTS
+                        } else {
+                            ProxyCheckPhase.TUNNELS
+                        },
+                        checkPhaseCompleted = 0,
+                        checkPhaseTotal = distinctProfileIds.size,
                         hostPingMs = if (pingEndpoints) {
                             it.hostPingMs - distinctProfileIds.toSet()
                         } else {
@@ -706,117 +849,300 @@ class OpenSourceViewModel(
                         message = if (pingEndpoints) "Pinging endpoints" else null,
                     )
                 }
-                val pinged = if (pingEndpoints) {
+                val endpointLatencies = if (pingEndpoints) {
                     pingProfileEndpoints(distinctProfileIds, summariesById)
                 } else {
-                    0
+                    null
                 }
+                val pinged = endpointLatencies?.size ?: 0
                 if (pingEndpoints) {
-                    operation.update { it.copy(message = "Checking tunnels") }
-                }
-                var available = 0
-                var unavailable = 0
-                var unsupported = 0
-                distinctProfileIds.forEachIndexed { index, profileId ->
-                    runningProfileId = profileId
-                    proxyProfileRepository.saveTestResult(
-                        ProxyTunnelTestResult(profileId, ProxyTestStatus.RUNNING),
-                    )
-                    val summary = summariesById[profileId]
-                    val profile = if (summary?.isStale == true ||
-                        summary?.transport == ProxyTransport.UNKNOWN ||
-                        summary?.security == ProxySecurity.UNKNOWN
-                    ) {
-                        null
-                    } else {
-                        proxyProfileRepository.getById(profileId)
-                    }
-                    val result = when {
-                        summary?.isStale == true -> ProxyTunnelTestResult(
-                            profileId,
-                            ProxyTestStatus.UNAVAILABLE,
-                            message = "Stale profile",
+                    operation.update {
+                        it.copy(
+                            checkCompleted = distinctProfileIds.size,
+                            checkPhase = ProxyCheckPhase.TUNNELS,
+                            checkPhaseCompleted = 0,
+                            checkPhaseTotal = distinctProfileIds.size,
+                            message = "Checking tunnels",
                         )
-                        summary?.transport == ProxyTransport.UNKNOWN ||
-                            summary?.security == ProxySecurity.UNKNOWN -> ProxyTunnelTestResult(
-                                profileId,
-                                ProxyTestStatus.UNSUPPORTED,
-                                message = "Unsupported transport configuration",
-                            )
-                        profile == null -> ProxyTunnelTestResult(
-                            profileId,
-                            ProxyTestStatus.UNAVAILABLE,
-                            message = "Missing profile",
-                        )
-                        else -> xrayCoreBridge.test(profile)
                     }
-                    proxyProfileRepository.saveTestResult(result)
-                    runningProfileId = null
-                    when (result.status) {
-                        ProxyTestStatus.AVAILABLE -> available += 1
-                        ProxyTestStatus.UNSUPPORTED -> unsupported += 1
-                        ProxyTestStatus.UNAVAILABLE -> unavailable += 1
-                        ProxyTestStatus.RUNNING,
-                        ProxyTestStatus.NOT_TESTED,
-                        -> Unit
-                    }
-                    val completed = if (pingEndpoints) distinctProfileIds.size + index + 1 else index + 1
-                    operation.update { it.copy(checkCompleted = completed) }
                 }
+                val tunnelResults = checkProfileTunnels(
+                    profileIds = distinctProfileIds,
+                    summariesById = summariesById,
+                    overallOffset = if (pingEndpoints) distinctProfileIds.size else 0,
+                    endpointLatencies = endpointLatencies,
+                    deadlineNanos = checksDeadlineNanos,
+                )
+                val available = tunnelResults.count { it.status == ProxyTestStatus.AVAILABLE }
+                val unavailable = tunnelResults.count { it.status == ProxyTestStatus.UNAVAILABLE }
+                val unsupported = tunnelResults.count { it.status == ProxyTestStatus.UNSUPPORTED }
+                val notTested = tunnelResults.count { it.status == ProxyTestStatus.NOT_TESTED }
+                val tunnelSummary = "$available available, $unavailable unavailable, " +
+                    "$unsupported unsupported" +
+                    if (notTested > 0) ", $notTested not tested before deadline" else ""
+                val elapsedMs = (System.nanoTime() - checksStartedAtNanos) / NANOS_IN_MILLIS
                 completedNormally = true
                 operation.update {
                     it.copy(
                         isChecking = false,
+                        checkCompleted = totalWork,
+                        checkPhase = null,
+                        checkPhaseCompleted = 0,
+                        checkPhaseTotal = 0,
                         message = if (pingEndpoints) {
-                            "Ping completed: $pinged/${distinctProfileIds.size}; tunnel check completed: " +
-                                "$available available, $unavailable unavailable, $unsupported unsupported"
+                            "Endpoint ping completed: $pinged/$endpointPingProfileCount numeric-IP profiles; " +
+                                "tunnel check completed: $tunnelSummary"
                         } else {
-                            "Tunnel check completed: " +
-                                "$available available, $unavailable unavailable, $unsupported unsupported"
+                            "Tunnel check completed in ${elapsedMs}ms: $tunnelSummary"
                         },
                     )
                 }
+            } catch (error: XrayRuntimeBusyException) {
+                operation.update { state ->
+                    state.copy(
+                        message = "${error.message}; checks stopped at " +
+                            "${state.checkCompleted}/${state.checkTotal}",
+                    )
+                }
+            } catch (error: CancellationException) {
+                operation.update { state ->
+                    state.copy(
+                        message = "Configuration checks cancelled at " +
+                            "${state.checkCompleted}/${state.checkTotal}",
+                    )
+                }
+                throw error
+            } catch (error: Throwable) {
+                operation.update {
+                    it.copy(message = error.message ?: "Configuration check failed")
+                }
             } finally {
-                runningProfileId?.let { profileId ->
-                    withContext(NonCancellable) {
-                        proxyProfileRepository.saveTestResult(
-                            ProxyTunnelTestResult(profileId, ProxyTestStatus.NOT_TESTED),
+                if (!completedNormally) {
+                    operation.update {
+                        it.copy(
+                            isChecking = false,
+                            checkPhase = null,
+                            checkPhaseCompleted = 0,
+                            checkPhaseTotal = 0,
                         )
                     }
                 }
-                if (!completedNormally) {
-                    operation.update { it.copy(isChecking = false) }
+                if (checkJob === launchedJob) {
+                    checkJob = null
                 }
             }
         }
+        checkJob = launchedJob
+        launchedJob.start()
     }
 
     private suspend fun pingProfileEndpoints(
         profileIds: List<String>,
         summariesById: Map<String, ProxyProfileSummary>,
-    ): Int = coroutineScope {
-        val completed = AtomicInteger(0)
-        val successful = AtomicInteger(0)
-        val semaphore = Semaphore(HOST_PING_CONCURRENCY)
-        profileIds.map { profileId ->
-            async {
-                val summary = summariesById[profileId]
-                val latencyMs = summary?.let { profile ->
-                    semaphore.withPermit {
-                        pingEndpoint(profile.host, profile.port)
+    ): Map<String, Long> {
+        val completedPings = AtomicInteger(0)
+        val successfulLatencies = ConcurrentHashMap<String, Long>()
+        val publicationGate = CheckProgressPublicationGate(profileIds.size)
+        val pingGroups = groupEndpointPings(profileIds, summariesById)
+        try {
+            mapConcurrentOrdered(
+                values = pingGroups,
+                maxConcurrency = HOST_PING_CONCURRENCY,
+                onResult = { _, result ->
+                    val latencyMs = result.latencyMs
+                    if (latencyMs != null) {
+                        result.profileIds.forEach { profileId ->
+                            successfulLatencies[profileId] = latencyMs
+                        }
                     }
-                }
-                if (latencyMs != null) {
-                    successful.incrementAndGet()
-                    operation.update { state ->
-                        state.copy(hostPingMs = state.hostPingMs + (profileId to latencyMs))
+                    val completed = completedPings.addAndGet(result.profileIds.size)
+                    if (publicationGate.shouldPublish(completed)) {
+                        publishCheckProgress(
+                            phase = ProxyCheckPhase.PING_ENDPOINTS,
+                            phaseCompleted = completed,
+                            phaseTotal = profileIds.size,
+                            overallOffset = 0,
+                            hostPingUpdates = if (latencyMs == null) {
+                                emptyMap()
+                            } else {
+                                result.profileIds.associateWith { latencyMs }
+                            },
+                        )
                     }
+                },
+            ) { group ->
+                val latencyMs = group.target?.takeIf { target ->
+                    target.host.isNumericIpLiteral()
+                }?.let { target ->
+                    pingEndpoint(target.host, target.port)
                 }
-                val completedCount = completed.incrementAndGet()
-                operation.update { it.copy(checkCompleted = completedCount) }
+                EndpointPingResult(group.profileIds, latencyMs)
             }
-        }.awaitAll()
-        successful.get()
+        } finally {
+            publishCheckProgress(
+                phase = ProxyCheckPhase.PING_ENDPOINTS,
+                phaseCompleted = completedPings.get(),
+                phaseTotal = profileIds.size,
+                overallOffset = 0,
+                hostPingUpdates = successfulLatencies,
+            )
+        }
+        val orderedSuccessfulLatencies = buildMap<String, Long> {
+            profileIds.forEach { profileId ->
+                successfulLatencies[profileId]?.let { latencyMs ->
+                    put(profileId, latencyMs)
+                }
+            }
+        }
+        operation.update { state ->
+            if (!state.isChecking || state.checkPhase != ProxyCheckPhase.PING_ENDPOINTS) {
+                state
+            } else {
+                state.copy(
+                    hostPingMs = state.hostPingMs + orderedSuccessfulLatencies,
+                    checkCompleted = profileIds.size,
+                    checkPhaseCompleted = profileIds.size,
+                )
+            }
+        }
+        return orderedSuccessfulLatencies
+    }
+
+    private suspend fun checkProfileTunnels(
+        profileIds: List<String>,
+        summariesById: Map<String, ProxyProfileSummary>,
+        overallOffset: Int,
+        endpointLatencies: Map<String, Long>?,
+        deadlineNanos: Long,
+    ): List<ProxyTunnelTestResult> {
+        val completedTunnels = AtomicInteger(0)
+        val publicationGate = CheckProgressPublicationGate(profileIds.size)
+        val endpointUnavailableIds = if (endpointLatencies == null) {
+            emptySet()
+        } else {
+            profileIds.filterTo(hashSetOf()) { profileId ->
+                profileId !in endpointLatencies &&
+                    summariesById[profileId]?.let { summary ->
+                        summary.transport.tcpPingCanRejectTunnel() &&
+                            summary.host.isNumericIpLiteral()
+                    } == true
+            }
+        }
+        val prioritizedProfileIds = prioritizeTunnelChecks(
+            profileIds = profileIds,
+            endpointLatencies = endpointLatencies,
+            endpointUnavailableIds = endpointUnavailableIds,
+        )
+        fun publishCompleted(count: Int) {
+            if (publicationGate.shouldPublish(count)) {
+                publishCheckProgress(
+                    phase = ProxyCheckPhase.TUNNELS,
+                    phaseCompleted = count,
+                    phaseTotal = profileIds.size,
+                    overallOffset = overallOffset,
+                )
+            }
+        }
+
+        val immediateResults = ArrayList<ProxyTunnelTestResult>()
+        val candidateIds = ArrayList<String>()
+        prioritizedProfileIds.forEach { profileId ->
+            val summary = summariesById[profileId]
+            val result = when {
+                summary?.transport == ProxyTransport.UNKNOWN ||
+                    summary?.security == ProxySecurity.UNKNOWN -> ProxyTunnelTestResult(
+                    profileId,
+                    ProxyTestStatus.UNSUPPORTED,
+                    message = "Unsupported transport configuration",
+                    profileFingerprint = summary.fingerprint,
+                )
+                profileId in endpointUnavailableIds -> ProxyTunnelTestResult(
+                    profileId,
+                    ProxyTestStatus.UNAVAILABLE,
+                    message = "Endpoint did not respond within ${HOST_PING_TIMEOUT_MS} ms",
+                    profileFingerprint = summary?.fingerprint,
+                )
+                else -> null
+            }
+            if (result == null) candidateIds += profileId else immediateResults += result
+        }
+
+        if (immediateResults.isNotEmpty()) {
+            withContext(NonCancellable) {
+                proxyProfileRepository.saveTestResults(immediateResults)
+            }
+            publishCompleted(completedTunnels.addAndGet(immediateResults.size))
+        }
+
+        val profilesById = proxyProfileRepository.getByIds(candidateIds).associateBy { it.id }
+        val missingResults = candidateIds.mapNotNull { profileId ->
+            if (profileId in profilesById) {
+                null
+            } else {
+                ProxyTunnelTestResult(
+                    profileId,
+                    ProxyTestStatus.NOT_TESTED,
+                    message = "Profile disappeared before its tunnel check",
+                )
+            }
+        }
+        if (missingResults.isNotEmpty()) {
+            // There is no row to update, and a same-ID row inserted concurrently is a new revision.
+            immediateResults += missingResults
+            publishCompleted(completedTunnels.addAndGet(missingResults.size))
+        }
+        val profilesToTest = candidateIds.mapNotNull(profilesById::get)
+        if (profilesToTest.isEmpty()) return immediateResults
+
+        return try {
+            val batchResults = xrayCoreBridge.testBatch(
+                profiles = profilesToTest,
+                deadlineNanos = deadlineNanos,
+                onResult = { publishCompleted(completedTunnels.incrementAndGet()) },
+            ).map { result ->
+                result.copy(
+                    profileFingerprint = profilesById[result.profileId]?.fingerprint,
+                )
+            }
+            // Keep previous per-profile statuses intact during the transient batch. One atomic
+            // terminal transaction avoids persistent RUNNING rows after process death/cancellation.
+            withContext(NonCancellable) { proxyProfileRepository.saveTestResults(batchResults) }
+            immediateResults + batchResults
+        } finally {
+            publishCheckProgress(
+                phase = ProxyCheckPhase.TUNNELS,
+                phaseCompleted = completedTunnels.get(),
+                phaseTotal = profileIds.size,
+                overallOffset = overallOffset,
+            )
+        }
+    }
+
+    private fun publishCheckProgress(
+        phase: ProxyCheckPhase,
+        phaseCompleted: Int,
+        phaseTotal: Int,
+        overallOffset: Int,
+        hostPingUpdates: Map<String, Long> = emptyMap(),
+    ) {
+        operation.update { state ->
+            if (!state.isChecking || state.checkPhase != phase) {
+                state
+            } else {
+                val boundedPhaseCompleted = phaseCompleted.coerceIn(0, phaseTotal)
+                state.copy(
+                    checkCompleted = maxOf(
+                        state.checkCompleted,
+                        overallOffset + boundedPhaseCompleted,
+                    ).coerceAtMost(state.checkTotal),
+                    checkPhaseCompleted = maxOf(
+                        state.checkPhaseCompleted,
+                        boundedPhaseCompleted,
+                    ),
+                    hostPingMs = state.hostPingMs + hostPingUpdates,
+                )
+            }
+        }
     }
 
     private suspend fun pingEndpoint(host: String, port: Int): Long? = withContext(Dispatchers.IO) {
@@ -830,11 +1156,137 @@ class OpenSourceViewModel(
     }
 }
 
+private data class EndpointPingTarget(
+    val host: String,
+    val port: Int,
+)
+
+private data class EndpointPingGroup(
+    val target: EndpointPingTarget?,
+    val profileIds: List<String>,
+)
+
+private data class EndpointPingResult(
+    val profileIds: List<String>,
+    val latencyMs: Long?,
+)
+
+private fun groupEndpointPings(
+    profileIds: List<String>,
+    summariesById: Map<String, ProxyProfileSummary>,
+): List<EndpointPingGroup> {
+    val profileIdsByTarget = linkedMapOf<EndpointPingTarget?, MutableList<String>>()
+    profileIds.forEach { profileId ->
+        val target = summariesById[profileId]?.let { summary ->
+            EndpointPingTarget(summary.host.trim().lowercase(Locale.ROOT), summary.port)
+        }
+        profileIdsByTarget.getOrPut(target, ::mutableListOf) += profileId
+    }
+    return profileIdsByTarget.map { (target, groupedProfileIds) ->
+        EndpointPingGroup(target, groupedProfileIds)
+    }
+}
+
+/** Runs a continuous bounded worker pool and preserves input order in the returned list. */
+internal suspend fun <T, R> mapConcurrentOrdered(
+    values: List<T>,
+    maxConcurrency: Int,
+    onResult: suspend (index: Int, result: R) -> Unit = { _, _ -> },
+    transform: suspend (T) -> R,
+): List<R> {
+    require(maxConcurrency > 0) { "Concurrency must be positive" }
+    if (values.isEmpty()) return emptyList()
+
+    val nextIndex = AtomicInteger(0)
+    val results = AtomicReferenceArray<ConcurrentMapResult<R>?>(values.size)
+    coroutineScope {
+        List(minOf(maxConcurrency, values.size)) {
+            launch {
+                while (true) {
+                    val index = nextIndex.getAndIncrement()
+                    if (index >= values.size) break
+                    val result = transform(values[index])
+                    results.set(index, ConcurrentMapResult(result))
+                    onResult(index, result)
+                }
+            }
+        }.joinAll()
+    }
+    return List(values.size) { index ->
+        checkNotNull(results.get(index)) { "Missing concurrent result at index $index" }.value
+    }
+}
+
+private data class ConcurrentMapResult<R>(val value: R)
+
+internal fun prioritizeTunnelChecks(
+    profileIds: List<String>,
+    endpointLatencies: Map<String, Long>?,
+    endpointUnavailableIds: Set<String>,
+): List<String> {
+    if (endpointLatencies == null) return profileIds
+    return profileIds.sortedWith(
+        compareBy<String> { profileId -> profileId !in endpointUnavailableIds }
+            .thenBy { profileId -> endpointLatencies[profileId] ?: Long.MAX_VALUE },
+    )
+}
+
+internal fun ProxyTransport.tcpPingCanRejectTunnel(): Boolean {
+    return this != ProxyTransport.MKCP && this != ProxyTransport.HYSTERIA
+}
+
+internal fun String.isNumericIpLiteral(): Boolean {
+    val candidate = trim().removePrefix("[").removeSuffix("]").substringBefore('%')
+    if (candidate.contains(':')) {
+        return candidate.isNotEmpty() && candidate.all { character ->
+            character == ':' || character == '.' || character.isDigit() ||
+                character in 'a'..'f' || character in 'A'..'F'
+        }
+    }
+    val octets = candidate.split('.')
+    return octets.size == 4 && octets.all { octet ->
+        val value = octet.toIntOrNull()
+        octet.isNotEmpty() && octet.length <= 3 && value != null && value in 0..255
+    }
+}
+
+internal class CheckProgressPublicationGate(
+    private val total: Int,
+    private val nanoTime: () -> Long = System::nanoTime,
+) {
+    private val stride = checkProgressPublishStride(total)
+    private var lastPublishedCompleted = 0
+    private var lastPublishedAtNanos = nanoTime()
+
+    @Synchronized
+    fun shouldPublish(completed: Int): Boolean {
+        if (completed <= lastPublishedCompleted || completed <= 0 || total <= 0) return false
+        val now = nanoTime()
+        val countDue = completed - lastPublishedCompleted >= stride
+        val timeDue = now - lastPublishedAtNanos >= PROGRESS_MAX_SILENCE_NANOS
+        if (completed < total && !countDue && !timeDue) return false
+        lastPublishedCompleted = completed.coerceAtMost(total)
+        lastPublishedAtNanos = now
+        return true
+    }
+}
+
+internal fun checkProgressPublishStride(total: Int): Int {
+    if (total <= 0) return 1
+    return (total / MAX_PROGRESS_PUBLICATIONS_PER_PHASE +
+        if (total % MAX_PROGRESS_PUBLICATIONS_PER_PHASE == 0) 0 else 1)
+        .coerceAtLeast(1)
+}
+
 private data class OperationState(
     val isSyncing: Boolean = false,
+    val isRemovingUnavailable: Boolean = false,
     val isChecking: Boolean = false,
     val checkCompleted: Int = 0,
     val checkTotal: Int = 0,
+    val checkPhase: ProxyCheckPhase? = null,
+    val checkPhaseCompleted: Int = 0,
+    val checkPhaseTotal: Int = 0,
     val hostPingMs: Map<String, Long> = emptyMap(),
     val message: String? = null,
 )
@@ -842,6 +1294,7 @@ private data class OperationState(
 private data class DialogState(
     val editor: ProxyEditorState? = null,
     val showBulkImport: Boolean = false,
+    val showRemoveUnavailableConfirmation: Boolean = false,
 )
 
 private data class ProfileListState(
@@ -851,6 +1304,7 @@ private data class ProfileListState(
     val pinnedOnly: Boolean,
     val protocolFilter: ProxyProtocol?,
     val selectedIds: Set<String>,
+    val unavailableUnpinnedCount: Int,
 )
 
 private data class AuxiliaryState(
@@ -858,12 +1312,23 @@ private data class AuxiliaryState(
     val dialogs: DialogState,
     val vpnState: VpnConnectionState,
     val showNoSelectedAppsDialog: Boolean,
+    val xrayCoreAvailable: Boolean,
 )
 
-private fun ProxyProfileSummary.matches(query: String): Boolean {
-    return listOf(name, host, protocol.name, transport.name, security.name)
-        .any { value -> value.contains(query, ignoreCase = true) }
+internal fun removedUnavailableMessage(removed: Int): String {
+    return when (removed) {
+        0 -> "No unavailable tunnels to remove"
+        1 -> "Removed 1 unavailable tunnel"
+        else -> "Removed $removed unavailable tunnels"
+    }
 }
+
+private fun ProxyProfileSummary.matchesNormalized(query: String): Boolean =
+    name.contains(query, ignoreCase = true) ||
+        host.contains(query, ignoreCase = true) ||
+        protocol.name.contains(query, ignoreCase = true) ||
+        transport.name.contains(query, ignoreCase = true) ||
+        security.name.contains(query, ignoreCase = true)
 
 private fun AppSettings.requiresSelectedAppsButHasNone(): Boolean {
     return vpnMode == VpnMode.SELECTED_APPS && selectedAppPackages.isEmpty()
@@ -889,13 +1354,21 @@ private fun VpnConnectionState.isXrayActive(): Boolean {
         )
 }
 
+private fun VpnConnectionState.ownsXrayRuntime(): Boolean {
+    return activeTransport == VpnTransportType.XRAY
+}
+
 private data class SplitTunnelSettings(
     val vpnMode: VpnMode,
     val selectedAppPackages: Set<String>,
 )
 
 private const val SETTINGS_CHANGE_DEBOUNCE_MS = 250L
+private const val PROFILE_SEARCH_DEBOUNCE_MS = 200L
 private const val HOST_PING_TIMEOUT_MS = 1_500
 private const val HOST_PING_CONCURRENCY = 12
+// A live 10 Hz-ish counter is visually continuous while avoiding hundreds of Compose updates.
+private const val MAX_PROGRESS_PUBLICATIONS_PER_PHASE = 100
+private const val PROGRESS_MAX_SILENCE_NANOS = 100_000_000L
 private const val NANOS_IN_MILLIS = 1_000_000L
 private const val TRANSPORT_SWITCH_TIMEOUT_MS = 2_000L

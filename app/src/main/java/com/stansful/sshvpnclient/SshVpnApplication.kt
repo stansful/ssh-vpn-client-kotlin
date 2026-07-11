@@ -11,14 +11,16 @@ class SshVpnApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
-        if (
-            container.appSettingsRepository.settings.value.openSourceConsentVersion >=
-            OpenSourcePolicy.CONSENT_VERSION &&
-            container.appSettingsRepository.settings.value.openSourceAutoUpdateEnabled
-        ) {
-            ProxySourceSyncWorker.schedule(this)
-        } else {
-            ProxySourceSyncWorker.cancel(this)
+        val settings = container.appSettingsRepository.settings.value
+        when {
+            settings.openSourceAutoUpdateEnabled &&
+                settings.openSourceConsentVersion >= OpenSourcePolicy.CONSENT_VERSION -> {
+                ProxySourceSyncWorker.schedule(this)
+            }
+            settings.openSourceAutoUpdateEnabled -> {
+                // Consent was revoked or its version changed; remove the previously scheduled work.
+                ProxySourceSyncWorker.cancel(this)
+            }
         }
     }
 }

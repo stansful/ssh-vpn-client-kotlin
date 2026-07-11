@@ -5,4 +5,6 @@ object SecretIds {
     fun privateKey(keyId: String) = "private-key-$keyId"
     fun privateKeyPassphrase(keyId: String) = "private-key-passphrase-$keyId"
     fun proxyProfile(profileId: String) = "proxy-profile-$profileId"
+    fun proxyProfileRevision(profileId: String, revisionId: String) =
+        "proxy-profile-$profileId-$revisionId"
 }

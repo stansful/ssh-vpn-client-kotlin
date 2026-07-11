@@ -10,6 +10,11 @@ import kotlinx.coroutines.flow.Flow
 interface ProxyProfileRepository {
     fun observeSummaries(): Flow<List<ProxyProfileSummary>>
     suspend fun getById(id: String): ProxyProfile?
+
+    suspend fun getByIds(ids: List<String>): List<ProxyProfile> {
+        return ids.mapNotNull { id -> getById(id) }
+    }
+
     suspend fun getSelected(): ProxyProfile?
     suspend fun import(
         text: String,
@@ -20,5 +25,10 @@ interface ProxyProfileRepository {
     suspend fun select(id: String)
     suspend fun setPinned(id: String, pinned: Boolean)
     suspend fun delete(ids: Set<String>)
+    suspend fun deleteUnavailableExceptPinned(): Int
     suspend fun saveTestResult(result: ProxyTunnelTestResult)
+
+    suspend fun saveTestResults(results: List<ProxyTunnelTestResult>) {
+        results.forEach { result -> saveTestResult(result) }
+    }
 }

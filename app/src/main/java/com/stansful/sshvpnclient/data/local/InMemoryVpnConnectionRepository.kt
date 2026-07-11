@@ -9,6 +9,7 @@ import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
+import java.util.ArrayDeque
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,7 +34,11 @@ class InMemoryVpnConnectionRepository(
         Context.MODE_PRIVATE,
     )
     private val stateLock = Any()
-    private val diagnosticsBuffer = ArrayList<String>()
+    private val diagnosticsBuffer = BoundedDiagnosticsBuffer(
+        maxEntries = MAX_DIAGNOSTIC_ENTRIES,
+        maxCharacters = MAX_DIAGNOSTIC_CHARACTERS,
+        maxEntryCharacters = MAX_DIAGNOSTIC_ENTRY_CHARACTERS,
+    )
     private val mutableState = MutableStateFlow(VpnConnectionState())
     private val persistenceRequests = Channel<PersistenceRequest>(Channel.CONFLATED)
     private var diagnosticsTouched = false
@@ -122,10 +127,11 @@ class InMemoryVpnConnectionRepository(
     }
 
     override fun appendDiagnostic(message: String) {
-        val line = "${LocalTime.now().format(TIME_FORMAT)} $message"
+        val safeMessage = redactPersistentDestinationMetadata(message)
+        val line = "${LocalTime.now().format(TIME_FORMAT)} $safeMessage"
         synchronized(stateLock) {
             diagnosticsTouched = true
-            diagnosticsBuffer.add(line)
+            diagnosticsBuffer.addLast(line)
             if (diagnosticsPublishJob?.isActive != true) {
                 diagnosticsPublishJob = applicationScope.launch {
                     delay(DIAGNOSTICS_UI_BATCH_MS)
@@ -155,7 +161,7 @@ class InMemoryVpnConnectionRepository(
     }
 
     private fun publishDiagnosticsLocked(): List<String> {
-        val snapshot = diagnosticsBuffer.toList()
+        val snapshot = diagnosticsBuffer.snapshot()
         if (mutableState.value.diagnostics != snapshot) {
             mutableState.value = mutableState.value.copy(diagnostics = snapshot)
         }
@@ -170,7 +176,7 @@ class InMemoryVpnConnectionRepository(
         synchronized(stateLock) {
             if (diagnosticsTouched) return
             diagnosticsBuffer.addAll(diagnostics)
-            mutableState.value = mutableState.value.copy(diagnostics = diagnostics)
+            mutableState.value = mutableState.value.copy(diagnostics = diagnosticsBuffer.snapshot())
         }
     }
 
@@ -199,12 +205,18 @@ class InMemoryVpnConnectionRepository(
     private fun parseDiagnostics(raw: String): List<String> {
         return runCatching {
             val array = JSONArray(raw)
-            buildList(array.length()) {
-                for (index in 0 until array.length()) {
-                    val line = array.optString(index)
-                    if (line.isNotBlank()) add(line)
+            val bounded = BoundedDiagnosticsBuffer(
+                maxEntries = MAX_DIAGNOSTIC_ENTRIES,
+                maxCharacters = MAX_DIAGNOSTIC_CHARACTERS,
+                maxEntryCharacters = MAX_DIAGNOSTIC_ENTRY_CHARACTERS,
+            )
+            for (index in 0 until array.length()) {
+                val line = array.optString(index)
+                if (line.isNotBlank()) {
+                    bounded.addLast(redactPersistentDestinationMetadata(line))
                 }
             }
+            bounded.snapshot()
         }.getOrElse { emptyList() }
     }
 
@@ -216,8 +228,69 @@ class InMemoryVpnConnectionRepository(
     private companion object {
         const val PREFERENCES_NAME = "ssh-vpn-connection-state"
         const val KEY_DIAGNOSTICS = "diagnostics"
-        const val DIAGNOSTICS_UI_BATCH_MS = 100L
+        const val DIAGNOSTICS_UI_BATCH_MS = 250L
         const val DIAGNOSTICS_PERSIST_INTERVAL_MS = 15_000L
+        const val MAX_DIAGNOSTIC_ENTRIES = 500
+        const val MAX_DIAGNOSTIC_CHARACTERS = 128 * 1_024
+        const val MAX_DIAGNOSTIC_ENTRY_CHARACTERS = 2 * 1_024
         val TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
     }
 }
+
+internal class BoundedDiagnosticsBuffer(
+    private val maxEntries: Int,
+    private val maxCharacters: Int,
+    private val maxEntryCharacters: Int,
+) {
+    private val entries = ArrayDeque<String>(maxEntries)
+    private var characterCount = 0
+
+    init {
+        require(maxEntries > 0)
+        require(maxCharacters > 0)
+        require(maxEntryCharacters in 1..maxCharacters)
+    }
+
+    fun addLast(value: String) {
+        val boundedValue = if (value.length <= maxEntryCharacters) {
+            value
+        } else {
+            value.take(maxEntryCharacters - 1) + "…"
+        }
+        while (
+            entries.isNotEmpty() &&
+            (entries.size >= maxEntries || characterCount + boundedValue.length > maxCharacters)
+        ) {
+            characterCount -= entries.removeFirst().length
+        }
+        entries.addLast(boundedValue)
+        characterCount += boundedValue.length
+    }
+
+    fun addAll(values: Iterable<String>) {
+        values.forEach(::addLast)
+    }
+
+    fun clear() {
+        entries.clear()
+        characterCount = 0
+    }
+
+    fun snapshot(): List<String> = entries.toList()
+}
+
+internal fun redactPersistentDestinationMetadata(message: String): String {
+    val containsTunTcpMetadata = message.startsWith(TUN_TCP_DIAGNOSTIC_PREFIX) ||
+        message.contains(" $TUN_TCP_DIAGNOSTIC_PREFIX")
+    return if (containsTunTcpMetadata) {
+        message.replace(IPV4_ENDPOINT_PATTERN, REDACTED_DESTINATION)
+    } else {
+        message
+    }
+}
+
+private const val TUN_TCP_DIAGNOSTIC_PREFIX = "TUN TCP"
+private const val REDACTED_DESTINATION = "<destination>"
+private val IPV4_ENDPOINT_PATTERN = Regex(
+    pattern = "(?<![0-9.])(?:[0-9]{1,3}\\.){3}[0-9]{1,3}:[0-9]{1,5}(?![0-9])",
+)

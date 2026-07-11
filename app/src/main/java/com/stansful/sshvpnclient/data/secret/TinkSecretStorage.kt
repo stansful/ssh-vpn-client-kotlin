@@ -2,6 +2,7 @@
 
 package com.stansful.sshvpnclient.data.secret
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.core.content.edit
@@ -52,6 +53,15 @@ class TinkSecretStorage(
         }
     }
 
+    override suspend fun saveSecrets(values: Map<String, String>) {
+        if (values.isEmpty()) return
+        withContext(ioDispatcher) {
+            ensureLegacyMigrationAttempted()
+            saveEncrypted(values)
+            values.keys.forEach(::deleteLegacySecret)
+        }
+    }
+
     override suspend fun getSecret(id: String): String? {
         return withContext(ioDispatcher) {
             ensureLegacyMigrationAttempted()
@@ -67,6 +77,41 @@ class TinkSecretStorage(
         }
     }
 
+    override suspend fun getSecrets(ids: Collection<String>): Map<String, String> {
+        if (ids.isEmpty()) return emptyMap()
+        return withContext(ioDispatcher) {
+            ensureLegacyMigrationAttempted()
+            val uniqueIds = ids.distinct()
+            val secrets = LinkedHashMap<String, String>(uniqueIds.size)
+            uniqueIds.forEach { id ->
+                val encryptedValue = preferences.getString(id, null) ?: return@forEach
+                decrypt(id, encryptedValue)?.let { value -> secrets[id] = value }
+            }
+
+            if (!migrationPreferences.getBoolean(KEY_LEGACY_MIGRATION_COMPLETE, false)) {
+                val missingIds = uniqueIds.filterNot(secrets::containsKey)
+                val legacyPreferences = missingIds
+                    .takeIf { it.isNotEmpty() }
+                    ?.let { runCatching { createLegacyPreferences(appContext) }.getOrNull() }
+                val legacySecrets = legacyPreferences?.let { legacy ->
+                    buildMap {
+                        missingIds.forEach { id ->
+                            legacy.getString(id, null)?.let { value -> put(id, value) }
+                        }
+                    }
+                }.orEmpty()
+                if (legacySecrets.isNotEmpty()) {
+                    saveEncrypted(legacySecrets)
+                    legacyPreferences?.edit {
+                        legacySecrets.keys.forEach { id -> remove(id) }
+                    }
+                    secrets.putAll(legacySecrets)
+                }
+            }
+            secrets
+        }
+    }
+
     override suspend fun deleteSecret(id: String) {
         withContext(ioDispatcher) {
             ensureLegacyMigrationAttempted()
@@ -77,6 +122,18 @@ class TinkSecretStorage(
         }
     }
 
+    override suspend fun deleteSecrets(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        withContext(ioDispatcher) {
+            ensureLegacyMigrationAttempted()
+            preferences.edit {
+                ids.forEach { id -> remove(id) }
+            }
+            ids.forEach(::deleteLegacySecret)
+        }
+    }
+
+    @SuppressLint("UseKtx") // The boolean commit result is required before writing the completion marker.
     private fun ensureLegacyMigrationAttempted() {
         if (migrationPreferences.getBoolean(KEY_LEGACY_MIGRATION_COMPLETE, false)) return
 
@@ -95,16 +152,18 @@ class TinkSecretStorage(
                 }
 
             val migratedCount = runCatching {
-                var count = 0
-                legacyPreferences.all.forEach { (id, value) ->
-                    if (id.isLegacyInternalKey() || value !is String) return@forEach
-                    saveEncrypted(id, value)
-                    legacyPreferences.edit {
-                        remove(id)
+                val legacySecrets = buildMap {
+                    legacyPreferences.all.forEach { (id, value) ->
+                        if (!id.isLegacyInternalKey() && value is String) {
+                            put(id, value)
+                        }
                     }
-                    count += 1
                 }
-                count
+                saveEncrypted(legacySecrets)
+                val legacyEditor = legacyPreferences.edit()
+                legacySecrets.keys.forEach { id -> legacyEditor.remove(id) }
+                check(legacyEditor.commit()) { "Could not remove migrated legacy secrets" }
+                legacySecrets.size
             }.getOrElse { error ->
                 markLegacyMigrationFailed(error)
                 return
@@ -114,9 +173,26 @@ class TinkSecretStorage(
     }
 
     private fun saveEncrypted(id: String, value: String) {
-        val ciphertext = aead.encrypt(value.toByteArray(StandardCharsets.UTF_8), associatedData(id))
-        preferences.edit {
-            putString(id, Base64.getEncoder().encodeToString(ciphertext))
+        saveEncrypted(mapOf(id to value))
+    }
+
+    private fun saveEncrypted(values: Map<String, String>) {
+        if (values.isEmpty()) return
+        val editor = preferences.edit()
+        values.forEach { (id, value) ->
+            editor.putString(id, encrypt(id, value))
+        }
+        val committed = editor.commit()
+        check(committed) { "Could not persist encrypted secret data" }
+    }
+
+    private fun encrypt(id: String, value: String): String {
+        val plaintext = value.toByteArray(StandardCharsets.UTF_8)
+        return try {
+            val ciphertext = aead.encrypt(plaintext, associatedData(id))
+            Base64.getEncoder().encodeToString(ciphertext)
+        } finally {
+            plaintext.fill(0)
         }
     }
 
@@ -124,7 +200,11 @@ class TinkSecretStorage(
         return runCatching {
             val ciphertext = Base64.getDecoder().decode(encryptedValue)
             val plaintext = aead.decrypt(ciphertext, associatedData(id))
-            String(plaintext, StandardCharsets.UTF_8)
+            try {
+                String(plaintext, StandardCharsets.UTF_8)
+            } finally {
+                plaintext.fill(0)
+            }
         }.getOrNull()
     }
 
@@ -155,11 +235,12 @@ class TinkSecretStorage(
     }
 
     private fun markLegacyMigrationComplete(migratedCount: Int) {
-        migrationPreferences.edit {
-            putBoolean(KEY_LEGACY_MIGRATION_COMPLETE, true)
-            putInt(KEY_LEGACY_MIGRATION_COUNT, migratedCount)
-            remove(KEY_LEGACY_MIGRATION_ERROR)
-        }
+        val committed = migrationPreferences.edit()
+            .putBoolean(KEY_LEGACY_MIGRATION_COMPLETE, true)
+            .putInt(KEY_LEGACY_MIGRATION_COUNT, migratedCount)
+            .remove(KEY_LEGACY_MIGRATION_ERROR)
+            .commit()
+        check(committed) { "Could not persist secret migration state" }
     }
 
     private fun markLegacyMigrationFailed(error: Throwable) {

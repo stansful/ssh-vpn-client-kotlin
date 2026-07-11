@@ -23,6 +23,7 @@ import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
 import com.stansful.sshvpnclient.vpn.SshTerminalSession
+import java.util.ArrayDeque
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -104,6 +105,7 @@ data class TerminalUiState(
     val isOpen: Boolean = false,
     val isConnecting: Boolean = false,
     val output: String = "",
+    val outputRevision: Long = 0L,
     val input: String = "",
     val errorMessage: String? = null,
 )
@@ -131,6 +133,10 @@ class MainViewModel(
     private val tunnelCheckResult = MutableStateFlow(TunnelCheckResult.IDLE)
     private val terminalState = MutableStateFlow(TerminalUiState())
     private val appUpdateState = MutableStateFlow(AppUpdateUiState())
+    private val terminalLock = Any()
+    private val terminalOutputBuffer = BoundedTerminalOutputBuffer(MAX_TERMINAL_OUTPUT_CHARACTERS)
+    private var terminalGeneration = 0L
+    private var terminalOutputPublishJob: Job? = null
     @Volatile
     private var terminalSession: SshTerminalSession? = null
     private var settingsReconnectJob: Job? = null
@@ -196,7 +202,7 @@ class MainViewModel(
                 ) {
                     tunnelCheckResult.value = TunnelCheckResult.IDLE
                     isTunnelCheckRunning.value = false
-                    closeTerminalSession(resetState = true)
+                    closeTerminal()
                 }
             }
         }
@@ -250,7 +256,7 @@ class MainViewModel(
     }
 
     fun disconnect() {
-        closeTerminalSession(resetState = true)
+        closeTerminal()
         disconnectVpnUseCase()
     }
 
@@ -288,7 +294,7 @@ class MainViewModel(
     fun setShowTerminalOnMain(show: Boolean) {
         appSettingsRepository.setShowTerminalOnMain(show)
         if (!show) {
-            closeTerminalSession(resetState = true)
+            closeTerminal()
         }
     }
 
@@ -305,46 +311,67 @@ class MainViewModel(
         if (!uiState.value.isConnected || terminalSession?.isActive == true) return
         if (terminalState.value.isConnecting) return
 
-        terminalState.update {
-            it.copy(
-                isOpen = true,
-                isConnecting = true,
-                errorMessage = null,
-            )
-        }
+        val generation = beginTerminalGeneration()
+        terminalState.value = TerminalUiState(
+            isOpen = true,
+            isConnecting = true,
+        )
 
         viewModelScope.launch {
             runCatching {
                 sshConnectionManager.openTerminal(
                     log = vpnConnectionRepository::appendDiagnostic,
-                    onOutput = ::appendTerminalOutput,
-                    onClosed = ::handleTerminalClosed,
+                    onOutput = { output -> appendTerminalOutput(generation, output) },
+                    onClosed = { reason -> handleTerminalClosed(generation, reason) },
                 )
             }.onSuccess { session ->
-                if (session.isActive) {
-                    terminalSession = session
+                val accepted = synchronized(terminalLock) {
+                    if (terminalGeneration == generation && session.isActive) {
+                        terminalSession = session
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (accepted) {
                     terminalState.update {
-                        it.copy(
-                            isOpen = true,
-                            isConnecting = false,
-                            errorMessage = null,
-                        )
+                        if (isTerminalGenerationCurrent(generation)) {
+                            it.copy(
+                                isOpen = true,
+                                isConnecting = false,
+                                errorMessage = null,
+                            )
+                        } else {
+                            it
+                        }
                     }
                 } else {
                     session.close()
                 }
             }.onFailure { error ->
+                if (!isTerminalGenerationCurrent(generation)) return@onFailure
                 val message = error.message ?: "Terminal connection failed"
                 vpnConnectionRepository.appendDiagnostic("SSH terminal unavailable: $message")
                 terminalState.update {
-                    it.copy(
-                        isOpen = false,
-                        isConnecting = false,
-                        errorMessage = message,
-                    )
+                    if (isTerminalGenerationCurrent(generation)) {
+                        it.copy(
+                            isOpen = false,
+                            isConnecting = false,
+                            errorMessage = message,
+                        )
+                    } else {
+                        it
+                    }
                 }
             }
         }
+    }
+
+    /** Closes the optional interactive shell without affecting the VPN transport. */
+    fun closeTerminal() {
+        val session = invalidateTerminalGeneration()
+        terminalState.value = TerminalUiState()
+        closeTerminalSessionAsync(session)
     }
 
     fun setTerminalInput(input: String) {
@@ -355,7 +382,9 @@ class MainViewModel(
         val command = terminalState.value.input
         if (command.isBlank()) return
 
-        val session = terminalSession
+        val (session, generation) = synchronized(terminalLock) {
+            terminalSession to terminalGeneration
+        }
         if (session == null || !session.isActive) {
             terminalState.update { it.copy(errorMessage = "Terminal is not connected") }
             return
@@ -366,7 +395,7 @@ class MainViewModel(
             runCatching {
                 session.sendLine(command)
             }.onFailure { error ->
-                handleTerminalWriteFailed(error)
+                handleTerminalWriteFailed(generation, error)
             }
         }
     }
@@ -440,8 +469,8 @@ class MainViewModel(
     }
 
     override fun onCleared() {
-        terminalSession?.close()
-        terminalSession = null
+        val session = invalidateTerminalGeneration()
+        runCatching { session?.close() }
     }
 
     private fun applyVpnSettingsChange(settings: AppSettings) {
@@ -507,59 +536,107 @@ class MainViewModel(
             status == VpnConnectionStatus.CONNECTED
     }
 
-    private fun appendTerminalOutput(output: String) {
-        terminalState.update { state ->
-            state.copy(
-                isOpen = true,
-                isConnecting = false,
-                output = (state.output + output).takeLast(MAX_TERMINAL_OUTPUT_CHARS),
-                errorMessage = null,
-            )
+    private fun beginTerminalGeneration(): Long = synchronized(terminalLock) {
+        terminalGeneration += 1
+        terminalOutputPublishJob?.cancel()
+        terminalOutputPublishJob = null
+        terminalOutputBuffer.clear()
+        terminalGeneration
+    }
+
+    private fun appendTerminalOutput(generation: Long, output: String) {
+        if (output.isEmpty()) return
+        synchronized(terminalLock) {
+            if (terminalGeneration != generation) return
+            terminalOutputBuffer.append(output)
+            if (terminalOutputPublishJob?.isActive == true) return
+            terminalOutputPublishJob = viewModelScope.launch {
+                delay(TERMINAL_OUTPUT_UI_BATCH_MS)
+                publishTerminalOutput(generation)
+            }
         }
     }
 
-    private fun handleTerminalClosed(reason: String) {
-        terminalSession = null
+    private fun publishTerminalOutput(generation: Long) {
+        val output = synchronized(terminalLock) {
+            if (terminalGeneration != generation) return
+            terminalOutputPublishJob = null
+            terminalOutputBuffer.snapshot()
+        }
         terminalState.update {
-            it.copy(
-                isOpen = false,
-                isConnecting = false,
-                input = "",
-                errorMessage = reason,
-            )
+            if (isTerminalGenerationCurrent(generation)) {
+                it.copy(
+                    isOpen = true,
+                    isConnecting = false,
+                    output = output,
+                    outputRevision = it.outputRevision + 1L,
+                    errorMessage = null,
+                )
+            } else {
+                it
+            }
+        }
+    }
+
+    private fun handleTerminalClosed(generation: Long, reason: String) {
+        val closedState = synchronized(terminalLock) {
+            if (terminalGeneration != generation) return
+            terminalOutputPublishJob?.cancel()
+            terminalOutputPublishJob = null
+            terminalSession = null
+            val finalOutput = terminalOutputBuffer.snapshot()
+            terminalOutputBuffer.clear()
+            terminalGeneration += 1
+            ClosedTerminalState(terminalGeneration, finalOutput)
+        }
+        terminalState.update {
+            if (isTerminalGenerationCurrent(closedState.generation)) {
+                it.copy(
+                    isOpen = false,
+                    isConnecting = false,
+                    output = closedState.output,
+                    outputRevision = it.outputRevision + 1L,
+                    input = "",
+                    errorMessage = reason,
+                )
+            } else {
+                it
+            }
         }
         vpnConnectionRepository.appendDiagnostic("SSH terminal closed: $reason")
     }
 
-    private fun handleTerminalWriteFailed(error: Throwable) {
+    private fun handleTerminalWriteFailed(generation: Long, error: Throwable) {
+        if (!isTerminalGenerationCurrent(generation)) return
         val message = error.message ?: "Terminal command failed"
-        terminalState.update { it.copy(errorMessage = message) }
+        terminalState.update {
+            if (isTerminalGenerationCurrent(generation)) it.copy(errorMessage = message) else it
+        }
         vpnConnectionRepository.appendDiagnostic("SSH terminal write failed: $message")
     }
 
-    private fun closeTerminalSession(resetState: Boolean) {
+    private fun invalidateTerminalGeneration(): SshTerminalSession? = synchronized(terminalLock) {
+        terminalGeneration += 1
+        terminalOutputPublishJob?.cancel()
+        terminalOutputPublishJob = null
+        terminalOutputBuffer.clear()
         val session = terminalSession
         terminalSession = null
-        terminalState.update { state ->
-            if (resetState) {
-                TerminalUiState()
-            } else {
-                state.copy(
-                    isOpen = false,
-                    isConnecting = false,
-                    input = "",
-                    errorMessage = null,
-                )
-            }
-        }
+        session
+    }
+
+    private fun isTerminalGenerationCurrent(generation: Long): Boolean = synchronized(terminalLock) {
+        terminalGeneration == generation
+    }
+
+    private fun closeTerminalSessionAsync(session: SshTerminalSession?) {
         if (session == null) return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                session.close()
-            }.onFailure { error ->
-                val message = error.message ?: error::class.java.simpleName
-                vpnConnectionRepository.appendDiagnostic("SSH terminal close failed: $message")
-            }
+            runCatching { session.close() }
+                .onFailure { error ->
+                    val message = error.message ?: error::class.java.simpleName
+                    vpnConnectionRepository.appendDiagnostic("SSH terminal close failed: $message")
+                }
         }
     }
 
@@ -567,7 +644,76 @@ class MainViewModel(
         const val AUTOMATIC_UPDATE_CHECK_DELAY_MS = 1_500L
         const val SETTINGS_CHANGE_DEBOUNCE_MS = 250L
         const val SETTINGS_RECONNECT_DELAY_MS = 450L
-        const val MAX_TERMINAL_OUTPUT_CHARS = 120_000
+        const val TERMINAL_OUTPUT_UI_BATCH_MS = 250L
+        const val MAX_TERMINAL_OUTPUT_CHARACTERS = 64 * 1_024
+    }
+}
+
+private data class ClosedTerminalState(
+    val generation: Long,
+    val output: String,
+)
+
+internal class BoundedTerminalOutputBuffer(
+    private val maxCharacters: Int,
+) {
+    private val chunks = ArrayDeque<StringBuilder>()
+    private var characterCount = 0
+
+    init {
+        require(maxCharacters > 0)
+    }
+
+    fun append(value: String) {
+        if (value.isEmpty()) return
+        if (value.length >= maxCharacters) {
+            clear()
+            val tail = value.takeLast(maxCharacters)
+            appendChunked(tail)
+            characterCount = tail.length
+            return
+        }
+
+        appendChunked(value)
+        characterCount += value.length
+        var charactersToRemove = (characterCount - maxCharacters).coerceAtLeast(0)
+        while (charactersToRemove > 0) {
+            val first = chunks.removeFirst()
+            if (first.length <= charactersToRemove) {
+                charactersToRemove -= first.length
+                characterCount -= first.length
+            } else {
+                first.delete(0, charactersToRemove)
+                chunks.addFirst(first)
+                characterCount -= charactersToRemove
+                charactersToRemove = 0
+            }
+        }
+    }
+
+    fun snapshot(): String = buildString(characterCount) {
+        chunks.forEach { chunk -> append(chunk) }
+    }
+
+    fun clear() {
+        chunks.clear()
+        characterCount = 0
+    }
+
+    private fun appendChunked(value: String) {
+        var offset = 0
+        while (offset < value.length) {
+            val chunk = chunks.lastOrNull()
+                ?.takeIf { it.length < MAX_CHUNK_CHARACTERS }
+                ?: StringBuilder(MAX_CHUNK_CHARACTERS).also(chunks::addLast)
+            val copyLength = minOf(MAX_CHUNK_CHARACTERS - chunk.length, value.length - offset)
+            chunk.append(value, offset, offset + copyLength)
+            offset += copyLength
+        }
+    }
+
+    private companion object {
+        const val MAX_CHUNK_CHARACTERS = 4 * 1_024
     }
 }
 

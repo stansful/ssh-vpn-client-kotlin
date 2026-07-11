@@ -44,6 +44,7 @@ import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUse
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
 import com.stansful.sshvpnclient.vpn.Tun2SocksManager
 import com.stansful.sshvpnclient.vpn.VpnTunnelManager
+import com.stansful.sshvpnclient.vpn.VpnRuntimeLeaseRegistry
 import com.stansful.sshvpnclient.xray.XrayConfigBuilder
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
 import kotlinx.coroutines.CoroutineScope
@@ -123,6 +124,7 @@ class AppContainer(
     }
 
     val sshConnectionManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { SshConnectionManager() }
+    val vpnRuntimeLeaseRegistry by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { VpnRuntimeLeaseRegistry() }
     val vpnTunnelManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { VpnTunnelManager() }
     val tun2SocksManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { Tun2SocksManager() }
     val xrayConfigBuilder by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {

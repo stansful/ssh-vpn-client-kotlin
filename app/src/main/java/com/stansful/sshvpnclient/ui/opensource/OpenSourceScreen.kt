@@ -85,6 +85,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -100,12 +101,15 @@ import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.stansful.sshvpnclient.AppContainer
@@ -140,6 +144,14 @@ fun OpenSourceRoute(
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     var pendingUpdateInstallUri by remember { mutableStateOf<String?>(null) }
+
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        viewModel.cancelChecks()
+    }
+    DisposableEffect(viewModel) {
+        onDispose { viewModel.cancelChecks() }
+    }
+
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -266,6 +278,7 @@ private fun OpenSourceScreen(
                 onCheckSelected = viewModel::checkSelected,
                 onCheckAll = viewModel::checkAll,
                 onCancelChecks = viewModel::cancelChecks,
+                onRemoveUnavailable = viewModel::requestRemoveUnavailable,
                 onConnect = if (state.xrayConnected) viewModel::disconnect else onConnect,
             )
             AnimatedVisibility(visible = searchVisible || state.query.isNotBlank() || state.pinnedOnly) {
@@ -410,6 +423,31 @@ private fun OpenSourceScreen(
             },
             dismissButton = {
                 TextButton(onClick = { pendingDeleteIds = emptySet() }) { Text("Cancel") }
+            },
+        )
+    }
+    if (state.showRemoveUnavailableConfirmation) {
+        AlertDialog(
+            onDismissRequest = viewModel::dismissRemoveUnavailableConfirmation,
+            title = { Text(stringResource(R.string.open_source_remove_unavailable_title)) },
+            text = {
+                Text(
+                    pluralStringResource(
+                        R.plurals.open_source_remove_unavailable_confirmation,
+                        state.unavailableUnpinnedCount,
+                        state.unavailableUnpinnedCount,
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::removeUnavailableExceptPinned) {
+                    Text(stringResource(R.string.open_source_remove_confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissRemoveUnavailableConfirmation) {
+                    Text(stringResource(R.string.open_source_remove_cancel))
+                }
             },
         )
     }
@@ -565,9 +603,7 @@ private fun DiagnosticsLogPanel(diagnostics: List<String>) {
         shape = RoundedCornerShape(8.dp),
     ) {
         Column(
-            modifier = Modifier
-                .padding(14.dp)
-                .animateContentSize(),
+            modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
@@ -581,7 +617,11 @@ private fun DiagnosticsLogPanel(diagnostics: List<String>) {
                         style = MaterialTheme.typography.labelLarge,
                     )
                     Text(
-                        text = stringResource(R.string.diagnostics_line_count, diagnostics.size),
+                        text = pluralStringResource(
+                            R.plurals.diagnostics_line_count,
+                            diagnostics.size,
+                            diagnostics.size,
+                        ),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1217,6 +1257,7 @@ private fun OpenSourceActions(
     onCheckSelected: () -> Unit,
     onCheckAll: () -> Unit,
     onCancelChecks: () -> Unit,
+    onRemoveUnavailable: () -> Unit,
     onConnect: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1264,7 +1305,7 @@ private fun OpenSourceActions(
             }
             FilledTonalButton(
                 onClick = onRefresh,
-                enabled = !state.isSyncing,
+                enabled = !state.isSyncing && !state.isRemovingUnavailable,
                 modifier = Modifier.weight(1f),
                 contentPadding = ButtonDefaults.ContentPadding,
                 shape = RoundedCornerShape(8.dp),
@@ -1295,7 +1336,9 @@ private fun OpenSourceActions(
             )
             FilledTonalButton(
                 onClick = if (state.isChecking) onCancelChecks else onCheckAll,
-                enabled = (state.profiles.isNotEmpty() || state.isChecking) && state.xrayCoreAvailable,
+                enabled = (state.profiles.isNotEmpty() || state.isChecking) &&
+                    state.xrayCoreAvailable &&
+                    !state.isRemovingUnavailable,
                 modifier = Modifier.weight(1f),
                 contentPadding = ButtonDefaults.ContentPadding,
                 shape = RoundedCornerShape(8.dp),
@@ -1311,12 +1354,51 @@ private fun OpenSourceActions(
                 )
             }
         }
+        AnimatedVisibility(
+            visible = state.unavailableUnpinnedCount > 0 || state.isRemovingUnavailable,
+        ) {
+            FilledTonalButton(
+                onClick = onRemoveUnavailable,
+                enabled = state.canRemoveUnavailable,
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = ButtonDefaults.ContentPadding,
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                if (state.isRemovingUnavailable) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(Icons.Default.Delete, contentDescription = null)
+                }
+                Text(
+                    text = if (state.isRemovingUnavailable) {
+                        stringResource(R.string.open_source_removing_unavailable)
+                    } else {
+                        stringResource(
+                            R.string.open_source_remove_unavailable_button,
+                            state.unavailableUnpinnedCount,
+                        )
+                    },
+                    modifier = Modifier.padding(start = 6.dp),
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+        }
         if (state.isChecking && state.checkTotal > 0) {
             LinearProgressIndicator(
                 progress = { state.checkCompleted.toFloat() / state.checkTotal.toFloat() },
                 modifier = Modifier.fillMaxWidth(),
             )
-            Text("${state.checkCompleted}/${state.checkTotal}", style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = state.checkProgressText ?: "${state.checkCompleted}/${state.checkTotal}",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
         if (!state.xrayCoreAvailable) {
             Text(
@@ -1366,7 +1448,10 @@ private fun CheckSelectedButton(
 
     FilledTonalButton(
         onClick = onCheckSelected,
-        enabled = state.selectedProfile != null && !state.isChecking && state.xrayCoreAvailable,
+        enabled = state.selectedProfile != null &&
+            !state.isChecking &&
+            !state.isRemovingUnavailable &&
+            state.xrayCoreAvailable,
         interactionSource = interactionSource,
         colors = ButtonDefaults.filledTonalButtonColors(
             containerColor = containerColor,

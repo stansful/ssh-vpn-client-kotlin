@@ -35,7 +35,6 @@ import com.stansful.sshvpnclient.ui.common.FormField
 import com.stansful.sshvpnclient.ui.common.PrimaryActionButton
 import com.stansful.sshvpnclient.ui.common.SecretFormField
 import com.stansful.sshvpnclient.ui.common.SecondaryActionButton
-import com.stansful.sshvpnclient.ui.common.SwitchRow
 import com.stansful.sshvpnclient.ui.common.VerticalGap
 
 @Composable
@@ -139,9 +138,16 @@ private fun EditConfigScreen(
             FormField(
                 value = state.form.fingerprint,
                 onValueChange = { value -> onFormChange { it.copy(fingerprint = value) } },
-                label = "Fingerprint",
+                label = "Host fingerprint (strongly recommended)",
                 placeholder = "e.g. SHA256:atzfmdcrqQzoXZfKHLarePDyMw/G5NYfJ3h1eHUVS9g",
             )
+            if (state.form.fingerprint.isBlank()) {
+                Text(
+                    text = "Without a trusted fingerprint the server identity cannot be verified before authentication.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             FormField(
                 value = state.form.keepAliveIntervalSec,
                 onValueChange = { value -> onFormChange { it.copy(keepAliveIntervalSec = value) } },
@@ -149,14 +155,6 @@ private fun EditConfigScreen(
                 placeholder = "30",
                 error = state.errors["keepAliveIntervalSec"],
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            )
-            SwitchRow(
-                title = "UDP forwarding",
-                subtitle = "Experimental flag for future forwarding support",
-                checked = state.form.enableUdpForwarding,
-                onCheckedChange = { checked ->
-                    onFormChange { it.copy(enableUdpForwarding = checked) }
-                },
             )
             FormField(
                 value = state.form.note,

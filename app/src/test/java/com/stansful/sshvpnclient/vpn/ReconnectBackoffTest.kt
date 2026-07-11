@@ -6,12 +6,24 @@ import org.junit.Test
 class ReconnectBackoffTest {
     @Test
     fun `failure delays grow exponentially and stop at maximum`() {
-        val backoff = ReconnectBackoff(initialDelayMs = 250L, maxDelayMs = 5_000L)
+        val backoff = ReconnectBackoff(initialDelayMs = 250L, maxDelayMs = 30_000L)
 
-        val delays = List(9) { backoff.nextFailureDelayMs() }
+        val delays = List(11) { backoff.nextFailureDelayMs() }
 
         assertEquals(
-            listOf(250L, 500L, 1_000L, 2_000L, 4_000L, 5_000L, 5_000L, 5_000L, 5_000L),
+            listOf(
+                250L,
+                500L,
+                1_000L,
+                2_000L,
+                4_000L,
+                8_000L,
+                16_000L,
+                30_000L,
+                30_000L,
+                30_000L,
+                30_000L,
+            ),
             delays,
         )
     }
