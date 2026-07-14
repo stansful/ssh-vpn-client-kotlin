@@ -526,7 +526,7 @@ Check operations:
 - На весь batch создаётся один Xray runtime. Это сохраняет требование pinned core «не более одного Server» и не запускает несколько process-global Xray instances.
 - `XrayConfigBuilder` создаёт один authenticated SOCKS inbound на `127.0.0.1`, отдельный tagged outbound для каждого profile и точное routing rule `SOCKS username -> outbound tag`. Пароль batch генерируется криптографически случайно.
 - Lightweight clients параллельно проходят SOCKS5 auth, выполняют `CONNECT www.youtube.com:443`, TLS hostname verification и `HEAD /generate_204`. SOCKS reply без последующего TLS/HTTP ответа не считается успешной проверкой.
-- Timeout одного probe — до 2 секунд. Worker pool является transient, непрерывно занимает освободившиеся slots и имеет concurrency не выше 128; nominal limits составляют 64 slots в Battery Saver и 32 на Android low-RAM. Deadline floor может минимально поднять nominal limit для очень большого batch, чтобы все двухсекундные slots помещались в оставшийся 60-секундный budget. После завершения или отмены фоновых probe workers не остаётся.
+- Timeout одного probe — до 5 секунд. Worker pool является transient, непрерывно занимает освободившиеся slots и имеет concurrency не выше 128; nominal limits составляют 64 slots в Battery Saver и 32 на Android low-RAM. Deadline floor может минимально поднять nominal limit для очень большого batch, чтобы все пятисекундные slots помещались в оставшийся 60-секундный budget. После завершения или отмены фоновых probe workers не остаётся.
 - Для примерно 500 profiles целевой end-to-end результат — около 10 секунд. Внешний защитный budget составляет 60 секунд; profile, не получивший полноценное окно до hard deadline, возвращается как `NOT_TESTED`, а не `UNAVAILABLE`.
 - Некорректный config изолируется рекурсивным делением batch: rejected profile получает `UNSUPPORTED`, а остальные продолжают проверяться, пока остаётся budget. Runtime-start, physical-network bind и общие локальные ошибки дают `NOT_TESTED`, чтобы не создавать массовый false-negative.
 - Dialer file descriptors сначала проходят `VpnService.protect`, затем best-effort `Network.bindSocket` к выбранной physical network. Selection использует active physical -> sticky current -> validated fallback -> любую `INTERNET + NOT_VPN`, поэтому delayed cellular validation и старый Wi-Fi не создают VPN loop/ложный handoff.
@@ -834,7 +834,7 @@ Backup:
 - Outbound TCP кеширует до 64 возвращённых MTU-буферов в normal и до 32 в Battery Saver/low-RAM; sender не выполняет primitive boxing. Профили используют соответственно 128/64/32 flow, но одинаковые bounded 512 KiB upload queues и TUN queue 256. Retained-pool cap не является пределом transient allocations при backlog.
 - Diagnostics и terminal output публикуются в UI батчами раз в 250 мс; terminal ring ограничен 65 536 символами и имеет отдельный revision для auto-scroll после заполнения.
 - Diagnostics persistence throttled до 15 секунд.
-- Xray/OpenSource checks используют один native runtime и bounded transient pool до 128 authenticated SOCKS/TLS probes с timeout до 2 секунд. Для примерно 500 profiles pipeline целится примерно в 10 секунд при защитном 60-секундном budget, публикует live coalesced progress и сохраняет terminal results одной Room-транзакцией без `RUNNING`. Проверки не пересекаются с Xray VPN runtime.
+- Xray/OpenSource checks используют один native runtime и bounded transient pool до 128 authenticated SOCKS/TLS probes с timeout до 5 секунд. Для примерно 500 profiles pipeline целится примерно в 10 секунд при защитном 60-секундном budget, публикует live coalesced progress и сохраняет terminal results одной Room-транзакцией без `RUNNING`. Проверки не пересекаются с Xray VPN runtime.
 - ViewModel flows используют `SharingStarted.WhileSubscribed(5_000)` там, где это подходит UI.
 
 Потенциально дорогие операции:
@@ -942,7 +942,7 @@ Backup:
 1. `OpenSourceViewModel.checkAll()` берёт полный набор profile ids независимо от search/filter.
 2. Repository одним batch загружает Room rows и расшифровывает raw URIs.
 3. Один временный Xray runtime создаёт authenticated SOCKS inbound и отдельный user -> outbound route для каждого profile.
-4. Bounded worker pool параллельно выполняет SOCKS/TLS/HTTP probes до 2 секунд и публикует live completed/total.
+4. Bounded worker pool параллельно выполняет SOCKS/TLS/HTTP probes до 5 секунд и публикует live completed/total.
 5. Terminal results сохраняются одной Room-транзакцией; revision fingerprint не позволяет результату старого URI обновить отредактированный profile.
 6. Normal target для ~500 profiles — около 10 секунд, safety budget — 60 секунд; непроверенный хвост остаётся `NOT_TESTED`.
 

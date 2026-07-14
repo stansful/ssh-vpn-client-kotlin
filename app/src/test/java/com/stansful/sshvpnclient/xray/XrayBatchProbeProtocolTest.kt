@@ -111,18 +111,18 @@ class XrayBatchProbeProtocolTest {
     }
 
     @Test
-    fun `deadline requires a complete two second probe window`() {
-        assertFalse(hasFullProbeBudget(deadlineNanos = 1_999_999_999L, nowNanos = 0L))
-        assertTrue(hasFullProbeBudget(deadlineNanos = 2_000_000_000L, nowNanos = 0L))
-        assertTrue(hasFullProbeBudget(deadlineNanos = 12_000_000_000L, nowNanos = 10_000_000_000L))
+    fun `deadline requires a complete five second probe window`() {
+        assertFalse(hasFullProbeBudget(deadlineNanos = 4_999_999_999L, nowNanos = 0L))
+        assertTrue(hasFullProbeBudget(deadlineNanos = 5_000_000_000L, nowNanos = 0L))
+        assertTrue(hasFullProbeBudget(deadlineNanos = 15_000_000_000L, nowNanos = 10_000_000_000L))
         assertFalse(hasFullProbeBudget(deadlineNanos = 9L, nowNanos = 10L))
     }
 
     @Test
-    fun `500 profiles are scheduled in four bounded waves`() {
+    fun `five second probes use the bounded worker pool`() {
         assertEquals(1, batchProbeConcurrency(1))
-        assertEquals(125, batchProbeConcurrency(500))
-        assertEquals(125, batchProbeConcurrency(500, remainingMs = 8_000L))
+        assertEquals(128, batchProbeConcurrency(500))
+        assertEquals(128, batchProbeConcurrency(500, remainingMs = 8_000L))
         assertEquals(128, batchProbeConcurrency(500, remainingMs = 6_000L))
         assertEquals(128, batchProbeConcurrency(1_000, remainingMs = 8_000L))
         assertEquals(10_000L, XRAY_BATCH_TARGET_BUDGET_MS)
@@ -158,12 +158,12 @@ class XrayBatchProbeProtocolTest {
                 isPowerSaveMode = true,
             ),
         )
-        assertEquals(35, minimumBatchProbeConcurrencyForDeadline(1_000, 58_000L))
+        assertEquals(91, minimumBatchProbeConcurrencyForDeadline(1_000, 58_000L))
         assertEquals(
-            35,
+            91,
             deviceAwareBatchProbeConcurrency(
                 requested = 128,
-                minimumForDeadline = 35,
+                minimumForDeadline = 91,
                 isLowRamDevice = true,
                 isPowerSaveMode = false,
             ),

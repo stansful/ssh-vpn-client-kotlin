@@ -176,7 +176,7 @@ Wake recovery основан на системных `SCREEN_OFF/SCREEN_ON` со
 - Иконки PackageManager декодируются максимум двумя параллельными задачами с single-flight и хранятся в LRU до 4 MiB; cache очищается при уходе с app picker. Большие proxy imports используют batch Tink, SQLite `IN`-пакеты максимум по 900 id и одну Room-транзакцию.
 - Поиск public profiles дебаунсится и фильтруется на `Dispatchers.Default`. `Check all` одним batch загружает профили и поднимает один временный Xray runtime с authenticated SOCKS inbound только на `127.0.0.1`. Каждому профилю назначаются уникальные SOCKS username и outbound route, поэтому параллельные probes не смешивают конфигурации.
 - OpenSource action `Remove all unavailable tunnels except pinned` атомарно удаляет только `UNAVAILABLE && !isPinned`, очищает соответствующие encrypted secrets и сохраняет selected fallback; count берётся из полного списка независимо от UI-фильтра.
-- Network probes выполняются только во время foreground-проверки с transient concurrency до 128 и timeout до 2 секунд на профиль. Battery Saver использует nominal cap 64, Android low-RAM — 32; для очень большого списка cap минимально повышается лишь настолько, чтобы уложить все двухсекундные slots в 60 секунд. Для примерно 500 профилей целевое время в normal mode составляет около 10 секунд; защитный общий budget равен 60 секундам. Хвост, который не получил полноценную проверку до hard deadline, получает `NOT_TESTED`, а не ложный `UNAVAILABLE`. Blocking JNI start/stop нельзя безопасно прервать из Kotlin, поэтому target/budget остаются best-effort на аномально зависшем native-вызове.
+- Network probes выполняются только во время foreground-проверки с transient concurrency до 128 и timeout до 5 секунд на профиль. Battery Saver использует nominal cap 64, Android low-RAM — 32; для очень большого списка cap минимально повышается лишь настолько, чтобы уложить все пятисекундные slots в 60 секунд. Для примерно 500 профилей целевое время в normal mode составляет около 10 секунд; защитный общий budget равен 60 секундам. Хвост, который не получил полноценную проверку до hard deadline, получает `NOT_TESTED`, а не ложный `UNAVAILABLE`. Blocking JNI start/stop нельзя безопасно прервать из Kotlin, поэтому target/budget остаются best-effort на аномально зависшем native-вызове.
 - Xray dialer sockets привязываются к выбранной физической `NOT_VPN` сети. Некорректная конфигурация изолируется от остальных profiles, а bind/runtime failure не превращается в массовый false-negative. UI показывает live completed/total, после чего все terminal results сохраняются одной Room-транзакцией без промежуточных persistent `RUNNING`; после завершения не остаются фоновые probe workers.
 - Xray native start/stop сериализованы reentrant lifecycle gate, поэтому disconnect не оставляет поздно стартовавший unowned core. Dialer/listener socket-protector controllers регистрируются один раз на binding; reconnect меняет только `AtomicReference` delegate и не накапливает callbacks/старые service closures.
 - Отмена public sync немедленно disconnect-ит blocking `HttpURLConnection`, не оставляя сетевой worker ждать read timeout.
@@ -418,11 +418,11 @@ Diagnostics не должны содержать приватные ключи, 
 
 ## Последняя проверенная сборка
 
-На 2026-07-11:
+На 2026-07-15:
 
 - `./scripts/test.sh`: success, 144 tests, 0 failures/errors.
 - `./scripts/lint.sh`: success.
 - `./scripts/build-release.sh`: success, R8/resource shrinking и release lint vital пройдены.
 - `apksigner verify --verbose build/app/outputs/apk/release/*.apk`: все 5 APK используют APK Signature Scheme v2, 1 signer.
-- Universal APK: `build/app/outputs/apk/release/app-universal-release.apk`, 4 201 561 байт.
-- SHA-256 universal APK: `9a8de3a18ee462480dcfba9695c126ffd413f4a9980a8314529db919b0d9f713`.
+- Universal APK: `build/app/outputs/apk/release/app-universal-release.apk`, 4 201 557 байт.
+- SHA-256 universal APK: `2dbd401fcfb575c5c8d704d062356b15ddabfc627cf2c0cba6afdf9c0099e1ff`.

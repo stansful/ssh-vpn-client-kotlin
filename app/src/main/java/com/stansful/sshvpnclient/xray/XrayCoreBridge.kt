@@ -661,12 +661,12 @@ class XrayCoreBridge(
     companion object {
         const val CORE_UNAVAILABLE_MESSAGE =
             "Xray runtime core is not installed. Download it from opensource settings."
-        private const val TEST_TIMEOUT_SECONDS = 2
+        private const val TEST_TIMEOUT_SECONDS = 5
         private const val TEST_URL = "https://www.youtube.com/generate_204"
     }
 }
 
-internal const val MAX_TUNNEL_TEST_LATENCY_MS = 2_000L
+internal const val MAX_TUNNEL_TEST_LATENCY_MS = 5_000L
 internal const val XRAY_RUNTIME_BUSY_MESSAGE =
     "Xray runtime is busy with an active VPN connection; disconnect it before checking tunnels"
 
@@ -787,7 +787,7 @@ private suspend fun probeBatchTunnel(
             status = if (hadFullProbeWindow) {
                 ProxyTestStatus.UNAVAILABLE
             } else {
-                // A partial slot cannot prove that the tunnel exceeded its two-second limit.
+                // A partial slot cannot prove that the tunnel exceeded its five-second limit.
                 ProxyTestStatus.NOT_TESTED
             },
             message = error.message ?: if (hadFullProbeWindow) {
@@ -1025,7 +1025,7 @@ private const val NANOS_PER_MILLISECOND = 1_000_000L
 // Normal batches target ten seconds, but the larger hard budget lets every slow profile finish.
 internal const val XRAY_BATCH_TOTAL_BUDGET_MS = 60_000L
 internal const val XRAY_BATCH_TARGET_BUDGET_MS = 10_000L
-private const val BATCH_PROBE_TIMEOUT_MS = 2_000L
+private const val BATCH_PROBE_TIMEOUT_MS = 5_000L
 private const val BATCH_RUNTIME_START_ALLOWANCE_MS = 2_000L
 private const val BATCH_TARGET_PROBE_WINDOW_MS =
     XRAY_BATCH_TARGET_BUDGET_MS - BATCH_RUNTIME_START_ALLOWANCE_MS
