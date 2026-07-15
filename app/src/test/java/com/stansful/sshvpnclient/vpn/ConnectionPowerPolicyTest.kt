@@ -18,6 +18,7 @@ class ConnectionPowerPolicyTest {
 
     @Test
     fun `keepalive clamps unsafe extremes while honoring normal configured values`() {
+        assertEquals(3, SSH_SERVER_ALIVE_COUNT_MAX)
         assertEquals(15, effectiveKeepAliveIntervalSec(1, isInteractive = true))
         assertEquals(45, effectiveKeepAliveIntervalSec(45, isInteractive = true))
         assertEquals(240, effectiveKeepAliveIntervalSec(240, isInteractive = true))

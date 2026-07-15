@@ -228,11 +228,16 @@ internal fun <K> selectUnderlyingNetwork(
     currentKey: K?,
 ): K? {
     val eligible = candidates.filter { it.hasInternet && it.isNotVpn }
-    // Before the VPN is established Android's active physical network is authoritative. Once the
-    // VPN becomes active it is no longer an eligible candidate, so keep the captured physical
-    // network sticky until it is actually lost/ineligible instead of drifting back to Wi-Fi.
-    eligible.firstOrNull { candidate -> candidate.key == activeKey }?.let { return it.key }
-    eligible.firstOrNull { candidate -> candidate.key == currentKey }?.let { return it.key }
+    // Keep a still-validated captured network despite cosmetic activeNetwork oscillation. If that
+    // network loses validation and Android promotes another eligible physical network, treat it as
+    // a real handoff; otherwise dead Wi-Fi could pin the VPN while cellular already works.
+    val current = eligible.firstOrNull { candidate -> candidate.key == currentKey }
+    val active = eligible.firstOrNull { candidate -> candidate.key == activeKey }
+    if (current != null && (current.isValidated || active == null || active.key == current.key)) {
+        return current.key
+    }
+    active?.let { return it.key }
+    current?.let { return it.key }
     return eligible
         .asSequence()
         .maxWithOrNull(

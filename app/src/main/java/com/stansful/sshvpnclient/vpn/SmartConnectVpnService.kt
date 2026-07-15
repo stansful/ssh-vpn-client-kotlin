@@ -59,6 +59,8 @@ class SmartConnectVpnService : android.net.VpnService() {
     private val networkRevision = AtomicLong(0L)
     private val settingsRevision = AtomicLong(0L)
     private val socketRoutingFailureGeneration = AtomicLong(NO_XRAY_GENERATION)
+    private val socketRoutingFailures = GenerationFailureCounter()
+    private val runtimeStoppedObservations = GenerationFailureCounter()
     private val workflowSignal = Channel<Unit>(Channel.CONFLATED)
     private val xrayTransportGeneration = XrayRuntimeGenerationTracker()
     private val trafficActivityMonitor = VpnTrafficActivityMonitor()
@@ -282,7 +284,7 @@ class SmartConnectVpnService : android.net.VpnService() {
         }
 
         var activeProfile: ProxyProfile? = null
-        val excludedFingerprints = linkedSetOf<String>()
+        val profileCooldowns = SmartProfileCooldowns(SystemClock::elapsedRealtime)
         var catalogRetryAttempt = 0
         var consecutiveRuntimeFailures = 0
         var everVerified = false
@@ -307,7 +309,7 @@ class SmartConnectVpnService : android.net.VpnService() {
                         connectionFactory = ProxySourceConnectionFactory { url ->
                             physicalNetwork.openConnection(url)
                         },
-                        excludedFingerprints = excludedFingerprints,
+                        excludedFingerprints = profileCooldowns.activeFingerprints(),
                         preferredPhysicalNetwork = physicalNetwork,
                         workflowIsCurrent = {
                             shouldKeepSessionAlive(runId) &&
@@ -325,7 +327,12 @@ class SmartConnectVpnService : android.net.VpnService() {
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    val retryDelayMs = smartCatalogRetryDelayMs(catalogRetryAttempt++)
+                    val exponentialRetryDelayMs = smartCatalogRetryDelayMs(catalogRetryAttempt++)
+                    val retryDelayMs = profileCooldowns.remainingUntilNextExpiryMs()
+                        ?.let { cooldownRemainingMs ->
+                            minOf(exponentialRetryDelayMs, cooldownRemainingMs.coerceAtLeast(1L))
+                        }
+                        ?: exponentialRetryDelayMs
                     appContainer.vpnConnectionRepository.appendDiagnostic(
                         "Smart Connect catalog unavailable: ${error.safeMessage()}; " +
                             "retrying in ${retryDelayMs}ms",
@@ -353,7 +360,6 @@ class SmartConnectVpnService : android.net.VpnService() {
                         continue
                     }
                     withTimeoutOrNull(retryDelayMs) { workflowSignal.receive() }
-                    if (excludedFingerprints.isNotEmpty()) excludedFingerprints.clear()
                     continue
                 }
                 if (underlyingNetworkMonitor.currentNetwork() != physicalNetwork ||
@@ -397,7 +403,6 @@ class SmartConnectVpnService : android.net.VpnService() {
                         everVerified = true
                         consecutiveRuntimeFailures = 0
                         catalogRetryAttempt = 0
-                        excludedFingerprints.clear()
                     },
                 )
             } catch (error: CancellationException) {
@@ -488,7 +493,10 @@ class SmartConnectVpnService : android.net.VpnService() {
                         profile,
                         guardedOutcome.message,
                     )
-                    excludedFingerprints += profile.fingerprint
+                    profileCooldowns.exclude(
+                        profile.fingerprint,
+                        SMART_HEALTH_FAILURE_COOLDOWN_MS,
+                    )
                     appContainer.smartConnectStateStore.publish { state ->
                         state.copy(
                             phase = SmartConnectPhase.FAILING_OVER,
@@ -512,7 +520,10 @@ class SmartConnectVpnService : android.net.VpnService() {
                         // startup are client infrastructure. They must never poison/delete a
                         // profile. Exclude it only from this in-memory attempt; the next batch is
                         // responsible for making a profile-attributable test decision.
-                        excludedFingerprints += profile.fingerprint
+                        profileCooldowns.exclude(
+                            profile.fingerprint,
+                            SMART_RUNTIME_FAILURE_COOLDOWN_MS,
+                        )
                         activeProfile = null
                         consecutiveRuntimeFailures = 0
                     } else {
@@ -572,6 +583,8 @@ class SmartConnectVpnService : android.net.VpnService() {
             onGenerationReserved = { generation ->
                 attemptGeneration.set(generation)
                 socketRoutingFailureGeneration.set(NO_XRAY_GENERATION)
+                socketRoutingFailures.resetForGeneration(generation)
+                runtimeStoppedObservations.resetForGeneration(generation)
                 xrayTransportGeneration.publish(generation)
             },
         )
@@ -623,6 +636,9 @@ class SmartConnectVpnService : android.net.VpnService() {
         var nextProbeAtMs = connectedAtMs
         var healthPublished = false
         var disruptionDeferralStartedAtMs = NO_TIMESTAMP
+        var activeTransferDeferralLogged = false
+        var confirmedHealthFailureRounds = 0
+        var firstConfirmedHealthFailureAtMs = NO_TIMESTAMP
 
         while (shouldKeepSessionAlive(runId)) {
             structuralOutcome(
@@ -641,6 +657,46 @@ class SmartConnectVpnService : android.net.VpnService() {
                 continue
             }
 
+            // A probe is an extra connection through the same public account. Some free servers
+            // enforce one active stream and can evict a browser download merely because this
+            // auxiliary YouTube connection was opened. Sample before probing and postpone the
+            // probe while user traffic itself proves that the tunnel is alive.
+            val trafficBeforeProbe = trafficActivityMonitor.sampleSinceLast()
+            if (healthPublished) {
+                val trafficIsPotentiallyActive = trafficBeforeProbe.receivedRecently ||
+                    trafficBeforeProbe.receivedBytes >= ACTIVE_VPN_TRAFFIC_THRESHOLD_BYTES ||
+                    trafficBeforeProbe.transmittedBytes >= ACTIVE_VPN_TRAFFIC_THRESHOLD_BYTES
+                if (trafficIsPotentiallyActive && disruptionDeferralStartedAtMs == NO_TIMESTAMP) {
+                    disruptionDeferralStartedAtMs = nowMs
+                } else if (!trafficIsPotentiallyActive) {
+                    disruptionDeferralStartedAtMs = NO_TIMESTAMP
+                }
+                val activeTransferElapsedMs = if (disruptionDeferralStartedAtMs == NO_TIMESTAMP) {
+                    maxOf(MAX_TX_ONLY_TRAFFIC_CHECK_DEFERRAL_MS, MAX_DEVICE_ONLY_RX_DEFERRAL_MS)
+                } else {
+                    nowMs - disruptionDeferralStartedAtMs
+                }
+                if (shouldDeferVpnDisruption(trafficBeforeProbe, activeTransferElapsedMs)) {
+                    confirmedHealthFailureRounds = 0
+                    firstConfirmedHealthFailureAtMs = NO_TIMESTAMP
+                    if (!activeTransferDeferralLogged) {
+                        activeTransferDeferralLogged = true
+                        appContainer.vpnConnectionRepository.appendDiagnostic(
+                            "Smart Connect health probe postponed for active transfer " +
+                                "(rx=${trafficBeforeProbe.receivedBytes / 1_024L} KiB, " +
+                                "uidRx=${trafficBeforeProbe.uidReceivedBytes / 1_024L} KiB)",
+                        )
+                    }
+                    nextProbeAtMs = nowMs + smartHealthCheckIntervalMs(
+                        connectedDurationMs = nowMs - connectedAtMs,
+                        isInteractive = deviceInteractive,
+                        isPowerSaveMode = powerManager.isPowerSaveMode,
+                    )
+                    continue
+                }
+            }
+            activeTransferDeferralLogged = false
+
             val firstProbe = try {
                 appContainer.xrayCoreBridge.probeLiveTunnel(vpnTunnelOwner, healthHandle)
             } catch (error: CancellationException) {
@@ -656,6 +712,8 @@ class SmartConnectVpnService : android.net.VpnService() {
             }
 
             if (firstProbe.isHealthy) {
+                confirmedHealthFailureRounds = 0
+                firstConfirmedHealthFailureAtMs = NO_TIMESTAMP
                 if (!healthPublished) {
                     if (!publishConnectedState(runId, commandId, profile)) return ConnectionOutcome.Stopped
                     onVerified()
@@ -696,6 +754,8 @@ class SmartConnectVpnService : android.net.VpnService() {
                 ) ?: ConnectionOutcome.RuntimeFailure("Xray health runtime was superseded")
             }
             if (confirmation.isHealthy) {
+                confirmedHealthFailureRounds = 0
+                firstConfirmedHealthFailureAtMs = NO_TIMESTAMP
                 if (!healthPublished) {
                     if (!publishConnectedState(runId, commandId, profile)) return ConnectionOutcome.Stopped
                     onVerified()
@@ -724,21 +784,22 @@ class SmartConnectVpnService : android.net.VpnService() {
 
             val traffic = trafficActivityMonitor.sampleSinceLast()
             val failureAtMs = SystemClock.elapsedRealtime()
-            if (traffic.receivedBytes >= ACTIVE_VPN_TRAFFIC_THRESHOLD_BYTES) {
-                // RX proves liveness without a cap. If traffic later becomes TX-only, start its
-                // bounded retransmit window from that transition rather than from the download.
-                disruptionDeferralStartedAtMs = NO_TIMESTAMP
-            } else if (traffic.transmittedBytes >= ACTIVE_VPN_TRAFFIC_THRESHOLD_BYTES &&
-                disruptionDeferralStartedAtMs == NO_TIMESTAMP
-            ) {
+            val trafficIsPotentiallyActive = traffic.receivedRecently ||
+                traffic.receivedBytes >= ACTIVE_VPN_TRAFFIC_THRESHOLD_BYTES ||
+                traffic.transmittedBytes >= ACTIVE_VPN_TRAFFIC_THRESHOLD_BYTES
+            if (trafficIsPotentiallyActive && disruptionDeferralStartedAtMs == NO_TIMESTAMP) {
                 disruptionDeferralStartedAtMs = failureAtMs
+            } else if (!trafficIsPotentiallyActive) {
+                disruptionDeferralStartedAtMs = NO_TIMESTAMP
             }
             val deferralElapsedMs = if (disruptionDeferralStartedAtMs == NO_TIMESTAMP) {
-                MAX_TX_ONLY_TRAFFIC_CHECK_DEFERRAL_MS
+                maxOf(MAX_TX_ONLY_TRAFFIC_CHECK_DEFERRAL_MS, MAX_DEVICE_ONLY_RX_DEFERRAL_MS)
             } else {
                 failureAtMs - disruptionDeferralStartedAtMs
             }
-            if (shouldDeferVpnDisruption(traffic, deferralElapsedMs)) {
+            if (healthPublished && shouldDeferVpnDisruption(traffic, deferralElapsedMs)) {
+                confirmedHealthFailureRounds = 0
+                firstConfirmedHealthFailureAtMs = NO_TIMESTAMP
                 appContainer.smartConnectStateStore.publish { state ->
                     state.copy(
                         phase = if (healthPublished) SmartConnectPhase.CONNECTED else SmartConnectPhase.VERIFYING,
@@ -754,6 +815,28 @@ class SmartConnectVpnService : android.net.VpnService() {
             }
 
             val message = confirmation.message ?: firstProbe.message ?: "YouTube health check failed"
+            if (healthPublished) {
+                if (firstConfirmedHealthFailureAtMs == NO_TIMESTAMP) {
+                    firstConfirmedHealthFailureAtMs = failureAtMs
+                }
+                confirmedHealthFailureRounds += 1
+                val failureDurationMs = failureAtMs - firstConfirmedHealthFailureAtMs
+                if (!shouldTriggerVerifiedTunnelFailover(
+                        confirmedFailureRounds = confirmedHealthFailureRounds,
+                        elapsedSinceFirstConfirmedFailureMs = failureDurationMs,
+                    )
+                ) {
+                    appContainer.vpnConnectionRepository.appendDiagnostic(
+                        "Smart Connect auxiliary health failure " +
+                            "$confirmedHealthFailureRounds/" +
+                            "$SMART_HEALTH_FAILURE_ROUNDS_BEFORE_FAILOVER; keeping verified tunnel",
+                    )
+                    // Once a verified tunnel starts failing, confirm recovery/failure promptly;
+                    // the long screen-off/Battery Saver cadence is for healthy idle tunnels.
+                    nextProbeAtMs = failureAtMs + SMART_HEALTH_FAILURE_RETRY_INTERVAL_MS
+                    continue
+                }
+            }
             return ConnectionOutcome.ConfirmedHealthFailure(message)
         }
         return ConnectionOutcome.Stopped
@@ -777,10 +860,24 @@ class SmartConnectVpnService : android.net.VpnService() {
         if (socketRoutingFailureGeneration.get() == generation) {
             return ConnectionOutcome.RuntimeFailure("Xray physical socket routing failed")
         }
-        if (!appContainer.xrayCoreBridge.isRuntimeGenerationCurrent(vpnTunnelOwner, generation) ||
-            !appContainer.xrayCoreBridge.isRunning()
-        ) {
+        if (!appContainer.xrayCoreBridge.isRuntimeGenerationCurrent(vpnTunnelOwner, generation)) {
             return ConnectionOutcome.RuntimeFailure("Xray core stopped unexpectedly")
+        }
+        if (appContainer.xrayCoreBridge.isRunning()) {
+            runtimeStoppedObservations.recordSuccess(generation)
+        } else {
+            val progress = runtimeStoppedObservations.recordFailure(
+                generation,
+                SystemClock.elapsedRealtime(),
+            )
+            if (progress != null &&
+                progress.count >= XRAY_STOPPED_OBSERVATIONS_BEFORE_REBUILD &&
+                progress.elapsedMs >= XRAY_STOPPED_MIN_DURATION_MS
+            ) {
+                return ConnectionOutcome.RuntimeFailure(
+                    "Xray core reported stopped repeatedly",
+                )
+            }
         }
         return null
     }
@@ -874,20 +971,35 @@ class SmartConnectVpnService : android.net.VpnService() {
             ParcelFileDescriptor.fromFd(fd).use { duplicate ->
                 network.bindSocket(duplicate.fileDescriptor)
             }
+            socketRoutingFailures.recordSuccess(generation)
             true
         } catch (error: Exception) {
             appContainer.vpnConnectionRepository.appendDiagnostic(
                 "Smart Connect socket was protected but explicit bind failed; " +
                     "using Android VPN underlying network: ${error.safeMessage()}",
             )
+            socketRoutingFailures.recordSuccess(generation)
             true
         }
     }
 
     private fun reportSocketRoutingFailure(generation: Long, reason: String) {
         if (generation == NO_XRAY_GENERATION || xrayTransportGeneration.snapshot() != generation) return
+        val progress = socketRoutingFailures.recordFailure(
+            generation,
+            SystemClock.elapsedRealtime(),
+        ) ?: return
+        appContainer.vpnConnectionRepository.appendDiagnostic(
+            "Smart Connect socket routing failure ${progress.count}/" +
+                "$SOCKET_ROUTING_FAILURES_BEFORE_REBUILD " +
+                "(${progress.elapsedMs}ms): $reason",
+        )
+        if (progress.count < SOCKET_ROUTING_FAILURES_BEFORE_REBUILD ||
+            progress.elapsedMs < SOCKET_ROUTING_FAILURE_MIN_DURATION_MS
+        ) {
+            return
+        }
         if (!socketRoutingFailureGeneration.compareAndSet(NO_XRAY_GENERATION, generation)) return
-        appContainer.vpnConnectionRepository.appendDiagnostic("Smart Connect socket routing failed: $reason")
         workflowSignal.trySend(Unit)
     }
 
@@ -1182,6 +1294,10 @@ class SmartConnectVpnService : android.net.VpnService() {
         private const val CONNECTION_JOB_JOIN_GRACE_MS = 1_000L
         private const val RUNTIME_RESTART_DELAY_MS = 1_000L
         private const val MAX_SAME_PROFILE_RUNTIME_FAILURES = 2
+        private const val SOCKET_ROUTING_FAILURES_BEFORE_REBUILD = 3
+        private const val SOCKET_ROUTING_FAILURE_MIN_DURATION_MS = 5_000L
+        private const val XRAY_STOPPED_OBSERVATIONS_BEFORE_REBUILD = 3
+        private const val XRAY_STOPPED_MIN_DURATION_MS = 5_000L
         private const val NO_XRAY_GENERATION = Long.MIN_VALUE
         private const val NO_TIMESTAMP = -1L
 

@@ -38,9 +38,35 @@ class UnderlyingNetworkSelectionTest {
     }
 
     @Test
-    fun `android active physical network wins when it is eligible`() {
+    fun `captured physical network stays sticky during active network oscillation`() {
         val candidates = listOf(
             candidate("wifi", isWifi = true, isNotMetered = true),
+            candidate("cellular", isCellular = true),
+        )
+
+        assertEquals(
+            "wifi",
+            selectUnderlyingNetwork(candidates, activeKey = "cellular", currentKey = "wifi"),
+        )
+    }
+
+    @Test
+    fun `android active physical network wins initial selection`() {
+        val candidates = listOf(
+            candidate("wifi", isWifi = true, isNotMetered = true),
+            candidate("cellular", isCellular = true),
+        )
+
+        assertEquals(
+            "cellular",
+            selectUnderlyingNetwork(candidates, activeKey = "cellular", currentKey = null),
+        )
+    }
+
+    @Test
+    fun `active cellular replaces captured wifi after wifi loses validation`() {
+        val candidates = listOf(
+            candidate("wifi", isValidated = false, isWifi = true, isNotMetered = true),
             candidate("cellular", isCellular = true),
         )
 

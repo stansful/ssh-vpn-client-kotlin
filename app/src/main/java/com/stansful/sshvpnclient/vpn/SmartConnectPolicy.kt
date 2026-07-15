@@ -49,13 +49,68 @@ internal fun isSmartConnectExcludedProfileName(name: String): Boolean {
     return SMART_CONNECT_EXCLUDED_NAME_MARKERS.any(name::contains)
 }
 
+/** A verified tunnel is not destroyed by one short-lived auxiliary endpoint failure. */
+internal fun shouldTriggerVerifiedTunnelFailover(
+    confirmedFailureRounds: Int,
+    elapsedSinceFirstConfirmedFailureMs: Long,
+): Boolean {
+    require(confirmedFailureRounds >= 0)
+    require(elapsedSinceFirstConfirmedFailureMs >= 0L)
+    return confirmedFailureRounds >= SMART_HEALTH_FAILURE_ROUNDS_BEFORE_FAILOVER &&
+        elapsedSinceFirstConfirmedFailureMs >= SMART_HEALTH_MIN_FAILURE_DURATION_MS
+}
+
+/** Keeps recently failed public profiles out of both probes and selection until their cooldown. */
+internal class SmartProfileCooldowns(
+    private val elapsedRealtimeMs: () -> Long,
+) {
+    private val lock = Any()
+    private val retryAfterByFingerprint = linkedMapOf<String, Long>()
+
+    fun exclude(fingerprint: String, durationMs: Long) {
+        require(durationMs >= 0L)
+        val retryAfterMs = elapsedRealtimeMs() + durationMs
+        synchronized(lock) {
+            retryAfterByFingerprint[fingerprint] = maxOf(
+                retryAfterByFingerprint[fingerprint] ?: Long.MIN_VALUE,
+                retryAfterMs,
+            )
+        }
+    }
+
+    fun activeFingerprints(): Set<String> {
+        val nowMs = elapsedRealtimeMs()
+        return synchronized(lock) {
+            removeExpiredLocked(nowMs)
+            retryAfterByFingerprint.keys.toSet()
+        }
+    }
+
+    fun remainingUntilNextExpiryMs(): Long? {
+        val nowMs = elapsedRealtimeMs()
+        return synchronized(lock) {
+            removeExpiredLocked(nowMs)
+            retryAfterByFingerprint.values.minOrNull()?.minus(nowMs)
+        }
+    }
+
+    private fun removeExpiredLocked(nowMs: Long) {
+        retryAfterByFingerprint.entries.removeAll { (_, retryAfterMs) -> retryAfterMs <= nowMs }
+    }
+}
+
 internal const val SMART_HEALTH_PROBE_TIMEOUT_MS = 5_000L
 internal const val SMART_HEALTH_FAILURE_CONFIRM_DELAY_MS = 2_000L
+internal const val SMART_HEALTH_FAILURE_RETRY_INTERVAL_MS = 10_000L
 internal const val SMART_HEALTH_WARM_UP_DURATION_MS = 60_000L
 internal const val SMART_HEALTH_WARM_UP_INTERVAL_MS = 10_000L
 internal const val SMART_HEALTH_INTERACTIVE_INTERVAL_MS = 30_000L
 internal const val SMART_HEALTH_SCREEN_OFF_INTERVAL_MS = 120_000L
 internal const val SMART_HEALTH_POWER_SAVE_INTERVAL_MS = 300_000L
+internal const val SMART_HEALTH_FAILURE_ROUNDS_BEFORE_FAILOVER = 3
+internal const val SMART_HEALTH_MIN_FAILURE_DURATION_MS = 30_000L
+internal const val SMART_HEALTH_FAILURE_COOLDOWN_MS = 15L * 60_000L
+internal const val SMART_RUNTIME_FAILURE_COOLDOWN_MS = 2L * 60_000L
 private val SMART_CATALOG_RETRY_DELAYS_MS = longArrayOf(
     30_000L,
     60_000L,

@@ -7,6 +7,7 @@ import kotlinx.coroutines.CancellationException
 
 class Tun2SocksManager {
     private val lifecycleLock = Any()
+    private val transportOperationLock = Any()
 
     @Volatile
     var isRunning: Boolean = false
@@ -67,7 +68,8 @@ class Tun2SocksManager {
     ) {
         require(lease.owner === owner) { "TUN owner must match runtime lease" }
         lease.requireCurrent {
-            synchronized(lifecycleLock) {
+            synchronized(transportOperationLock) {
+                synchronized(lifecycleLock) {
                 if (activeOwner != null && activeOwner !== owner) {
                     throw VpnConnectionException("TUN runtime belongs to another service instance")
                 }
@@ -142,6 +144,7 @@ class Tun2SocksManager {
                     throw CancellationException("TUN runtime lease was superseded")
                 }
                 log("Kotlin TUN forwarding engine started")
+                }
             }
         }
     }
@@ -151,9 +154,11 @@ class Tun2SocksManager {
     }
 
     fun stop(owner: Any, awaitTermination: Boolean) {
-        synchronized(lifecycleLock) {
-            if (activeOwner !== owner) return
-            stopLocked(awaitTermination)
+        synchronized(transportOperationLock) {
+            synchronized(lifecycleLock) {
+                if (activeOwner !== owner) return
+                stopLocked(awaitTermination)
+            }
         }
     }
 
@@ -173,23 +178,36 @@ class Tun2SocksManager {
     }
 
     fun pauseSshTransport(owner: Any) {
-        synchronized(lifecycleLock) {
-            if (activeOwner !== owner) return
-            if (isTransportPaused) return
-            forwarder?.pauseSshTransport()
-            isTransportPaused = true
-            degradationReason.set(null)
+        synchronized(transportOperationLock) {
+            val activeForwarder = synchronized(lifecycleLock) {
+                if (activeOwner !== owner || isTransportPaused) return
+                // Publish paused before touching session locks so a concurrent terminal writer
+                // failure cannot feed a stale degradation signal back into this lifecycle.
+                isTransportPaused = true
+                degradationReason.set(null)
+                forwarder
+            }
+            // resetAndClose may wait for a busy per-flow sender/TUN queue. Never hold lifecycleLock
+            // here: failForwarder/onStopped also need it to publish their terminal state.
+            activeForwarder?.pauseSshTransport()
         }
     }
 
     fun resumeSshTransport(owner: Any, sshSession: Session) {
-        synchronized(lifecycleLock) {
-            check(activeOwner === owner) { "TUN forwarding belongs to another service instance" }
-            check(isRunning) { "TUN forwarding is not running" }
-            val activeForwarder = checkNotNull(forwarder) { "TUN forwarder is unavailable" }
+        synchronized(transportOperationLock) {
+            val activeForwarder = synchronized(lifecycleLock) {
+                check(activeOwner === owner) { "TUN forwarding belongs to another service instance" }
+                check(isRunning) { "TUN forwarding is not running" }
+                checkNotNull(forwarder) { "TUN forwarder is unavailable" }
+            }
             activeForwarder.resumeSshTransport(sshSession)
-            degradationReason.set(null)
-            isTransportPaused = false
+            synchronized(lifecycleLock) {
+                check(activeOwner === owner && forwarder === activeForwarder && isRunning) {
+                    "TUN forwarding changed during SSH resume"
+                }
+                degradationReason.set(null)
+                isTransportPaused = false
+            }
         }
     }
 

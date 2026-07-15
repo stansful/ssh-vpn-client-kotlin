@@ -67,6 +67,30 @@ class SmartConnectPolicyTest {
     }
 
     @Test
+    fun `verified tunnel needs repeated sustained health failures before failover`() {
+        assertFalse(shouldTriggerVerifiedTunnelFailover(1, 60_000L))
+        assertFalse(shouldTriggerVerifiedTunnelFailover(3, 29_999L))
+        assertTrue(shouldTriggerVerifiedTunnelFailover(3, 30_000L))
+    }
+
+    @Test
+    fun `failed profile remains excluded until monotonic cooldown expires`() {
+        var nowMs = 1_000L
+        val cooldowns = SmartProfileCooldowns { nowMs }
+
+        cooldowns.exclude("failed", 15_000L)
+        assertEquals(setOf("failed"), cooldowns.activeFingerprints())
+        assertEquals(15_000L, cooldowns.remainingUntilNextExpiryMs())
+
+        nowMs = 15_999L
+        assertEquals(setOf("failed"), cooldowns.activeFingerprints())
+        assertEquals(1L, cooldowns.remainingUntilNextExpiryMs())
+        nowMs = 16_000L
+        assertEquals(emptySet<String>(), cooldowns.activeFingerprints())
+        assertNull(cooldowns.remainingUntilNextExpiryMs())
+    }
+
+    @Test
     fun `batch probes leave three seconds for finalization inside hard deadline`() {
         val hardDeadlineNanos = 60_000_000_000L
 

@@ -49,9 +49,14 @@ private const val HARD_MAX_ACTIVE_TCP_SESSIONS = 128
 private const val DEFAULT_MAX_ACTIVE_TCP_SESSIONS = HARD_MAX_ACTIVE_TCP_SESSIONS
 private const val DEFAULT_SESSION_PRESSURE_THRESHOLD = 96
 private const val DEFAULT_SESSION_PRESSURE_TARGET = 72
-private const val DEFAULT_TUN_WRITE_ENQUEUE_TIMEOUT_MS = 1_000L
+internal const val DEFAULT_TUN_WRITE_ENQUEUE_TIMEOUT_MS = 5_000L
 private const val DEFAULT_DNS_QUERY_TIMEOUT_MS = 10_000L
 private const val TUN_WRITER_THREAD_NAME = "kotlin-tun-writer"
+
+internal fun shouldSendRemoteFin(
+    streamReachedEof: Boolean,
+    channelStillConnected: Boolean,
+): Boolean = streamReachedEof && channelStillConnected
 
 internal data class TunForwarderConfig(
     val tunMtu: Int,
@@ -633,7 +638,7 @@ internal class KotlinTunForwarder(
             transportGeneration += 1
             sshSessionReference.set(null)
             resetDnsFailureStateLocked()
-            closeSessions()
+            closeSessions(resetClients = true)
             closeActiveDnsChannels()
         }
     }
@@ -1210,9 +1215,9 @@ internal class KotlinTunForwarder(
                 )
         }
         if (shouldReport) {
-            onDegraded(
-                "DNS failed $failures consecutive time(s); last error: $message",
-                expectedTransport.generation,
+            log(
+                "DNS failed $failures consecutive time(s); continuing per-query fallback " +
+                    "without rebuilding VPN; last error: $message",
             )
         }
         return true
@@ -1400,9 +1405,11 @@ internal class KotlinTunForwarder(
         }
     }
 
-    private fun closeSessions() {
+    private fun closeSessions(resetClients: Boolean = false) {
         sessions.values.forEach { session ->
-            runCatching { session.close() }
+            runCatching {
+                if (resetClients) session.resetAndClose() else session.close()
+            }
         }
         sessions.clear()
     }
@@ -1414,7 +1421,6 @@ internal class KotlinTunForwarder(
 
     private fun failForwarder(reason: String) {
         if (!terminalError.compareAndSet(null, reason)) return
-        onDegraded(reason, null)
         running.set(false)
         closeSessions()
         closeActiveDnsChannels()
@@ -1566,6 +1572,11 @@ internal class KotlinTunForwarder(
         private var clientFinCleanupFuture: ScheduledFuture<*>? = null
         private var remoteFinCleanupFuture: ScheduledFuture<*>? = null
 
+        private data class CloseResources(
+            val channel: ChannelDirectTCPIP?,
+            val cleanupFutures: List<ScheduledFuture<*>>,
+        )
+
         private val lastActivityAtMs = CoalescedActivityTimestamp(
             initialValueMs = elapsedRealtimeMs(),
             minimumUpdateIntervalMs = ACTIVITY_TIMESTAMP_UPDATE_INTERVAL_MS,
@@ -1628,31 +1639,23 @@ internal class KotlinTunForwarder(
         ) {
             var shouldConnect = false
             var shouldScheduleWrite = false
-            var responseSequence: Long
             lock.withLock {
                 if (state == TcpState.CLOSED || !halfClose.acceptsClientData || clientUpload.isFinished) return
                 if (state == TcpState.SYN_RECEIVED) {
                     state = TcpState.ESTABLISHED
                     shouldConnect = true
                 }
-                if (!clientUpload.tryAcceptData(sequence, byteCount)) {
-                    responseSequence = serverNextSequence
-                } else {
+                if (clientUpload.tryAcceptData(sequence, byteCount)) {
                     pendingClientWrites.append(
                         source = source,
                         sourceOffset = sourceOffset,
                         byteCount = byteCount,
                     )
                     shouldScheduleWrite = true
-                    responseSequence = serverNextSequence
                 }
             }
 
-            sendTcp(
-                sequence = responseSequence,
-                flags = TCP_ACK,
-                payload = EMPTY_BYTES,
-            )
+            sendCurrentAck()
             if (shouldConnect) {
                 ensureRemoteConnecting()
             }
@@ -1662,7 +1665,6 @@ internal class KotlinTunForwarder(
         }
 
         fun onClientFin(finSequence: Long, receivedAtMs: Long) {
-            val responseSequence: Long
             val finAccepted: Boolean
             lock.withLock {
                 if (state == TcpState.CLOSED) return
@@ -1671,13 +1673,8 @@ internal class KotlinTunForwarder(
                     halfClose.onClientFinAccepted()
                     clientFinReceivedAtMs = receivedAtMs
                 }
-                responseSequence = serverNextSequence
             }
-            sendTcp(
-                sequence = responseSequence,
-                flags = TCP_ACK,
-                payload = EMPTY_BYTES,
-            )
+            sendCurrentAck()
             if (finAccepted) {
                 scheduleClientFlush()
                 scheduleClientFinCleanup(CLIENT_FIN_SESSION_TTL_MS)
@@ -1685,23 +1682,14 @@ internal class KotlinTunForwarder(
         }
 
         fun close() {
-            val activeChannel: ChannelDirectTCPIP?
-            val cleanupFutures: List<ScheduledFuture<*>>
-            lock.withLock {
-                if (state == TcpState.CLOSED) return
-                state = TcpState.CLOSED
-                pendingClientWrites.clear()
-                activeChannel = channel
-                channel = null
-                remoteOutput = null
-                cleanupFutures = listOfNotNull(clientFinCleanupFuture, remoteFinCleanupFuture)
-                clientFinCleanupFuture = null
-                remoteFinCleanupFuture = null
-                sendWindowChanged.signal()
-            }
-            cleanupFutures.forEach { future -> future.cancel(false) }
-            activeChannel?.disconnect()
-            onClosed(key, this)
+            val resources = outboundSendLock.withLock {
+                lock.withLock { transitionToClosedLocked() }
+            } ?: return
+            finishClose(resources)
+        }
+
+        fun resetAndClose() {
+            sendResetAndClose()
         }
 
         private fun ensureRemoteConnecting() {
@@ -1921,15 +1909,20 @@ internal class KotlinTunForwarder(
                         offset += chunkSize
                     }
                 }
-                val clientHalfCloseCompleted = lock.withLock {
-                    halfClose.clientFinAccepted && halfClose.clientOutputClosed
-                }
-                if (isSshChannelOpen(activeChannel) || clientHalfCloseCompleted) {
+                // JSch sets eof_remote for both remote EOF and forced disconnect. Channel
+                // disconnect marks connected=false before closing the stream, whereas a genuine
+                // SSH_MSG_CHANNEL_EOF leaves the channel connected until its later CLOSE.
+                if (shouldSendRemoteFin(
+                        streamReachedEof = true,
+                        channelStillConnected = isSshChannelOpen(activeChannel),
+                    )
+                ) {
                     sendRemoteFin()
                 } else {
                     sendResetAndClose()
                 }
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                diagnostics.logTcpReadFailure(error.message ?: error::class.java.simpleName)
                 sendResetAndClose()
             }
         }
@@ -1977,54 +1970,97 @@ internal class KotlinTunForwarder(
             var offset = payloadOffset
             val endOffset = payloadOffset + payloadLength
             while (offset < endOffset) {
-                val sequence: Long
-                val chunkSize: Int
-                lock.withLock {
-                    while (state != TcpState.CLOSED && availableSendWindowLocked() <= 0) {
-                        try {
-                            sendWindowChanged.await()
-                        } catch (_: InterruptedException) {
-                            Thread.currentThread().interrupt()
-                            return false
+                var sequence = 0L
+                var acknowledgement = 0L
+                var advertisedWindow = 0
+                var chunkSize = 0
+                val shouldWaitForWindow = outboundSendLock.withLock {
+                    val canSend = lock.withLock {
+                        if (state == TcpState.CLOSED) return false
+                        val availableWindow = availableSendWindowLocked()
+                        if (availableWindow <= 0) {
+                            false
+                        } else {
+                            chunkSize = minOf(
+                                config.tcpMss,
+                                endOffset - offset,
+                                availableWindow,
+                            )
+                            sequence = serverNextSequence
+                            serverNextSequence = seqPlus(serverNextSequence, chunkSize)
+                            acknowledgement = clientUpload.nextSequence
+                            advertisedWindow = advertisedUploadWindowLocked()
+                            true
                         }
                     }
-                    if (state == TcpState.CLOSED) return false
-                    chunkSize = minOf(
-                        config.tcpMss,
-                        endOffset - offset,
-                        availableSendWindowLocked(),
-                    )
-                    sequence = serverNextSequence
-                    serverNextSequence = seqPlus(serverNextSequence, chunkSize)
+                    if (!canSend) {
+                        true
+                    } else {
+                        // Sequence reservation and packet enqueue share outboundSendLock. A
+                        // concurrent reconnect RST can therefore never jump over unsent payload.
+                        sendTcpLocked(
+                            sequence = sequence,
+                            acknowledgement = acknowledgement,
+                            flags = TCP_PSH or TCP_ACK,
+                            advertisedWindow = advertisedWindow,
+                            payload = payload,
+                            payloadOffset = offset,
+                            payloadLength = chunkSize,
+                        )
+                        false
+                    }
                 }
-                sendTcp(
-                    sequence = sequence,
-                    flags = TCP_PSH or TCP_ACK,
-                    payload = payload,
-                    payloadOffset = offset,
-                    payloadLength = chunkSize,
-                )
-                offset += chunkSize
+                if (shouldWaitForWindow) {
+                    lock.withLock {
+                        while (state != TcpState.CLOSED && availableSendWindowLocked() <= 0) {
+                            try {
+                                sendWindowChanged.await()
+                            } catch (_: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                                return false
+                            }
+                        }
+                        if (state == TcpState.CLOSED) return false
+                    }
+                } else {
+                    offset += chunkSize
+                }
             }
             return true
         }
 
         private fun sendRemoteFin() {
-            val sequence: Long
-            lock.withLock {
-                if (state == TcpState.CLOSED) return
-                if (halfClose.remoteFinSent) return
-                state = TcpState.REMOTE_FIN_SENT
-                halfClose.onRemoteFinSent()
-                sequence = serverNextSequence
-                serverNextSequence = seqPlus(serverNextSequence, 1)
+            val sent = outboundSendLock.withLock {
+                var sequence = 0L
+                var acknowledgement = 0L
+                var advertisedWindow = 0
+                val shouldSend = lock.withLock {
+                    if (state == TcpState.CLOSED || halfClose.remoteFinSent) {
+                        false
+                    } else {
+                        state = TcpState.REMOTE_FIN_SENT
+                        halfClose.onRemoteFinSent()
+                        sequence = serverNextSequence
+                        serverNextSequence = seqPlus(serverNextSequence, 1)
+                        acknowledgement = clientUpload.nextSequence
+                        advertisedWindow = advertisedUploadWindowLocked()
+                        true
+                    }
+                }
+                if (shouldSend) {
+                    sendTcpLocked(
+                        sequence = sequence,
+                        acknowledgement = acknowledgement,
+                        flags = TCP_FIN or TCP_ACK,
+                        advertisedWindow = advertisedWindow,
+                        payload = EMPTY_BYTES,
+                        payloadOffset = 0,
+                        payloadLength = 0,
+                    )
+                }
+                shouldSend
             }
-            sendTcp(
-                sequence = sequence,
-                flags = TCP_FIN or TCP_ACK,
-                payload = EMPTY_BYTES,
-            )
-            scheduleRemoteFinCleanup(REMOTE_FIN_SESSION_TTL_MS)
+            if (sent) scheduleRemoteFinCleanup(REMOTE_FIN_SESSION_TTL_MS)
         }
 
         private fun scheduleClientFinCleanup(delayMs: Long) {
@@ -2104,17 +2140,54 @@ internal class KotlinTunForwarder(
         }
 
         private fun sendResetAndClose() {
-            val sequence: Long
-            lock.withLock {
-                if (state == TcpState.CLOSED) return
-                sequence = serverNextSequence
+            var closeResources: CloseResources? = null
+            try {
+                outboundSendLock.withLock {
+                    var sequence = 0L
+                    var acknowledgement = 0L
+                    var advertisedWindow = 0
+                    lock.withLock {
+                        if (state == TcpState.CLOSED) return
+                        sequence = serverNextSequence
+                        acknowledgement = clientUpload.nextSequence
+                        advertisedWindow = advertisedUploadWindowLocked()
+                        closeResources = transitionToClosedLocked()
+                    }
+                    sendTcpLocked(
+                        sequence = sequence,
+                        acknowledgement = acknowledgement,
+                        flags = TCP_RST or TCP_ACK,
+                        advertisedWindow = advertisedWindow,
+                        payload = EMPTY_BYTES,
+                        payloadOffset = 0,
+                        payloadLength = 0,
+                    )
+                }
+            } finally {
+                closeResources?.let(::finishClose)
             }
-            sendTcp(
-                sequence = sequence,
-                flags = TCP_RST or TCP_ACK,
-                payload = EMPTY_BYTES,
+        }
+
+        private fun transitionToClosedLocked(): CloseResources? {
+            if (state == TcpState.CLOSED) return null
+            state = TcpState.CLOSED
+            pendingClientWrites.clear()
+            val resources = CloseResources(
+                channel = channel,
+                cleanupFutures = listOfNotNull(clientFinCleanupFuture, remoteFinCleanupFuture),
             )
-            close()
+            channel = null
+            remoteOutput = null
+            clientFinCleanupFuture = null
+            remoteFinCleanupFuture = null
+            sendWindowChanged.signal()
+            return resources
+        }
+
+        private fun finishClose(resources: CloseResources) {
+            resources.cleanupFutures.forEach { future -> future.cancel(false) }
+            resources.channel?.disconnect()
+            onClosed(key, this)
         }
 
         private fun updateServerAckLocked(acknowledgement: Long) {
@@ -2152,6 +2225,7 @@ internal class KotlinTunForwarder(
                 val acknowledgement: Long
                 val advertisedWindow: Int
                 lock.withLock {
+                    if (state == TcpState.CLOSED) return
                     acknowledgement = clientUpload.nextSequence
                     advertisedWindow = advertisedUploadWindowLocked()
                 }
@@ -2163,6 +2237,29 @@ internal class KotlinTunForwarder(
                     payload = payload,
                     payloadOffset = payloadOffset,
                     payloadLength = payloadLength,
+                )
+            }
+        }
+
+        private fun sendCurrentAck() {
+            outboundSendLock.withLock {
+                val sequence: Long
+                val acknowledgement: Long
+                val advertisedWindow: Int
+                lock.withLock {
+                    if (state == TcpState.CLOSED) return
+                    sequence = serverNextSequence
+                    acknowledgement = clientUpload.nextSequence
+                    advertisedWindow = advertisedUploadWindowLocked()
+                }
+                sendTcpLocked(
+                    sequence = sequence,
+                    acknowledgement = acknowledgement,
+                    flags = TCP_ACK,
+                    advertisedWindow = advertisedWindow,
+                    payload = EMPTY_BYTES,
+                    payloadOffset = 0,
+                    payloadLength = 0,
                 )
             }
         }
@@ -2225,6 +2322,7 @@ internal class KotlinTunForwarder(
         private val tcpOpenCount = AtomicInteger(0)
         private val tcpFailureCount = AtomicInteger(0)
         private val tcpWriteFailureCount = AtomicInteger(0)
+        private val tcpReadFailureCount = AtomicInteger(0)
         private val tcpClientFinTimeoutCount = AtomicInteger(0)
         private val tcpIdleTimeoutCount = AtomicInteger(0)
         private val dnsFailureCount = AtomicInteger(0)
@@ -2253,6 +2351,14 @@ internal class KotlinTunForwarder(
                 counter = tcpWriteFailureCount,
                 message = "TUN TCP write failed: $message",
                 suppressedMessage = "TUN TCP: further write failure logs suppressed",
+            )
+        }
+
+        fun logTcpReadFailure(message: String) {
+            logLimited(
+                counter = tcpReadFailureCount,
+                message = "TUN TCP read failed: $message",
+                suppressedMessage = "TUN TCP: further read failure logs suppressed",
             )
         }
 

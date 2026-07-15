@@ -55,6 +55,7 @@ class OpenSourceVpnService : android.net.VpnService() {
     private var transportNetwork: Network? = null
     private val xrayTransportGeneration = XrayRuntimeGenerationTracker()
     private val socketRoutingFailureGeneration = AtomicLong(NO_XRAY_GENERATION)
+    private val socketRoutingFailures = GenerationFailureCounter()
     @Volatile
     private var runtimeLease: VpnRuntimeLease? = null
     private var screenReceiverRegistered = false
@@ -357,6 +358,7 @@ class OpenSourceVpnService : android.net.VpnService() {
                     onGenerationReserved = { generation ->
                         attemptGeneration.set(generation)
                         socketRoutingFailureGeneration.set(NO_XRAY_GENERATION)
+                        socketRoutingFailures.resetForGeneration(generation)
                         xrayTransportGeneration.publish(generation)
                     },
                 )
@@ -381,12 +383,38 @@ class OpenSourceVpnService : android.net.VpnService() {
                     throw CancellationException("Xray connection run was superseded before publication")
                 }
                 val connectedAtMs = android.os.SystemClock.elapsedRealtime()
+                var consecutiveStoppedObservations = 0
+                var firstStoppedObservationAtMs = NO_TIMESTAMP
                 while (shouldKeepConnectionAlive(runId) &&
-                    appContainer.xrayCoreBridge.isRunning() &&
                     socketRoutingFailureGeneration.get() != startedGeneration
                 ) {
-                    withTimeoutOrNull(monitorCadencePolicy.intervalMs(deviceInteractive)) {
-                        connectionMonitorSignal.receive()
+                    if (!appContainer.xrayCoreBridge.isRuntimeGenerationCurrent(
+                            vpnTunnelOwner,
+                            startedGeneration,
+                        )
+                    ) {
+                        break
+                    }
+                    if (appContainer.xrayCoreBridge.isRunning()) {
+                        consecutiveStoppedObservations = 0
+                        firstStoppedObservationAtMs = NO_TIMESTAMP
+                        withTimeoutOrNull(monitorCadencePolicy.intervalMs(deviceInteractive)) {
+                            connectionMonitorSignal.receive()
+                        }
+                    } else {
+                        val stoppedAtMs = android.os.SystemClock.elapsedRealtime()
+                        if (firstStoppedObservationAtMs == NO_TIMESTAMP) {
+                            firstStoppedObservationAtMs = stoppedAtMs
+                        }
+                        consecutiveStoppedObservations += 1
+                        if (consecutiveStoppedObservations >=
+                            XRAY_STOPPED_OBSERVATIONS_BEFORE_REBUILD &&
+                            stoppedAtMs - firstStoppedObservationAtMs >=
+                            XRAY_STOPPED_MIN_DURATION_MS
+                        ) {
+                            break
+                        }
+                        delay(XRAY_STOPPED_CONFIRM_DELAY_MS)
                     }
                 }
                 if (shouldKeepConnectionAlive(runId)) {
@@ -514,6 +542,7 @@ class OpenSourceVpnService : android.net.VpnService() {
             ParcelFileDescriptor.fromFd(fd).use { duplicate ->
                 network.bindSocket(duplicate.fileDescriptor)
             }
+            socketRoutingFailures.recordSuccess(generation)
             true
         } catch (error: Exception) {
             appContainer.vpnConnectionRepository.appendDiagnostic(
@@ -522,14 +551,28 @@ class OpenSourceVpnService : android.net.VpnService() {
                     (error.message ?: error::class.java.simpleName),
             )
             // VpnService.protect plus Builder.setUnderlyingNetworks is a valid fallback.
+            socketRoutingFailures.recordSuccess(generation)
             true
         }
     }
 
     private fun reportXraySocketRoutingFailure(generation: Long, reason: String) {
         if (generation == NO_XRAY_GENERATION || xrayTransportGeneration.snapshot() != generation) return
+        val progress = socketRoutingFailures.recordFailure(
+            generation,
+            android.os.SystemClock.elapsedRealtime(),
+        ) ?: return
+        appContainer.vpnConnectionRepository.appendDiagnostic(
+            "Xray socket routing failure ${progress.count}/" +
+                "$SOCKET_ROUTING_FAILURES_BEFORE_REBUILD " +
+                "(${progress.elapsedMs}ms): $reason",
+        )
+        if (progress.count < SOCKET_ROUTING_FAILURES_BEFORE_REBUILD ||
+            progress.elapsedMs < SOCKET_ROUTING_FAILURE_MIN_DURATION_MS
+        ) {
+            return
+        }
         if (!socketRoutingFailureGeneration.compareAndSet(NO_XRAY_GENERATION, generation)) return
-        appContainer.vpnConnectionRepository.appendDiagnostic("Xray socket routing failed: $reason")
         connectionMonitorSignal.trySend(Unit)
     }
 
@@ -727,9 +770,15 @@ class OpenSourceVpnService : android.net.VpnService() {
         private const val SCREEN_OFF_CONNECTION_MONITOR_INTERVAL_MS = 30_000L
         private const val INITIAL_RECONNECT_DELAY_MS = 250L
         private const val MAX_RECONNECT_DELAY_MS = 30_000L
+        private const val SOCKET_ROUTING_FAILURES_BEFORE_REBUILD = 3
+        private const val SOCKET_ROUTING_FAILURE_MIN_DURATION_MS = 5_000L
+        private const val XRAY_STOPPED_OBSERVATIONS_BEFORE_REBUILD = 3
+        private const val XRAY_STOPPED_CONFIRM_DELAY_MS = 1_000L
+        private const val XRAY_STOPPED_MIN_DURATION_MS = 5_000L
         private const val STABLE_CONNECTION_BACKOFF_RESET_MS = 30_000L
         private const val CONNECTION_JOB_JOIN_GRACE_MS = 1_000L
         private const val NO_XRAY_GENERATION = Long.MIN_VALUE
+        private const val NO_TIMESTAMP = Long.MIN_VALUE
 
         fun connectIntent(context: Context, profileId: String): Intent {
             return Intent(context, OpenSourceVpnService::class.java)

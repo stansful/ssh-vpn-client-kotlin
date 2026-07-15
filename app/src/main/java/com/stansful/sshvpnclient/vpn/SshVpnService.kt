@@ -344,7 +344,13 @@ class SshVpnService : android.net.VpnService() {
             )
             // Existing TCP sockets cannot migrate to another Network. The connection loop keeps
             // the TUN pipeline and creates the replacement SSH socket on the selected network.
-            expectedSession?.let(appContainer.sshConnectionManager::disconnectIfCurrent)
+            // Reset client flows before JSch disconnects its channels; otherwise JSch reports the
+            // transport failure as a misleading channel EOF and the browser can keep an orphan.
+            expectedSession?.let { session ->
+                appContainer.sshConnectionManager.disconnectIfCurrent(session) {
+                    appContainer.tun2SocksManager.pauseSshTransport(vpnTunnelOwner)
+                }
+            }
             connectionMonitorSignal.trySend(Unit)
         }
     }

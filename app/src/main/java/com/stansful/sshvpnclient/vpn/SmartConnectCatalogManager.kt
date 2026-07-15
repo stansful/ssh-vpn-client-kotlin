@@ -122,44 +122,54 @@ class SmartConnectCatalogManager(
         if (profiles.isEmpty()) {
             throw SmartConnectPoolExhaustedException("Smart Connect configurations could not be decrypted")
         }
+        val eligibleProfiles = profiles.filterNot { profile ->
+            profile.fingerprint in excludedFingerprints
+        }
+        if (eligibleProfiles.isEmpty()) {
+            throw SmartConnectPoolExhaustedException(
+                "Recently failed Smart Connect tunnels are cooling down",
+            )
+        }
         ensureSmartWorkflowCurrent(workflowIsCurrent)
 
         stateStore.publish { state ->
             state.copy(
                 phase = SmartConnectPhase.CHECKING,
                 checkCompleted = 0,
-                checkTotal = profiles.size,
+                checkTotal = eligibleProfiles.size,
                 catalogSize = profiles.size,
-                message = "Checking tunnels 0/${profiles.size}",
+                message = "Checking tunnels 0/${eligibleProfiles.size}",
             )
         }
-        val fingerprintsById = profiles.associate { profile -> profile.id to profile.fingerprint }
+        val fingerprintsById = eligibleProfiles.associate { profile ->
+            profile.id to profile.fingerprint
+        }
         val terminalResults = SmartTerminalResultAccumulator(fingerprintsById)
         val completed = AtomicInteger(0)
         val publicationStep = (
-            (profiles.size + MAX_PROGRESS_PUBLICATIONS - 1) / MAX_PROGRESS_PUBLICATIONS
+            (eligibleProfiles.size + MAX_PROGRESS_PUBLICATIONS - 1) / MAX_PROGRESS_PUBLICATIONS
             ).coerceAtLeast(1)
         val probeDeadlineNanos = smartConnectProbeDeadlineNanos(workflowDeadlineNanos)
         var batchFailure: Exception? = null
         val returnedResults = try {
             withMonotonicDeadlineOrNull(probeDeadlineNanos) {
                 xrayCoreBridge.testBatch(
-                    profiles = profiles,
+                    profiles = eligibleProfiles,
                     deadlineNanos = probeDeadlineNanos,
                     preferredPhysicalNetwork = preferredPhysicalNetwork,
                     onResult = { result ->
                         if (terminalResults.recordCompleted(result)) {
                             val completedNow = completed.incrementAndGet()
-                                .coerceAtMost(profiles.size)
-                            if (completedNow == profiles.size ||
+                                .coerceAtMost(eligibleProfiles.size)
+                            if (completedNow == eligibleProfiles.size ||
                                 completedNow % publicationStep == 0
                             ) {
                                 stateStore.publish { state ->
                                     state.copy(
                                         phase = SmartConnectPhase.CHECKING,
                                         checkCompleted = maxOf(state.checkCompleted, completedNow),
-                                        checkTotal = profiles.size,
-                                        message = "Checking tunnels $completedNow/${profiles.size}",
+                                        checkTotal = eligibleProfiles.size,
+                                        message = "Checking tunnels $completedNow/${eligibleProfiles.size}",
                                     )
                                 }
                             }

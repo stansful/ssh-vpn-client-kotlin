@@ -22,6 +22,8 @@ import java.security.MessageDigest
 import java.util.Base64
 import java.util.Properties
 
+internal const val SSH_SERVER_ALIVE_COUNT_MAX = 3
+
 class SshConnectionManager {
     private val sessionLock = Any()
     private var connectionGeneration = 0L
@@ -96,7 +98,7 @@ class SshConnectionManager {
                     effectiveKeepAliveIntervalSec(configuredKeepAliveIntervalSec, deviceInteractive)
                 }
                 session.setServerAliveInterval(initialKeepAliveIntervalSec * 1000)
-                session.setServerAliveCountMax(SERVER_ALIVE_COUNT_MAX)
+                session.setServerAliveCountMax(SSH_SERVER_ALIVE_COUNT_MAX)
 
                 if (config.authType == AuthType.PASSWORD) {
                     val passwordBytes = (config.password ?: throw VpnConnectionException("Authentication failed"))
@@ -350,10 +352,20 @@ class SshConnectionManager {
     }
 
     internal fun disconnectIfCurrent(expectedSession: Session): Boolean {
+        return disconnectIfCurrent(expectedSession, beforeDisconnect = {})
+    }
+
+    internal fun disconnectIfCurrent(
+        expectedSession: Session,
+        beforeDisconnect: () -> Unit,
+    ): Boolean {
         val shouldDisconnect = synchronized(sessionLock) {
             val isConnecting = connectingSession === expectedSession
             val isActive = activeSession === expectedSession
             if (!isConnecting && !isActive) return@synchronized false
+            // Claim the exact current session before mutating the TUN transport. Holding this lock
+            // prevents a reconnect from promoting session B between the check and pause callback.
+            beforeDisconnect()
             connectionGeneration += 1L
             if (isConnecting) {
                 connectingSession = null
@@ -581,7 +593,6 @@ class SshConnectionManager {
     private companion object {
         const val DEFAULT_CONNECT_TIMEOUT_MS = 20_000
         const val SSH_MAX_INPUT_BUFFER_SIZE_BYTES = 4 * 1_024 * 1_024
-        const val SERVER_ALIVE_COUNT_MAX = 1
         const val TERMINAL_CONNECT_TIMEOUT_MS = 10_000
         const val TERMINAL_PTY_TYPE = "xterm"
         const val TUNNEL_CHECK_TIMEOUT_MS = 10_000

@@ -661,9 +661,11 @@ refresh isolated source
 - All-negative/zero-result snapshot не очищает каталог. При массовом отказе выполняется control request через ту же захваченную physical network; без хотя бы одного текущего `AVAILABLE` destructive prune не выполняется.
 - Результаты, удаление unavailable/stale и выбор winner объединены одной guarded Room-транзакцией. Если physical network/settings revision устарела, исключение откатывает всю транзакцию; secrets удаляются только после commit.
 - HTTP sync, batch probes, DNS и live Xray sockets используют один захваченный `Network`; dialer fd проходит `VpnService.protect()` и best-effort `Network.bindSocket()`. Поэтому мобильная сеть не попадает обратно в TUN и не зависит от Wi‑Fi route/DNS.
-- Live health требует двух отрицательных YouTube probes с паузой 2 секунды. Stop, handoff и routing revision проверяются после confirmation и прямо перед durable `UNAVAILABLE`, поэтому инфраструктурная гонка не отравляет профиль.
-- Непрерывный RX не разрешает health-check разрушить активное скачивание; TX-only имеет максимум defer 5 минут. Проверка использует дешёвые UID counters без polling/wake lock.
-- Cadence: 10 секунд в первую минуту, затем 30 секунд при активном экране, 120 секунд screen-off и 300 секунд в Battery Saver. Retry backoff: 30/60/120 секунд, 5/15 минут.
+- До открытия дополнительного live-health соединения проверяется активный или недавний RX. Если payload движется, probe вообще не создаётся: это защищает длинный download от публичных proxy с лимитом одновременных streams.
+- Первый tunnel проверяется двумя отрицательными YouTube probes с паузой 2 секунды. Уже подтверждённый tunnel переключается только после не менее трёх отрицательных раундов и 30 секунд непрерывной ошибки. Stop, handoff и routing revision проверяются после confirmation и прямо перед durable `UNAVAILABLE`, поэтому инфраструктурная гонка не отравляет профиль.
+- Непрерывный UID RX и 45-секундное recent-RX окно не разрешают health-check разрушить активное скачивание; device-only fallback ограничен 15 минутами, TX-only — 5 минутами. Это учитывает Android VPN accounting, но не позволяет трафику исключённого приложения скрывать мёртвый tunnel бесконечно; polling/wake lock не используются.
+- Profile после подтверждённого health failure получает 15-минутный monotonic cooldown, после повторной runtime-ошибки — 2-минутный. Cooldown profiles не пробуются batch-ом и не участвуют в выборе, поэтому клиент не переключается по кругу A → B → A.
+- Cadence здорового tunnel: 10 секунд в первую минуту, затем 30 секунд при активном экране, 120 секунд screen-off и 300 секунд в Battery Saver. После первого failure подтверждающие раунды временно идут раз в 10 секунд. Retry backoff: 30/60/120 секунд, 5/15 минут, но ожидание сокращается до ближайшего окончания profile cooldown.
 - Persisted `desiredActive` восстанавливается при входе во вкладку, если VPN permission сохранён; без permission stale flag очищается и UI просит явный Start.
 
 ## 25. OpenSource VPN runtime
@@ -761,7 +763,7 @@ Install:
 
 Release APK:
 
-- `appVersionName = 2.6.0`.
+- `appVersionName = 2.6.1`.
 - `versionCode = major * 1_000_000 + minor * 1_000 + patch`.
 - ABI splits включены для:
   - `arm64-v8a`.
@@ -870,7 +872,7 @@ Backup:
 - Diagnostics persistence throttled до 15 секунд.
 - Xray/OpenSource checks используют один native runtime и bounded transient pool до 128 authenticated SOCKS/TLS probes с timeout до 5 секунд. Для примерно 500 profiles pipeline целится примерно в 10 секунд при защитном 60-секундном budget, публикует live coalesced progress и сохраняет terminal results одной Room-транзакцией без `RUNNING`. Проверки не пересекаются с Xray VPN runtime.
 - Smart Connect не держит WorkManager/alarm/wake lock: health живёт только внутри foreground VPN service, интервалы адаптируются к экрану/Battery Saver, а network/settings события будят conflated channel.
-- Перед Smart failover и SSH rebuild раздельные UID RX/TX counters защищают активные передачи: подтверждённый RX откладывает teardown без искусственного 5-минутного лимита, TX-only — максимум на 5 минут.
+- Перед Smart failover и SSH rebuild RX/TX counters защищают активные передачи: UID RX откладывает teardown без искусственного лимита, device-only fallback — максимум на 15 минут, TX-only — на 5 минут.
 - Smart и OpenSource updater core используют process-wide single-flight mutex для общих `.tmp`/target files; уже проверенный asset переиспользуется после ожидания.
 - ViewModel flows используют `SharingStarted.WhileSubscribed(5_000)` там, где это подходит UI.
 

@@ -52,4 +52,16 @@ class TunForwarderConfigTest {
             TunForwarderConfig(tunMtu = 8_500, maxActiveTcpSessions = 129)
         }
     }
+
+    @Test
+    fun `default TUN writer tolerates a short five second pressure spike`() {
+        assertEquals(5_000L, TunForwarderConfig(tunMtu = 8_500).tunWriteEnqueueTimeoutMs)
+    }
+
+    @Test
+    fun `remote channel EOF is FIN only while JSch channel remains connected`() {
+        assertEquals(true, shouldSendRemoteFin(streamReachedEof = true, channelStillConnected = true))
+        assertEquals(false, shouldSendRemoteFin(streamReachedEof = true, channelStillConnected = false))
+        assertEquals(false, shouldSendRemoteFin(streamReachedEof = false, channelStillConnected = true))
+    }
 }
