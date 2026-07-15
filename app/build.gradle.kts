@@ -25,7 +25,7 @@ val releaseSigningConfigured = listOf(
 val bundleXrayCore = providers.gradleProperty("bundleXrayCore")
     .map(String::toBoolean)
     .orElse(false)
-val appVersionName = "2.5.5"
+val appVersionName = "2.5.6"
 val appVersionParts = appVersionName.split('.').map(String::toInt)
 require(appVersionParts.size == 3 && appVersionParts.drop(1).all { it in 0..999 }) {
     "versionName must be SemVer with minor/patch in 0..999"

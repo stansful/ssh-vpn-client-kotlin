@@ -711,7 +711,8 @@ Reconnect:
 
 - `GitHubAppUpdateRepository`.
 - `AndroidAppUpdateDownloader`.
-- UI state в `MainViewModel` и `OpenSourceViewModel`.
+- Общий `AppUpdateUiState` и одинаковый update UI используются на вкладках SSH,
+  OpenSource и Smart Connect; каждая вкладка наблюдает единый process-wide downloader.
 
 Release check:
 
@@ -720,6 +721,8 @@ Release check:
 - Автоматическая проверка запускается через 1500 мс при инициализации `MainViewModel` на SSH главной.
 - Успешная автоматическая проверка кешируется на 24 часа.
 - Manual check force-режим.
+- Ручная кнопка `Check for updates` доступна и в Smart Connect settings; это обновление
+  приложения, отдельное от расположенного там же обновления Xray runtime core.
 - Поддерживается ETag/304.
 - Network выбирается как validated non-VPN, если доступен.
 
@@ -763,7 +766,7 @@ Install:
 
 Release APK:
 
-- `appVersionName = 2.6.1`.
+- `appVersionName = 2.5.6`.
 - `versionCode = major * 1_000_000 + minor * 1_000 + patch`.
 - ABI splits включены для:
   - `arm64-v8a`.

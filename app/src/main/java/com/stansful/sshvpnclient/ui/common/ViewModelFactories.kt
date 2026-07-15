@@ -29,6 +29,8 @@ class AppViewModelFactory(
                 disconnectVpnUseCase = container.disconnectVpnUseCase,
                 xrayCoreBridge = container.xrayCoreBridge,
                 xrayCoreUpdateRepository = container.xrayCoreUpdateRepository,
+                appUpdateRepository = container.appUpdateRepository,
+                appUpdateDownloader = container.appUpdateDownloader,
             )
 
             modelClass.isAssignableFrom(OpenSourceViewModel::class.java) -> OpenSourceViewModel(

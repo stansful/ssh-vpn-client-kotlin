@@ -77,7 +77,8 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
   - `Dark` в black/orange стиле;
   - `Custom` с RGB-настройкой цветов, которые сохраняются после перезапуска.
 - Ссылка на GitHub в Settings с кнопкой копирования.
-- Автоматическая проверка GitHub Releases не чаще раза в 24 часа и ручная кнопка `Check for updates`.
+- Автоматическая проверка GitHub Releases не чаще раза в 24 часа и ручная кнопка
+  `Check for updates` в настройках SSH, OpenSource и Smart Connect.
 - Обновление через системный DownloadManager и стандартный Android installer с in-app прогрессом, восстановлением кнопки `Install` после перезапуска и проверкой SHA-256, package name, SemVer, versionCode и signing certificate.
 - Release APK собирается installable и локально подписанным, если production signing env не задан.
 

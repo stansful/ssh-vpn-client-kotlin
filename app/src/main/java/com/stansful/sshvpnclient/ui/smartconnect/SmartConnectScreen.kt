@@ -2,7 +2,9 @@ package com.stansful.sshvpnclient.ui.smartconnect
 
 import android.app.Activity
 import android.content.ClipData
+import android.content.Intent
 import android.net.VpnService
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -83,6 +85,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -91,13 +94,19 @@ import com.stansful.sshvpnclient.AppContainer
 import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
+import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
+import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSummary
 import com.stansful.sshvpnclient.domain.model.SmartConnectPhase
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.XrayCoreAsset
 import com.stansful.sshvpnclient.ui.common.AppScreen
+import com.stansful.sshvpnclient.ui.common.AppUpdateAvailableDialog
+import com.stansful.sshvpnclient.ui.common.AppUpdateSettingsSection
+import com.stansful.sshvpnclient.ui.common.AppUpdateUiState
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
+import com.stansful.sshvpnclient.ui.common.openAppUpdateInstaller
 import com.stansful.sshvpnclient.ui.main.CustomThemeColorsEditor
 import com.stansful.sshvpnclient.ui.settings.SettingsSwitchRow
 import com.stansful.sshvpnclient.ui.settings.ThemeModeSelector
@@ -113,6 +122,8 @@ fun SmartConnectRoute(
     val viewModel: SmartConnectViewModel = viewModel(factory = AppViewModelFactory(container))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    var pendingUpdateInstallUri by remember { mutableStateOf<String?>(null) }
 
     // The ViewModel is activity-scoped and survives tab switches. Refresh on every route entry so
     // a core installed from OpenSource becomes usable here without an Activity restart.
@@ -145,6 +156,42 @@ fun SmartConnectRoute(
         }
     }
 
+    val installPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) {
+        val canInstall = context.packageManager.canRequestPackageInstalls()
+        val contentUri = pendingUpdateInstallUri
+        if (contentUri != null && canInstall) {
+            openAppUpdateInstaller(context, contentUri).onFailure { error ->
+                viewModel.onUpdateActionFailed(error.message ?: "Unable to open Android installer")
+            }
+        } else if (contentUri != null) {
+            viewModel.onUpdateActionFailed("Allow shadow-ssh to install unknown apps")
+        }
+        pendingUpdateInstallUri = null
+    }
+
+    val requestUpdateInstall = {
+        val update = state.updateState.downloadState as? AppUpdateDownloadState.ReadyToInstall
+        val contentUri = update?.contentUri
+        if (contentUri == null) {
+            viewModel.onUpdateActionFailed("Downloaded update is not ready to install")
+        } else if (context.packageManager.canRequestPackageInstalls()) {
+            openAppUpdateInstaller(context, contentUri).onFailure { error ->
+                viewModel.onUpdateActionFailed(error.message ?: "Unable to open Android installer")
+            }
+        } else {
+            pendingUpdateInstallUri = contentUri
+            installPermissionLauncher.launch(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    "package:${context.packageName}".toUri(),
+                ),
+            )
+        }
+        Unit
+    }
+
     val requestStart = {
         if (viewModel.prepareStart()) {
             val permissionIntent = VpnService.prepare(context)
@@ -168,6 +215,11 @@ fun SmartConnectRoute(
         onCheckXrayCoreUpdates = viewModel::checkXrayCoreUpdates,
         onDownloadXrayCore = viewModel::downloadXrayCore,
         onCancelXrayCoreDownload = viewModel::cancelXrayCoreDownload,
+        onCheckForUpdates = viewModel::checkForUpdates,
+        onDismissUpdate = viewModel::dismissAvailableUpdate,
+        onOpenUpdateRelease = { update -> uriHandler.openUri(update.releaseUrl) },
+        onDownloadUpdate = viewModel::downloadAvailableUpdate,
+        onInstallUpdate = requestUpdateInstall,
         openAppPicker = openAppPicker,
         onDismissNoSelectedApps = viewModel::dismissNoSelectedAppsDialog,
     )
@@ -186,11 +238,22 @@ private fun SmartConnectScreen(
     onCheckXrayCoreUpdates: () -> Unit,
     onDownloadXrayCore: (XrayCoreAsset) -> Unit,
     onCancelXrayCoreDownload: () -> Unit,
+    onCheckForUpdates: () -> Unit,
+    onDismissUpdate: () -> Unit,
+    onOpenUpdateRelease: (AppUpdateInfo) -> Unit,
+    onDownloadUpdate: () -> Unit,
+    onInstallUpdate: () -> Unit,
     openAppPicker: () -> Unit,
     onDismissNoSelectedApps: () -> Unit,
 ) {
     var settingsVisible by rememberSaveable { mutableStateOf(false) }
     var routesVisible by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(state.updateState.availableUpdate) {
+        if (state.updateState.availableUpdate != null) {
+            settingsVisible = false
+        }
+    }
 
     AppScreen(
         title = stringResource(R.string.smart_connect_title),
@@ -274,11 +337,28 @@ private fun SmartConnectScreen(
             onCheckXrayCoreUpdates = onCheckXrayCoreUpdates,
             onDownloadXrayCore = onDownloadXrayCore,
             onCancelXrayCoreDownload = onCancelXrayCoreDownload,
+            updateState = state.updateState,
+            onCheckForUpdates = onCheckForUpdates,
+            onInstallUpdate = onInstallUpdate,
             onOpenAppPicker = {
                 settingsVisible = false
                 openAppPicker()
             },
             onDismiss = { settingsVisible = false },
+        )
+    }
+
+    state.updateState.availableUpdate?.let { update ->
+        AppUpdateAvailableDialog(
+            update = update,
+            downloadState = state.updateState.downloadState,
+            onLater = onDismissUpdate,
+            onOpenRelease = { onOpenUpdateRelease(update) },
+            onDownload = {
+                onDownloadUpdate()
+                settingsVisible = true
+            },
+            onInstall = onInstallUpdate,
         )
     }
 
@@ -779,6 +859,9 @@ private fun SmartConnectSettingsSheet(
     onCheckXrayCoreUpdates: () -> Unit,
     onDownloadXrayCore: (XrayCoreAsset) -> Unit,
     onCancelXrayCoreDownload: () -> Unit,
+    updateState: AppUpdateUiState,
+    onCheckForUpdates: () -> Unit,
+    onInstallUpdate: () -> Unit,
     onOpenAppPicker: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -858,6 +941,16 @@ private fun SmartConnectSettingsSheet(
                         )
                     }
                 }
+            }
+            item {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+            }
+            item {
+                AppUpdateSettingsSection(
+                    updateState = updateState,
+                    onCheckForUpdates = onCheckForUpdates,
+                    onInstallUpdate = onInstallUpdate,
+                )
             }
             item {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))

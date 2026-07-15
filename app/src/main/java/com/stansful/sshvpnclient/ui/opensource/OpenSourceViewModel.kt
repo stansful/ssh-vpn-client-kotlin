@@ -6,7 +6,6 @@ import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
 import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
-import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSource
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSummary
@@ -31,6 +30,7 @@ import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.repository.XrayCoreUpdateRepository
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectProxyVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
+import com.stansful.sshvpnclient.ui.common.AppUpdateUiState
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
 import com.stansful.sshvpnclient.xray.XrayCoreInstallResult
 import com.stansful.sshvpnclient.xray.XrayRuntimeBusyException
@@ -100,7 +100,7 @@ data class OpenSourceUiState(
     val appSettings: AppSettings = AppSettings(),
     val vpnState: VpnConnectionState = VpnConnectionState(),
     val xrayCoreAvailable: Boolean = false,
-    val updateState: OpenSourceUpdateUiState = OpenSourceUpdateUiState(),
+    val updateState: AppUpdateUiState = AppUpdateUiState(),
     val xrayCoreUpdateState: XrayCoreUpdateUiState = XrayCoreUpdateUiState(),
 ) {
     val checkProgressText: String?
@@ -149,13 +149,6 @@ data class OpenSourceUiState(
             vpnState.status != VpnConnectionStatus.DISCONNECTING
 }
 
-data class OpenSourceUpdateUiState(
-    val isChecking: Boolean = false,
-    val availableUpdate: AppUpdateInfo? = null,
-    val statusMessage: String? = null,
-    val downloadState: AppUpdateDownloadState = AppUpdateDownloadState.Idle,
-)
-
 data class XrayCoreUpdateUiState(
     val runtimeAbi: String = "",
     val isChecking: Boolean = false,
@@ -194,7 +187,7 @@ class OpenSourceViewModel(
     private val operation = MutableStateFlow(OperationState())
     private val dialogState = MutableStateFlow(DialogState())
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
-    private val appUpdateState = MutableStateFlow(OpenSourceUpdateUiState())
+    private val appUpdateState = MutableStateFlow(AppUpdateUiState())
     private val xrayCoreAvailable = MutableStateFlow(false)
     private val xrayCoreUpdateState = MutableStateFlow(
         XrayCoreUpdateUiState(runtimeAbi = xrayCoreUpdateRepository.runtimeAbi),

@@ -6,7 +6,6 @@ import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
 import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
 import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
-import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.SshConfigSummary
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
@@ -21,6 +20,7 @@ import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
+import com.stansful.sshvpnclient.ui.common.AppUpdateUiState
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
 import com.stansful.sshvpnclient.vpn.SshTerminalSession
 import java.util.ArrayDeque
@@ -108,13 +108,6 @@ data class TerminalUiState(
     val outputRevision: Long = 0L,
     val input: String = "",
     val errorMessage: String? = null,
-)
-
-data class AppUpdateUiState(
-    val isChecking: Boolean = false,
-    val availableUpdate: AppUpdateInfo? = null,
-    val statusMessage: String? = null,
-    val downloadState: AppUpdateDownloadState = AppUpdateDownloadState.Idle,
 )
 
 class MainViewModel(
