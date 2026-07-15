@@ -14,3 +14,6 @@ interface ProxySourceSynchronizer {
         connectionFactory: ProxySourceConnectionFactory? = null,
     ): ProxySyncResult
 }
+
+/** Marker boundary preventing Smart Connect from being wired to the OpenSource synchronizer. */
+interface SmartProxySourceSynchronizer : ProxySourceSynchronizer

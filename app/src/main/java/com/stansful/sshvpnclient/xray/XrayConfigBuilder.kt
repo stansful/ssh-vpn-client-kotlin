@@ -18,21 +18,51 @@ data class XrayBatchSocksTestEntry(
 class XrayConfigBuilder(
     private val parser: ProxyShareLinkParser,
 ) {
-    fun buildTunConfig(profile: ProxyProfile): String {
+    fun buildTunConfig(profile: ProxyProfile): String = buildTunConfig(
+        profile = profile,
+        liveHealthEndpoint = null,
+    )
+
+    fun buildTunConfig(
+        profile: ProxyProfile,
+        liveHealthEndpoint: XrayLiveHealthEndpoint?,
+    ): String {
         val parsed = parse(profile)
-        return baseConfig(
-            inbound = JSONObject()
-                .put("protocol", "tun")
-                .put("tag", "tun-in")
-                .put("settings", JSONObject().put("name", "xray0").put("MTU", 1500))
-                .put(
-                    "sniffing",
-                    JSONObject()
-                        .put("enabled", true)
-                        .put("destOverride", JSONArray(listOf("http", "tls", "quic"))),
+        val tunInbound = JSONObject()
+            .put("protocol", "tun")
+            .put("tag", TUN_INBOUND_TAG)
+            .put("settings", JSONObject().put("name", "xray0").put("MTU", 1500))
+            .put(
+                "sniffing",
+                JSONObject()
+                    .put("enabled", true)
+                    .put("destOverride", JSONArray(listOf("http", "tls", "quic"))),
+            )
+        val outbound = buildOutbound(parsed)
+        if (liveHealthEndpoint == null) {
+            return baseConfig(inbound = tunInbound, outbound = outbound).toString()
+        }
+
+        val inbounds = JSONArray()
+            .put(tunInbound)
+            .put(buildLiveHealthInbound(liveHealthEndpoint))
+        return baseConfig(inbounds = inbounds, outbound = outbound)
+            .put(
+                "routing",
+                JSONObject().put(
+                    "rules",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("type", "field")
+                            .put(
+                                "inboundTag",
+                                JSONArray().put(TUN_INBOUND_TAG).put(LIVE_HEALTH_INBOUND_TAG),
+                            )
+                            .put("outboundTag", DEFAULT_OUTBOUND_TAG),
+                    ),
                 ),
-            outbound = buildOutbound(parsed),
-        ).toString()
+            )
+            .toString()
     }
 
     fun buildSocksTestConfig(profile: ProxyProfile, socksPort: Int): String {
@@ -109,16 +139,42 @@ class XrayConfigBuilder(
             ?: error("Stored proxy configuration is invalid")
     }
 
+    private fun buildLiveHealthInbound(endpoint: XrayLiveHealthEndpoint): JSONObject {
+        return JSONObject()
+            .put("listen", LIVE_HEALTH_LOOPBACK_HOST)
+            .put("port", endpoint.port)
+            .put("protocol", "socks")
+            .put("tag", LIVE_HEALTH_INBOUND_TAG)
+            .put(
+                "settings",
+                JSONObject()
+                    .put("auth", "password")
+                    .put(
+                        "accounts",
+                        JSONArray().put(
+                            JSONObject()
+                                .put("user", endpoint.username)
+                                .put("pass", endpoint.password),
+                        ),
+                    )
+                    .put("udp", false),
+            )
+    }
+
     private fun baseConfig(inbound: JSONObject, outbound: JSONObject): JSONObject {
+        return baseConfig(JSONArray().put(inbound), outbound)
+    }
+
+    private fun baseConfig(inbounds: JSONArray, outbound: JSONObject): JSONObject {
         return JSONObject()
             .put("log", JSONObject().put("loglevel", "warning"))
-            .put("inbounds", JSONArray().put(inbound))
+            .put("inbounds", inbounds)
             .put("outbounds", JSONArray().put(outbound))
     }
 
     private fun buildOutbound(
         profile: ParsedProxyProfile,
-        tag: String = "proxy-out",
+        tag: String = DEFAULT_OUTBOUND_TAG,
     ): JSONObject {
         require(profile.transport != ProxyTransport.UNKNOWN) { "Unsupported transport" }
         require(profile.security != ProxySecurity.UNKNOWN) { "Unsupported transport security" }
@@ -243,6 +299,10 @@ class XrayConfigBuilder(
 
     private companion object {
         const val BATCH_TEST_INBOUND_TAG = "batch-test-in"
+        const val TUN_INBOUND_TAG = "tun-in"
+        const val LIVE_HEALTH_INBOUND_TAG = "live-health-in"
+        const val LIVE_HEALTH_LOOPBACK_HOST = "127.0.0.1"
+        const val DEFAULT_OUTBOUND_TAG = "proxy-out"
     }
 }
 

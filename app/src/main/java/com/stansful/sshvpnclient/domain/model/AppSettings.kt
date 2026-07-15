@@ -3,6 +3,7 @@ package com.stansful.sshvpnclient.domain.model
 data class AppSettings(
     val showLogsOnMain: Boolean = false,
     val showLogsOnOpenSource: Boolean = false,
+    val showLogsOnSmartConnect: Boolean = false,
     val showTerminalOnMain: Boolean = false,
     val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
     val customThemeColors: CustomThemeColors = CustomThemeColors.defaultLight(),
@@ -13,6 +14,8 @@ data class AppSettings(
     val showOpenSourceWarningOnEnter: Boolean = true,
     val openSourceRiskBannerExpanded: Boolean = true,
     val openSourceAutoUpdateEnabled: Boolean = false,
+    val smartConnectConsentVersion: Int = 0,
+    val showSmartConnectWarningOnEnter: Boolean = true,
 )
 
 enum class GlobalTab(
@@ -20,6 +23,7 @@ enum class GlobalTab(
     val label: String,
 ) {
     SHADOW_SSH("shadow-ssh", "shadow-ssh"),
+    SMART_CONNECT("smart-connect", "smart"),
     OPEN_SOURCE("opensource", "opensource");
 
     companion object {

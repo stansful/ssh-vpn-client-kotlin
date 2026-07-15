@@ -35,6 +35,7 @@ class AppPickerViewModel(
     private val installedApps = MutableStateFlow<List<InstalledAppInfo>>(emptyList())
     private val selectedPackages = MutableStateFlow(appSettingsRepository.settings.value.selectedAppPackages)
     private val isLoading = MutableStateFlow(true)
+    private var pickerSessionStarted = false
     private val filteredApps = combine(
         query.debounce(SEARCH_DEBOUNCE_MS).distinctUntilChanged(),
         installedApps,
@@ -85,6 +86,7 @@ class AppPickerViewModel(
     }
 
     fun togglePackage(packageName: String) {
+        if (!pickerSessionStarted) refreshSelection()
         val current = selectedPackages.value
         val next = if (packageName in current) {
             current - packageName
@@ -94,8 +96,22 @@ class AppPickerViewModel(
         selectedPackages.value = next
     }
 
+    /**
+     * The picker ViewModel is activity-scoped and can outlive an individual picker visit. Reload
+     * the shared split-tunnel selection whenever the route is opened so a change made from
+     * another tab cannot be overwritten by an old in-memory snapshot on Back/Done.
+     */
+    fun refreshSelection() {
+        selectedPackages.value = appSettingsRepository.settings.value.selectedAppPackages
+        pickerSessionStarted = true
+    }
+
     fun saveSelection() {
+        // A Back event can theoretically beat the first LaunchedEffect frame. In that case do
+        // nothing instead of writing the ViewModel's snapshot from a previous picker visit.
+        if (!pickerSessionStarted) return
         appSettingsRepository.setSelectedAppPackages(selectedPackages.value)
+        pickerSessionStarted = false
     }
 
     private companion object {

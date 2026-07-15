@@ -1,17 +1,18 @@
 # shadow-ssh Android: техническая документация
 
-Дата ревью проекта: 2026-07-11.
+Дата ревью проекта: 2026-07-15.
 
 Документ описывает текущее устройство Android-приложения `shadow-ssh`: архитектуру, основные сценарии, хранение данных, VPN runtime, OpenSource/Xray runtime, обновления, сборку, безопасность и известные ограничения.
 
 ## 1. Назначение приложения
 
-`shadow-ssh` - нативный Android VPN-клиент на Kotlin и Jetpack Compose. Приложение имеет два рабочих режима:
+`shadow-ssh` - нативный Android VPN-клиент на Kotlin и Jetpack Compose. Приложение имеет три рабочих режима:
 
 - `shadow-ssh`: VPN поверх SSH. Android `VpnService` поднимает TUN-интерфейс, а пользовательский TCP/DNS forwarder прокидывает трафик через SSH `direct-tcpip` каналы.
+- `smart` (`Smart Connect`): изолированно обновляет и проверяет публичный Xray-каталог, удаляет подтверждённо недоступные профили, выбирает минимальный ping и автоматически восстанавливает VPN при подтверждённом отказе.
 - `opensource`: VPN поверх публичных VLESS/VMess/Trojan конфигураций. Android `VpnService` поднимает TUN-интерфейс, а runtime Xray core обрабатывает TUN и выбранный proxy profile.
 
-Оба режима используют общий routing mode, общий выбор приложений, общую тему, общий updater приложения и общий репозиторий состояния VPN. Одновременно активным должен быть только один транспорт: `SSH` или `XRAY`.
+Все режимы используют общий routing mode, общий выбор приложений, общую тему, updater приложения и process-wide VPN state/lease. Smart-каталог, его Room rows, selection, sync metadata и Tink secrets не пересекаются с OpenSource. Одновременно активной может быть только одна VPN-сессия.
 
 ## 2. Технологический стек
 
@@ -68,7 +69,7 @@ UI не создает инфраструктуру напрямую. Экран
 - UI layer: Compose screens и ViewModel-и. Хранит только UI state, вызывает use cases и repository methods.
 - Domain layer: модели, интерфейсы репозиториев, валидация и use cases.
 - Data layer: Room, Tink, SharedPreferences, GitHub update API, public source sync.
-- Runtime layer: `SshVpnService`, `OpenSourceVpnService`, `SshConnectionManager`, `VpnTunnelManager`, `Tun2SocksManager`, `XrayCoreBridge`.
+- Runtime layer: `SshVpnService`, `SmartConnectVpnService`, `OpenSourceVpnService`, `SshConnectionManager`, `SmartConnectCatalogManager`, `VpnTunnelManager`, `Tun2SocksManager`, `XrayCoreBridge`.
 
 ## 5. Application startup
 
@@ -91,6 +92,7 @@ UI не создает инфраструктуру напрямую. Экран
 Глобальные вкладки:
 
 - `shadow-ssh`.
+- `smart` (`Smart Connect`).
 - `opensource`.
 
 Активная вкладка сохраняется в настройках (`activeGlobalTab`).
@@ -104,7 +106,7 @@ UI не создает инфраструктуру напрямую. Экран
 - `EDIT_KEY` - создание/редактирование приватного ключа.
 - `APP_PICKER` - выбор приложений для `Selected apps`.
 
-`opensource` отображается как отдельный route внутри `GlobalTabsHost`, но использует общий `APP_PICKER` через переключение вкладки на `shadow-ssh` и навигацию в app picker.
+`smart` и `opensource` отображаются отдельными route внутри `GlobalTabsHost` и используют единый глобальный app picker без переключения на SSH navigation graph.
 
 ## 7. Общие настройки приложения
 
@@ -112,6 +114,7 @@ UI не создает инфраструктуру напрямую. Экран
 
 - `showLogsOnMain` - показывать diagnostics на SSH главной.
 - `showLogsOnOpenSource` - показывать diagnostics на OpenSource вкладке.
+- `showLogsOnSmartConnect` - показывать diagnostics на Smart Connect вкладке.
 - `showTerminalOnMain` - показывать SSH terminal panel.
 - `themeMode` - `System`, `Light`, `Dark`, `Custom`.
 - `customThemeColors` - палитра custom theme.
@@ -122,6 +125,7 @@ UI не создает инфраструктуру напрямую. Экран
 - `showOpenSourceWarningOnEnter` - показывать warning dialog при переходе на OpenSource.
 - `openSourceRiskBannerExpanded` - раскрытость warning banner.
 - `openSourceAutoUpdateEnabled` - автообновление public configs, по умолчанию выключено.
+- `smartConnectConsentVersion` и `showSmartConnectWarningOnEnter` - отдельное согласие и warning policy Smart Connect.
 
 Настройки хранятся в `SharedPreferencesAppSettingsRepository` в файле `ssh-vpn-client-settings`.
 
@@ -132,7 +136,7 @@ UI не создает инфраструктуру напрямую. Экран
 - `Proxy`: весь трафик приложений идет через VPN.
 - `Selected apps`: через VPN идут только приложения из `selectedAppPackages`.
 
-Режим общий для SSH и OpenSource.
+Режим общий для SSH, Smart Connect и OpenSource.
 
 `VpnTunnelManager.applySplitTunnelSettings()`:
 
@@ -153,9 +157,11 @@ App picker:
 
 База данных: `ssh-vpn-client.db`.
 
-Версия схемы: `3`.
+Версия схемы: `4`.
 
 Entities:
+
+Помимо SSH/OpenSource таблиц схема v4 содержит `smart_proxy_profiles`: отдельную копию metadata публичных профилей для Smart Connect. Она не имеет foreign key или DAO-пути к `proxy_profiles`, а секреты используют отдельный префикс `smart-proxy-profile-*`.
 
 ### `ssh_configs`
 
@@ -229,6 +235,7 @@ Entities:
 - `errorMessage`.
 - `diagnostics`.
 - `activeTransport`: `SSH`, `XRAY` или `null`.
+- `sessionOwner`: `SHADOW_SSH`, `SMART_CONNECT`, `OPEN_SOURCE` или `null`.
 
 Реализация: `InMemoryVpnConnectionRepository`.
 
@@ -243,9 +250,9 @@ Entities:
 - При `setDisconnected()` transport сбрасывается в `null`.
 - При `setError()` transport сбрасывается в `null`.
 
-UI должен учитывать `activeTransport`. SSH экран показывает активное подключение только если `activeTransport == SSH`. OpenSource экран показывает активное подключение только если `activeTransport == XRAY`.
+UI учитывает и transport, и logical owner: Smart/OpenSource не показывают чужую Xray-сессию как собственную, но блокируют операции с общим native runtime до полного teardown.
 
-## 12. Взаимоисключение SSH и OpenSource VPN
+## 12. Взаимоисключение VPN-сессий
 
 Одновременно может быть активен только один VPN transport.
 
@@ -266,6 +273,8 @@ UI должен учитывать `activeTransport`. SSH экран показ�
 4. Ждет до 2 секунд, пока состояние станет disconnected или transport перестанет быть `SSH`.
 5. Запускает `OpenSourceVpnService`.
 
+`ConnectSmartVpnUseCase` валидирует routing, останавливает чужую logical VPN-сессию, сохраняет `desiredActive` и запускает `SmartConnectVpnService`. Process-wide `VpnRuntimeLeaseRegistry` не позволяет поздней команде одного logical owner вытеснить уже живой runtime другого owner; новая generation того же owner безопасно инвалидирует только его старую generation.
+
 `DisconnectVpnUseCase` отправляет disconnect intent в сервис активного транспорта.
 
 ## 13. Android VPN interface
@@ -281,7 +290,7 @@ UI должен учитывать `activeTransport`. SSH экран показ�
 - Физическая сеть задаётся через `setUnderlyingNetworks` и должна иметь `INTERNET + NOT_VPN`; `VALIDATED` предпочтителен, но не обязателен для cellular fallback.
 - Split tunneling через `addAllowedApplication()` для `Selected apps`.
 
-Один `VpnTunnelManager` общий для SSH и OpenSource runtime.
+Один `VpnTunnelManager` общий для SSH, Smart Connect и OpenSource runtime; owner token и runtime lease защищают новый TUN от cleanup устаревшей команды.
 
 ## 14. SSH VPN runtime
 
@@ -632,7 +641,32 @@ Native library limitation:
 - Если core уже был загружен, обновление может вернуть `INSTALLED_AFTER_RESTART`.
 - В этом случае новый файл установлен, но приложение нужно перезапустить, чтобы использовать новый runtime.
 
-## 24. OpenSource VPN runtime
+## 24. Smart Connect runtime
+
+Smart Connect использует отдельные `SmartProxyProfileDao`/`RoomSmartProxyProfileRepository`, `IsolatedSmartProxySourceSynchronizer`, sync preferences и Tink secret ids. Профили, имя которых содержит `🇷🇺`, отбрасываются при импорте, удаляются из существующего каталога перед batch и дополнительно исключаются UI/selection policy.
+
+Один пользовательский Start выполняет bounded workflow:
+
+```text
+refresh isolated source
+  -> one-runtime check all through youtube.com
+  -> atomic Room finalization (save + prune + select)
+  -> connect lowest verified latency
+  -> adaptive live health
+  -> confirmed failure: refresh/check/prune/select replacement
+```
+
+- Общий budget refresh/check/finalization — 60 секунд; probe-stage оставляет 3 секунды для durable commit. Непроверенный хвост остаётся `NOT_TESTED`.
+- До 128 transient probes используют один authenticated batch Xray runtime и timeout до 5 секунд на профиль. Progress публикуется монотонно и coalesced.
+- All-negative/zero-result snapshot не очищает каталог. При массовом отказе выполняется control request через ту же захваченную physical network; без хотя бы одного текущего `AVAILABLE` destructive prune не выполняется.
+- Результаты, удаление unavailable/stale и выбор winner объединены одной guarded Room-транзакцией. Если physical network/settings revision устарела, исключение откатывает всю транзакцию; secrets удаляются только после commit.
+- HTTP sync, batch probes, DNS и live Xray sockets используют один захваченный `Network`; dialer fd проходит `VpnService.protect()` и best-effort `Network.bindSocket()`. Поэтому мобильная сеть не попадает обратно в TUN и не зависит от Wi‑Fi route/DNS.
+- Live health требует двух отрицательных YouTube probes с паузой 2 секунды. Stop, handoff и routing revision проверяются после confirmation и прямо перед durable `UNAVAILABLE`, поэтому инфраструктурная гонка не отравляет профиль.
+- Непрерывный RX не разрешает health-check разрушить активное скачивание; TX-only имеет максимум defer 5 минут. Проверка использует дешёвые UID counters без polling/wake lock.
+- Cadence: 10 секунд в первую минуту, затем 30 секунд при активном экране, 120 секунд screen-off и 300 секунд в Battery Saver. Retry backoff: 30/60/120 секунд, 5/15 минут.
+- Persisted `desiredActive` восстанавливается при входе во вкладку, если VPN permission сохранён; без permission stale flag очищается и UI просит явный Start.
+
+## 25. OpenSource VPN runtime
 
 Поток подключения:
 
@@ -669,7 +703,7 @@ Reconnect:
 - Max delay: 30000 мс.
 - На ошибке service чистит Xray runtime и Android VPN interface.
 
-## 25. Обновление приложения
+## 26. Обновление приложения
 
 Основные классы:
 
@@ -714,7 +748,7 @@ Install:
 - Permission `REQUEST_INSTALL_PACKAGES`.
 - Unknown-source settings открывается только по явному действию пользователя.
 
-## 26. Сборка и release artifacts
+## 27. Сборка и release artifacts
 
 Основные scripts:
 
@@ -727,7 +761,7 @@ Install:
 
 Release APK:
 
-- `appVersionName = 2.5.4`.
+- `appVersionName = 2.6.0`.
 - `versionCode = major * 1_000_000 + minor * 1_000 + patch`.
 - ABI splits включены для:
   - `arm64-v8a`.
@@ -770,7 +804,7 @@ Xray release assets:
 
 По умолчанию Xray core не бандлится в APK. Для forced bundled build есть Gradle property `-PbundleXrayCore=true` и env `SSH_VPN_BUNDLE_XRAY_CORE=1`.
 
-## 27. Manifest и permissions
+## 28. Manifest и permissions
 
 Permissions:
 
@@ -795,7 +829,7 @@ Backup:
 - `android:allowBackup="false"`.
 - Настроены `dataExtractionRules` и `backup_rules`.
 
-## 28. Безопасность и privacy
+## 29. Безопасность и privacy
 
 Сделано:
 
@@ -817,7 +851,7 @@ Backup:
 - Если fingerprint не задан, SSH host authenticity не закреплена.
 - Xray runtime core доверяется release repository и Android package sandbox, но это исполняемый native code.
 
-## 29. Производительность и батарея
+## 30. Производительность и батарея
 
 Текущие меры:
 
@@ -835,6 +869,9 @@ Backup:
 - Diagnostics и terminal output публикуются в UI батчами раз в 250 мс; terminal ring ограничен 65 536 символами и имеет отдельный revision для auto-scroll после заполнения.
 - Diagnostics persistence throttled до 15 секунд.
 - Xray/OpenSource checks используют один native runtime и bounded transient pool до 128 authenticated SOCKS/TLS probes с timeout до 5 секунд. Для примерно 500 profiles pipeline целится примерно в 10 секунд при защитном 60-секундном budget, публикует live coalesced progress и сохраняет terminal results одной Room-транзакцией без `RUNNING`. Проверки не пересекаются с Xray VPN runtime.
+- Smart Connect не держит WorkManager/alarm/wake lock: health живёт только внутри foreground VPN service, интервалы адаптируются к экрану/Battery Saver, а network/settings события будят conflated channel.
+- Перед Smart failover и SSH rebuild раздельные UID RX/TX counters защищают активные передачи: подтверждённый RX откладывает teardown без искусственного 5-минутного лимита, TX-only — максимум на 5 минут.
+- Smart и OpenSource updater core используют process-wide single-flight mutex для общих `.tmp`/target files; уже проверенный asset переиспользуется после ожидания.
 - ViewModel flows используют `SharingStarted.WhileSubscribed(5_000)` там, где это подходит UI.
 
 Потенциально дорогие операции:
@@ -844,7 +881,7 @@ Backup:
 - Package icon rendering в app picker идет из PackageManager, но concurrency ограничен и bitmap кешируется bounded LRU.
 - Kotlin TUN forwarder держит worker pools, пока активен SSH VPN.
 
-## 30. Локализация
+## 31. Локализация
 
 Текущая база:
 
@@ -861,7 +898,7 @@ Backup:
 - Для новых языков добавлять `values-<locale>/strings.xml`.
 - ViewModel status messages, которые показываются пользователю, тоже постепенно выносить в UI/resource layer или в отдельный message abstraction, чтобы не смешивать domain/runtime и language text.
 
-## 31. Тестовая поверхность
+## 32. Тестовая поверхность
 
 Точное количество тестов в документации намеренно не фиксируется: источником истины служит отчёт актуального запуска `scripts/test.sh`.
 
@@ -882,6 +919,11 @@ Backup:
 - `TunForwarderConfigTest` - normal/low-RAM flow limits и pressure thresholds.
 - `BoundedTerminalOutputBufferTest` - ограничение terminal output по символам и chunks.
 - `ProxySourceSyncNetworkSelectionTest` - выбор физической validated non-VPN unmetered сети для background sync.
+- `SmartConnectPolicyTest`/`SmartConnectViewModelPolicyTest` - ranking, `🇷🇺` exclusion, deadlines и terminal-result accumulation.
+- `VpnTrafficActivityMonitorTest` - RX/TX liveness policy для длинных download/upload.
+- `VpnRuntimeLeaseRegistryTest`/`VpnLifecyclePolicyTest` - logical owner isolation и stale command races.
+- `RoomSmartProxyProfileRepositoryBatchTest` - isolated secrets, batch queries и guarded atomic finalization.
+- `XrayCoreDownloadGateTest` - process-wide single-flight core downloads.
 
 Что не покрыто автоматикой:
 
@@ -891,17 +933,19 @@ Backup:
 - Android installer/unknown sources OEM screens.
 - QS tile на разных Android версиях.
 
-## 32. Основные известные ограничения
+## 33. Основные известные ограничения
 
 - SSH режим полноценно проксирует TCP и DNS. Произвольный UDP не поддержан.
 - Legacy `enableUdpForwarding` не показывается в UI и не означает full UDP forwarding.
 - OpenSource зависит от скачанного Xray runtime core. Без core подключение заблокировано.
+- Smart Connect также зависит от Xray core, но установить/обновить его можно прямо из Smart settings без перехода в OpenSource.
 - Обновление уже загруженного Xray native core может требовать restart приложения.
 - Public source может отдавать stale/unsupported configs. Они импортируются с metadata и помечаются status checks.
+- При реальном обрыве physical network или proxy уже существующий TCP download невозможно бесшовно перенести на другой tunnel; приложение избегает ложного teardown при живом RX, но окончательное продолжение реального разрыва зависит от HTTP Range/resume сервера и браузера.
 - Автоматический public sync не должен запускаться без consent и отключается настройкой auto-refresh.
 - App updater зависит от GitHub releases и корректной публикации APK assets.
 
-## 33. Типовые runtime сценарии
+## 34. Типовые runtime сценарии
 
 ### Подключение SSH VPN
 
@@ -928,6 +972,16 @@ Backup:
 9. Xray binding получает protected dialer, listener protector, physical DNS, TUN fd и JSON config.
 10. `VpnConnectionRepository` публикует `CONNECTED` с `activeTransport = XRAY`; поздний socket-protection failure будит monitor и запускает reconnect.
 
+### Автоматическое подключение Smart Connect
+
+1. Пользователь нажимает центральную кнопку Start; `ConnectSmartVpnUseCase` сохраняет `desiredActive` и получает logical runtime lease.
+2. `SmartConnectVpnService` ждёт usable physical `NOT_VPN` network без polling.
+3. Изолированный источник обновляется; `🇷🇺` и повреждённые secret rows удаляются до проверки.
+4. Один batch проверяет все свежие профили через YouTube, после чего guarded Room-транзакция фиксирует только terminal results, prune и winner.
+5. Минимальный подтверждённый ping запускается как Xray TUN и повторно проверяется live endpoint.
+6. При двух отрицательных probes и отсутствии активного RX профиль помечается unavailable; сервис повторяет полный цикл и выбирает замену.
+7. Handoff/settings/Stop инвалидируют текущую revision и никогда не превращаются в profile failure.
+
 ### Refresh public configs
 
 1. Пользователь нажимает refresh или worker запускается по расписанию.
@@ -953,12 +1007,13 @@ Backup:
 3. Room-транзакция повторно выбирает подходящие rows, удаляет их пакетами до 900 ids и выбирает fallback, если active row удалён.
 4. Соответствующие Tink secrets очищаются best-effort; pinned и все статусы кроме `UNAVAILABLE` сохраняются.
 
-## 34. Правила для будущих изменений
+## 35. Правила для будущих изменений
 
-- Любой новый VPN state должен учитывать `activeTransport`, иначе SSH и OpenSource UI снова начнут читать чужое состояние.
+- Любой новый VPN state должен учитывать `activeTransport` и `sessionOwner`, иначе Smart/OpenSource UI снова начнут читать чужое состояние.
 - Любое изменение split tunneling должно проходить через общий `AppSettings.vpnMode` и `selectedAppPackages`.
 - Raw credentials и raw proxy URI нельзя хранить в Room или логах.
 - Новые OpenSource operations должны уважать pinned behavior: pinned не перемещается автоматически и не попадает в bulk select all.
+- Smart catalog и secrets нельзя объединять с OpenSource: синхронизация, selection, cleanup и test statuses должны оставаться раздельными.
 - Новые background задачи должны иметь battery/network constraints и не держать wake lock без отдельного обоснования.
 - Любой новый release asset selection должен сохранять ABI-specific preference и universal fallback.
 - Новые пользовательские строки нужно выносить в resources, чтобы не ухудшать будущую локализацию.

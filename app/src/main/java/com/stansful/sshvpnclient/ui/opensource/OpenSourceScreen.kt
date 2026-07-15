@@ -86,6 +86,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -123,6 +124,7 @@ import com.stansful.sshvpnclient.domain.model.ProxyProfileSummary
 import com.stansful.sshvpnclient.domain.model.ProxyTestStatus
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnMode
+import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.XrayCoreAsset
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
@@ -145,6 +147,15 @@ fun OpenSourceRoute(
     val uriHandler = LocalUriHandler.current
     var pendingUpdateInstallUri by remember { mutableStateOf<String?>(null) }
 
+    // Both global tabs keep activity-scoped ViewModels. Re-read the process-wide bridge whenever
+    // this route enters composition so an installation completed from Smart Connect is visible
+    // immediately instead of waiting for the Activity to be recreated.
+    LaunchedEffect(viewModel) {
+        viewModel.refreshXrayCoreAvailability()
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        viewModel.refreshXrayCoreAvailability()
+    }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         viewModel.cancelChecks()
     }
@@ -466,7 +477,7 @@ private fun OpenSourceScreen(
             onAutoUpdateChange = onAutoUpdateChange,
             xrayCoreAvailable = state.xrayCoreAvailable,
             xrayCoreUpdateState = state.xrayCoreUpdateState,
-            xrayActive = state.xrayConnected,
+            xrayActive = state.anyXrayRuntimeActive,
             onCheckXrayCoreUpdates = viewModel::checkXrayCoreUpdates,
             onDownloadXrayCore = viewModel::downloadXrayCore,
             onCancelXrayCoreDownload = viewModel::cancelXrayCoreDownload,
@@ -762,6 +773,7 @@ private fun OpenSourceSettingsSheet(
                     selectedAppsCount = settings.selectedAppPackages.size,
                     onSelected = onVpnModeChange,
                     onOpenAppPicker = onOpenAppPicker,
+                    deferEmptySelectedAppsMode = true,
                 )
             }
 
@@ -926,7 +938,7 @@ private fun XrayCoreUpdateSection(
         }
         if (xrayActive) {
             Text(
-                text = "Disconnect opensource VPN before updating the Xray core.",
+                text = "Disconnect the active Xray VPN before updating the Xray core.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
@@ -1407,7 +1419,9 @@ private fun OpenSourceActions(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        if (state.vpnState.activeTransport?.name == "XRAY") {
+        if (state.vpnState.activeTransport?.name == "XRAY" &&
+            state.vpnState.sessionOwner == VpnSessionOwner.OPEN_SOURCE
+        ) {
             Text(
                 text = "Status: ${state.vpnState.status.name.lowercase()}",
                 style = MaterialTheme.typography.bodySmall,

@@ -62,10 +62,11 @@ class XrayCoreBridge(
     private val nativeLifecycleGate = XrayNativeLifecycleGate()
     private val bindingLock = Any()
     private val runtimeStateLock = Any()
-    private val batchSecureRandom = SecureRandom()
+    private val credentialSecureRandom = SecureRandom()
     private var runtimeGeneration = 0L
     private var activeRuntimeGeneration: Long? = null
     private var activeRuntimeOwner: Any? = null
+    private var activeRuntimeLiveHealthEndpoint: XrayLiveHealthEndpoint? = null
     @Volatile
     private var cachedBinding: XrayBinding? = null
     @Volatile
@@ -124,6 +125,58 @@ class XrayCoreBridge(
         protectSocket: (Int) -> Boolean,
         protectListenerSocket: (Int) -> Boolean = protectSocket,
         onGenerationReserved: (Long) -> Unit = {},
+    ): Long = startTunInternal(
+        owner = owner,
+        lease = lease,
+        profile = profile,
+        tunFd = tunFd,
+        dnsServer = dnsServer,
+        liveHealthEndpoint = null,
+        protectSocket = protectSocket,
+        protectListenerSocket = protectListenerSocket,
+        onGenerationReserved = onGenerationReserved,
+    )
+
+    /**
+     * Starts a TUN runtime with an authenticated loopback health endpoint and returns a handle
+     * bound to the exact native generation. The original Long-returning overload remains source
+     * compatible for callers that do not need live health checks.
+     */
+    suspend fun startTun(
+        owner: Any,
+        lease: VpnRuntimeLease,
+        profile: ProxyProfile,
+        tunFd: Int,
+        dnsServer: String?,
+        liveHealthEndpoint: XrayLiveHealthEndpoint,
+        protectSocket: (Int) -> Boolean,
+        protectListenerSocket: (Int) -> Boolean = protectSocket,
+        onGenerationReserved: (Long) -> Unit = {},
+    ): XrayLiveHealthHandle {
+        val generation = startTunInternal(
+            owner = owner,
+            lease = lease,
+            profile = profile,
+            tunFd = tunFd,
+            dnsServer = dnsServer,
+            liveHealthEndpoint = liveHealthEndpoint,
+            protectSocket = protectSocket,
+            protectListenerSocket = protectListenerSocket,
+            onGenerationReserved = onGenerationReserved,
+        )
+        return XrayLiveHealthHandle(generation, liveHealthEndpoint)
+    }
+
+    private suspend fun startTunInternal(
+        owner: Any,
+        lease: VpnRuntimeLease,
+        profile: ProxyProfile,
+        tunFd: Int,
+        dnsServer: String?,
+        liveHealthEndpoint: XrayLiveHealthEndpoint?,
+        protectSocket: (Int) -> Boolean,
+        protectListenerSocket: (Int) -> Boolean,
+        onGenerationReserved: (Long) -> Unit,
     ): Long = runtimeStartMutex.withLock {
         testMutex.withLock {
             require(lease.owner === owner) { "Xray owner must match runtime lease" }
@@ -144,6 +197,7 @@ class XrayCoreBridge(
                             runtimeGeneration += 1L
                             activeRuntimeOwner = owner
                             activeRuntimeGeneration = runtimeGeneration
+                            activeRuntimeLiveHealthEndpoint = liveHealthEndpoint
                             runtimeGeneration.also(onGenerationReserved)
                         }
                     }
@@ -171,7 +225,7 @@ class XrayCoreBridge(
                         ensureRuntimeGenerationCurrent(owner, generation, lease)
                         activeBinding.runFromJson(
                             dataDirectory = xrayDataDirectory().absolutePath,
-                            configJson = configBuilder.buildTunConfig(profile),
+                            configJson = configBuilder.buildTunConfig(profile, liveHealthEndpoint),
                         )
                         operationContext.ensureActive()
                         ensureRuntimeGenerationCurrent(owner, generation, lease)
@@ -201,12 +255,95 @@ class XrayCoreBridge(
             activeBinding.clearSocketProtector()
             activeRuntimeGeneration = null
             activeRuntimeOwner = null
+            activeRuntimeLiveHealthEndpoint = null
             true
         }
 
     fun isRuntimeGenerationCurrent(owner: Any, generation: Long): Boolean {
         return synchronized(runtimeStateLock) {
             activeRuntimeOwner === owner && activeRuntimeGeneration == generation
+        }
+    }
+
+    /** Creates short-lived loopback credentials for the health-enabled [startTun] overload. */
+    fun createLiveHealthEndpoint(): XrayLiveHealthEndpoint {
+        return XrayLiveHealthEndpoint(
+            port = reserveLoopbackPort(),
+            username = randomUrlToken(LIVE_HEALTH_USERNAME_BYTES),
+            password = randomUrlToken(LIVE_HEALTH_PASSWORD_BYTES),
+        )
+    }
+
+    /**
+     * Probes YouTube through the exact live Xray outbound represented by [handle]. A superseded
+     * generation is cancellation, not a tunnel failure, so failover code cannot punish a profile
+     * after a concurrent reconnect.
+     */
+    suspend fun probeLiveTunnel(
+        owner: Any,
+        handle: XrayLiveHealthHandle,
+    ): XrayLiveHealthProbeResult = withContext(ioDispatcher) {
+        ensureLiveHealthHandleCurrent(owner, handle)
+        val startedAtNanos = System.nanoTime()
+        val result = try {
+            val statusCode = withTimeoutOrNull(XRAY_LIVE_HEALTH_TIMEOUT_MS) {
+                withClosingSocketOnCancellation { activeSocket ->
+                    executeSocks5TlsProbe(
+                        activeSocket = activeSocket,
+                        socksPort = handle.endpoint.port,
+                        username = handle.endpoint.username,
+                        password = handle.endpoint.password,
+                        timeoutMs = XRAY_LIVE_HEALTH_TIMEOUT_MS.toInt(),
+                    )
+                }
+            }
+            val latencyMs = effectiveTunnelTestLatency(
+                nativeLatencyMs = 0L,
+                elapsedNanos = System.nanoTime() - startedAtNanos,
+            )
+            if (statusCode == null) {
+                XrayLiveHealthProbeResult(
+                    isHealthy = false,
+                    latencyMs = latencyMs,
+                    message = "Live tunnel did not respond within ${XRAY_LIVE_HEALTH_TIMEOUT_MS}ms",
+                )
+            } else {
+                val healthy = isSuccessfulLiveHealthHttpStatus(statusCode)
+                XrayLiveHealthProbeResult(
+                    isHealthy = healthy,
+                    latencyMs = latencyMs,
+                    httpStatusCode = statusCode,
+                    message = if (healthy) null else "YouTube health endpoint returned HTTP $statusCode",
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            XrayLiveHealthProbeResult(
+                isHealthy = false,
+                latencyMs = effectiveTunnelTestLatency(
+                    nativeLatencyMs = 0L,
+                    elapsedNanos = System.nanoTime() - startedAtNanos,
+                ),
+                message = error.message ?: "Live tunnel health probe failed",
+            )
+        }
+        ensureLiveHealthHandleCurrent(owner, handle)
+        result
+    }
+
+    private fun ensureLiveHealthHandleCurrent(owner: Any, handle: XrayLiveHealthHandle) {
+        val isCurrent = synchronized(runtimeStateLock) {
+            isLiveHealthHandleCurrent(
+                activeOwner = activeRuntimeOwner,
+                activeGeneration = activeRuntimeGeneration,
+                activeEndpoint = activeRuntimeLiveHealthEndpoint,
+                expectedOwner = owner,
+                handle = handle,
+            )
+        }
+        if (!isCurrent) {
+            throw CancellationException("Xray live-health runtime generation was superseded")
         }
     }
 
@@ -279,6 +416,7 @@ class XrayCoreBridge(
         profiles: List<ProxyProfile>,
         deadlineNanos: Long = System.nanoTime() +
             XRAY_BATCH_TOTAL_BUDGET_MS * NANOS_PER_MILLISECOND,
+        preferredPhysicalNetwork: Network? = null,
         onResult: suspend (ProxyTunnelTestResult) -> Unit = {},
     ): List<ProxyTunnelTestResult> = testMutex.withLock {
         if (profiles.isEmpty()) return@withLock emptyList()
@@ -296,12 +434,12 @@ class XrayCoreBridge(
                 return@withContext notTested
             }
             val password = Base64.getUrlEncoder().withoutPadding().encodeToString(
-                ByteArray(BATCH_PASSWORD_BYTES).also(batchSecureRandom::nextBytes),
+                ByteArray(BATCH_PASSWORD_BYTES).also(credentialSecureRandom::nextBytes),
             )
             val entries = profiles.mapIndexed { index, profile ->
                 XrayBatchSocksTestEntry(profile, "probe-$index")
             }
-            val physicalNetwork = findPhysicalNetwork() ?: run {
+            val physicalNetwork = preferredPhysicalNetwork ?: findPhysicalNetwork() ?: run {
                 val notTested = profiles.map { profile ->
                     ProxyTunnelTestResult(
                         profileId = profile.id,
@@ -602,6 +740,12 @@ class XrayCoreBridge(
             .use(ServerSocket::getLocalPort)
     }
 
+    private fun randomUrlToken(byteCount: Int): String {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(
+            ByteArray(byteCount).also(credentialSecureRandom::nextBytes),
+        )
+    }
+
     @Suppress("DEPRECATION")
     private fun findPhysicalNetwork(): Network? {
         val manager = appContext.getSystemService(ConnectivityManager::class.java) ?: return null
@@ -667,6 +811,7 @@ class XrayCoreBridge(
 }
 
 internal const val MAX_TUNNEL_TEST_LATENCY_MS = 5_000L
+internal const val XRAY_LIVE_HEALTH_TIMEOUT_MS = 5_000L
 internal const val XRAY_RUNTIME_BUSY_MESSAGE =
     "Xray runtime is busy with an active VPN connection; disconnect it before checking tunnels"
 
@@ -761,7 +906,7 @@ private suspend fun probeBatchTunnel(
     val probeTimeoutMs = minOf(BATCH_PROBE_TIMEOUT_MS, remainingMillis)
     val hadFullProbeWindow = probeTimeoutMs >= BATCH_PROBE_TIMEOUT_MS
     val startedAtNanos = System.nanoTime()
-    val succeeded = try {
+    val statusCode = try {
         withTimeoutOrNull(probeTimeoutMs) {
             withClosingSocketOnCancellation { activeSocket ->
                 executeSocks5TlsProbe(
@@ -772,10 +917,10 @@ private suspend fun probeBatchTunnel(
                     timeoutMs = probeTimeoutMs.toInt(),
                 )
             }
-        } ?: false
+        }
     } catch (error: CancellationException) {
         throw error
-    } catch (error: XrayBatchProbeInfrastructureException) {
+    } catch (error: XraySocksProbeInfrastructureException) {
         return ProxyTunnelTestResult(
             profileId = entry.profile.id,
             status = ProxyTestStatus.NOT_TESTED,
@@ -798,7 +943,7 @@ private suspend fun probeBatchTunnel(
         )
     }
     val elapsedNanos = System.nanoTime() - startedAtNanos
-    if (!succeeded) {
+    if (statusCode == null) {
         return ProxyTunnelTestResult(
             profileId = entry.profile.id,
             status = if (hadFullProbeWindow) {
@@ -811,6 +956,13 @@ private suspend fun probeBatchTunnel(
             } else {
                 "Partial deadline probe did not finish in ${probeTimeoutMs}ms"
             },
+        )
+    }
+    if (!isSuccessfulLiveHealthHttpStatus(statusCode)) {
+        return ProxyTunnelTestResult(
+            profileId = entry.profile.id,
+            status = ProxyTestStatus.UNAVAILABLE,
+            message = "YouTube health endpoint returned HTTP $statusCode",
         )
     }
     return classifyTunnelTestLatency(
@@ -853,7 +1005,7 @@ private fun executeSocks5TlsProbe(
     username: String,
     password: String,
     timeoutMs: Int,
-): Boolean {
+): Int {
     val rawSocket = Socket()
     activeSocket.set(rawSocket)
     val (input, output) = try {
@@ -870,8 +1022,8 @@ private fun executeSocks5TlsProbe(
         readSocks5PasswordAuthentication(input)
         input to output
     } catch (error: Exception) {
-        throw XrayBatchProbeInfrastructureException(
-            "Local batch SOCKS endpoint failed: ${error.message ?: error::class.java.simpleName}",
+        throw XraySocksProbeInfrastructureException(
+            "Local Xray SOCKS endpoint failed: ${error.message ?: error::class.java.simpleName}",
             error,
         )
     }
@@ -894,7 +1046,8 @@ private fun executeSocks5TlsProbe(
     sslSocket.startHandshake()
     sslSocket.outputStream.write(BATCH_HTTP_HEAD_REQUEST)
     sslSocket.outputStream.flush()
-    return sslSocket.inputStream.readAsciiLine(MAX_HTTP_STATUS_LINE_BYTES).startsWith("HTTP/")
+    val statusLine = sslSocket.inputStream.readAsciiLine(MAX_HTTP_STATUS_LINE_BYTES)
+    return checkNotNull(parseHttpStatusCode(statusLine)) { "Invalid HTTP status line" }
 }
 
 internal fun buildSocks5UserPasswordRequest(username: String, password: String): ByteArray {
@@ -1016,7 +1169,7 @@ internal suspend fun <T, R> mapBatchConcurrentOrdered(
 
 private data class XrayBatchMapResult<R>(val value: R)
 
-private class XrayBatchProbeInfrastructureException(
+private class XraySocksProbeInfrastructureException(
     message: String,
     cause: Throwable,
 ) : IllegalStateException(message, cause)
@@ -1037,6 +1190,8 @@ private const val BATCH_TEST_PORT = 443
 private const val BATCH_LOOPBACK_HOST = "127.0.0.1"
 private const val MAX_HTTP_STATUS_LINE_BYTES = 256
 private const val BATCH_PASSWORD_BYTES = 16
+private const val LIVE_HEALTH_USERNAME_BYTES = 12
+private const val LIVE_HEALTH_PASSWORD_BYTES = 24
 private const val MAX_BATCH_LOOPBACK_BIND_ATTEMPTS = 3
 private const val MAX_BATCH_RUNTIME_START_ATTEMPTS = 20
 private val SOCKS5_VERSION = 5.toByte()

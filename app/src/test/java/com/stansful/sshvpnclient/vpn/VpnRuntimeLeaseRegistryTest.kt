@@ -1,18 +1,35 @@
 package com.stansful.sshvpnclient.vpn
 
+import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class VpnRuntimeLeaseRegistryTest {
     @Test
-    fun `new claim supersedes previous service and command lease`() {
+    fun `foreign logical owner cannot supersede a live lease`() {
         val registry = VpnRuntimeLeaseRegistry()
-        val firstOwner = Any()
-        val first = registry.claim(firstOwner)
-        val second = registry.claim(Any())
+        val smartOwner = Any()
+        val smartLease = requireNotNull(
+            registry.claim(smartOwner, VpnSessionOwner.SMART_CONNECT),
+        )
+
+        assertNull(registry.claim(Any(), VpnSessionOwner.OPEN_SOURCE))
+        assertTrue(smartLease.isCurrent())
+
+        registry.invalidate(smartOwner)
+        assertNotNull(registry.claim(Any(), VpnSessionOwner.OPEN_SOURCE))
+    }
+
+    @Test
+    fun `new run of the same logical owner supersedes its previous generation`() {
+        val registry = VpnRuntimeLeaseRegistry()
+        val first = requireNotNull(registry.claim(Any(), VpnSessionOwner.SHADOW_SSH))
+        val second = requireNotNull(registry.claim(Any(), VpnSessionOwner.SHADOW_SSH))
 
         assertFalse(first.isCurrent())
         assertTrue(second.isCurrent())
@@ -22,11 +39,11 @@ class VpnRuntimeLeaseRegistryTest {
     }
 
     @Test
-    fun `old service cannot invalidate a newer owner`() {
+    fun `old service cannot invalidate a newer lease of the same logical owner`() {
         val registry = VpnRuntimeLeaseRegistry()
         val oldOwner = Any()
-        registry.claim(oldOwner)
-        val current = registry.claim(Any())
+        requireNotNull(registry.claim(oldOwner, VpnSessionOwner.OPEN_SOURCE))
+        val current = requireNotNull(registry.claim(Any(), VpnSessionOwner.OPEN_SOURCE))
 
         registry.invalidate(oldOwner)
 

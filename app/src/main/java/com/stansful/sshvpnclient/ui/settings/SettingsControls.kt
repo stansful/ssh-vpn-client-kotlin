@@ -66,6 +66,7 @@ internal fun VpnModeSelector(
     selectedAppsCount: Int,
     onSelected: (VpnMode) -> Unit,
     onOpenAppPicker: () -> Unit,
+    deferEmptySelectedAppsMode: Boolean = false,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(
@@ -78,7 +79,18 @@ internal fun VpnModeSelector(
                 VpnModeTile(
                     mode = mode,
                     selected = mode == selected,
-                    onSelected = { onSelected(mode) },
+                    onSelected = {
+                        if (deferEmptySelectedAppsMode &&
+                            mode == VpnMode.SELECTED_APPS &&
+                            selectedAppsCount == 0
+                        ) {
+                            // Do not publish an invalid routing snapshot to a running VPN. The
+                            // caller commits SELECTED_APPS after the picker saves a non-empty set.
+                            onOpenAppPicker()
+                        } else {
+                            onSelected(mode)
+                        }
+                    },
                     modifier = Modifier.weight(1f),
                 )
             }

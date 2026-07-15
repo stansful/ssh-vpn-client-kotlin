@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.produceState
@@ -68,6 +69,9 @@ fun AppPickerRoute(
 ) {
     val viewModel: AppPickerViewModel = viewModel(factory = AppViewModelFactory(container))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    LaunchedEffect(viewModel) {
+        viewModel.refreshSelection()
+    }
     val saveAndBack = {
         viewModel.saveSelection()
         onBack()

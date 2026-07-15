@@ -20,6 +20,8 @@ import java.util.zip.ZipFile
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlin.coroutines.coroutineContext
@@ -39,84 +41,87 @@ class GitHubXrayCoreUpdateRepository(
         parseRelease(response)
     }
 
-    override suspend fun download(asset: XrayCoreAsset): File = withContext(ioDispatcher) {
-        require(asset.abi == runtimeAbi) {
-            "Xray core ${asset.abi} is not compatible with this device runtime ABI: $runtimeAbi"
-        }
-        validateDownloadUrl(asset.downloadUrl)
-
-        val downloadDir = File(appContext.filesDir, XRAY_CORE_DOWNLOAD_DIRECTORY).apply { mkdirs() }
-        downloadDir.listFiles()
-            ?.filter { oldFile -> oldFile.name != asset.safeFileName() }
-            ?.forEach { oldFile -> runCatching { oldFile.delete() } }
-
-        val targetFile = File(downloadDir, asset.safeFileName())
-        if (
-            targetFile.isFile &&
-            targetFile.length() > 0L &&
-            targetFile.matchesDigest(asset.sha256Digest) &&
-            targetFile.isUsableXrayCoreAsset(asset.abi)
-        ) {
-            return@withContext targetFile
-        }
-        if (targetFile.isFile) {
-            runCatching { targetFile.delete() }
-        }
-        val tempFile = File(downloadDir, "${targetFile.name}.tmp")
-        runCatching { tempFile.delete() }
-
-        val digest = MessageDigest.getInstance("SHA-256")
-        val connection = openConnection(URL(asset.downloadUrl))
-        try {
-            connection.requestMethod = "GET"
-            connection.connectTimeout = CONNECT_TIMEOUT_MS
-            connection.readTimeout = DOWNLOAD_READ_TIMEOUT_MS
-            connection.instanceFollowRedirects = true
-            connection.setRequestProperty("User-Agent", USER_AGENT)
-
-            val responseCode = connection.responseCode
-            if (responseCode != HttpURLConnection.HTTP_OK) {
-                throw AppUpdateException("Xray core download failed with HTTP $responseCode")
+    override suspend fun download(asset: XrayCoreAsset): File = XrayCoreDownloadGate.runExclusive {
+        withContext(ioDispatcher) {
+            require(asset.abi == runtimeAbi) {
+                "Xray core ${asset.abi} is not compatible with this device runtime ABI: $runtimeAbi"
             }
-            tempFile.outputStream().use { output ->
-                connection.inputStream.use { input ->
-                    val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
-                    var totalBytes = 0L
-                    while (true) {
-                        coroutineContext.ensureActive()
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        totalBytes += read
-                        if (totalBytes > MAX_CORE_DOWNLOAD_BYTES) {
-                            throw AppUpdateException("Xray core download is too large")
+            validateDownloadUrl(asset.downloadUrl)
+
+            val downloadDir = File(appContext.filesDir, XRAY_CORE_DOWNLOAD_DIRECTORY).apply { mkdirs() }
+            downloadDir.listFiles()
+                ?.filter { oldFile -> oldFile.name != asset.safeFileName() }
+                ?.forEach { oldFile -> runCatching { oldFile.delete() } }
+
+            val targetFile = File(downloadDir, asset.safeFileName())
+            if (
+                targetFile.isFile &&
+                targetFile.length() > 0L &&
+                targetFile.matchesDigest(asset.sha256Digest) &&
+                targetFile.isUsableXrayCoreAsset(asset.abi)
+            ) {
+                return@withContext targetFile
+            }
+            if (targetFile.isFile) {
+                runCatching { targetFile.delete() }
+            }
+            val tempFile = File(downloadDir, "${targetFile.name}.tmp")
+            runCatching { tempFile.delete() }
+
+            val digest = MessageDigest.getInstance("SHA-256")
+            val connection = openConnection(URL(asset.downloadUrl))
+            try {
+                connection.requestMethod = "GET"
+                connection.connectTimeout = CONNECT_TIMEOUT_MS
+                connection.readTimeout = DOWNLOAD_READ_TIMEOUT_MS
+                connection.instanceFollowRedirects = true
+                connection.setRequestProperty("User-Agent", USER_AGENT)
+
+                val responseCode = connection.responseCode
+                if (responseCode != HttpURLConnection.HTTP_OK) {
+                    throw AppUpdateException("Xray core download failed with HTTP $responseCode")
+                }
+                tempFile.outputStream().use { output ->
+                    connection.inputStream.use { input ->
+                        val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+                        var totalBytes = 0L
+                        while (true) {
+                            coroutineContext.ensureActive()
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            totalBytes += read
+                            if (totalBytes > MAX_CORE_DOWNLOAD_BYTES) {
+                                throw AppUpdateException("Xray core download is too large")
+                            }
+                            digest.update(buffer, 0, read)
+                            output.write(buffer, 0, read)
                         }
-                        digest.update(buffer, 0, read)
-                        output.write(buffer, 0, read)
                     }
                 }
+            } catch (error: Throwable) {
+                tempFile.delete()
+                throw error
+            } finally {
+                connection.disconnect()
             }
-        } catch (error: Throwable) {
-            tempFile.delete()
-            throw error
-        } finally {
-            connection.disconnect()
-        }
 
-        val expectedDigest = asset.sha256Digest
-        val actualDigest = digest.digest().joinToString("") { byte -> "%02x".format(byte) }
-        if (!expectedDigest.isNullOrBlank() && actualDigest != expectedDigest.lowercase()) {
-            tempFile.delete()
-            throw AppUpdateException("Downloaded Xray core SHA-256 verification failed")
+            val expectedDigest = asset.sha256Digest
+            val actualDigest = digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+            if (!expectedDigest.isNullOrBlank() && actualDigest != expectedDigest.lowercase()) {
+                tempFile.delete()
+                throw AppUpdateException("Downloaded Xray core SHA-256 verification failed")
+            }
+            if (!tempFile.isUsableXrayCoreAsset(asset.abi)) {
+                tempFile.delete()
+                throw AppUpdateException(
+                    "Downloaded Xray core asset is outdated or invalid: " +
+                        "missing classes.dex or native library for ${asset.abi}",
+                )
+            }
+            if (targetFile.exists()) targetFile.delete()
+            check(tempFile.renameTo(targetFile)) { "Unable to store downloaded Xray core" }
+            targetFile
         }
-        if (!tempFile.isUsableXrayCoreAsset(asset.abi)) {
-            tempFile.delete()
-            throw AppUpdateException(
-                "Downloaded Xray core asset is outdated or invalid: missing classes.dex or native library for ${asset.abi}",
-            )
-        }
-        if (targetFile.exists()) targetFile.delete()
-        check(tempFile.renameTo(targetFile)) { "Unable to store downloaded Xray core" }
-        targetFile
     }
 
     private fun loadLatestReleaseBody(): String {
@@ -302,4 +307,15 @@ class GitHubXrayCoreUpdateRepository(
         const val CLASSES_DEX_NAME = "classes.dex"
         const val NATIVE_LIBRARY_NAME = "libgojni.so"
     }
+}
+
+/**
+ * Smart and OpenSource expose the same updater through different activity-scoped ViewModels.
+ * Serialize every repository instance in this process so their shared .tmp and target files
+ * cannot delete or overwrite one another.
+ */
+internal object XrayCoreDownloadGate {
+    private val mutex = Mutex()
+
+    suspend fun <T> runExclusive(block: suspend () -> T): T = mutex.withLock { block() }
 }

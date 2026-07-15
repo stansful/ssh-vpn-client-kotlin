@@ -18,6 +18,7 @@ import com.stansful.sshvpnclient.domain.model.ProxyTunnelTestResult
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
+import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.model.XrayCoreAsset
 import com.stansful.sshvpnclient.domain.model.XrayCoreRelease
@@ -115,14 +116,23 @@ data class OpenSourceUiState(
             !isSyncing &&
             !isChecking &&
             !isRemovingUnavailable &&
-            !xrayConnected
+            !anyXrayRuntimeActive
     val selectedProfile: ProxyProfileSummary? get() = profiles.firstOrNull(ProxyProfileSummary::isSelected)
     val xrayConnected: Boolean
+        get() = vpnState.activeTransport == VpnTransportType.XRAY &&
+            vpnState.sessionOwner == VpnSessionOwner.OPEN_SOURCE &&
+            vpnState.status in setOf(
+                VpnConnectionStatus.CONNECTING,
+                VpnConnectionStatus.CONNECTED,
+                VpnConnectionStatus.RECONNECTING,
+            )
+    val anyXrayRuntimeActive: Boolean
         get() = vpnState.activeTransport == VpnTransportType.XRAY &&
             vpnState.status in setOf(
                 VpnConnectionStatus.CONNECTING,
                 VpnConnectionStatus.CONNECTED,
                 VpnConnectionStatus.RECONNECTING,
+                VpnConnectionStatus.DISCONNECTING,
             )
     val sshActive: Boolean
         get() = vpnState.activeTransport == VpnTransportType.SSH &&
@@ -197,9 +207,7 @@ class OpenSourceViewModel(
 
     init {
         // Loading an installed runtime may touch disk and construct a DexClassLoader.
-        viewModelScope.launch(Dispatchers.IO) {
-            xrayCoreAvailable.value = xrayCoreBridge.isAvailable
-        }
+        refreshXrayCoreAvailability()
         viewModelScope.launch {
             var previousSplitTunnelSettings = appSettingsRepository.settings.value.splitTunnelSettings()
             appSettingsRepository.settings
@@ -237,6 +245,12 @@ class OpenSourceViewModel(
                     )
                 }
             }
+        }
+    }
+
+    fun refreshXrayCoreAvailability() {
+        viewModelScope.launch(Dispatchers.IO) {
+            xrayCoreAvailable.value = xrayCoreBridge.isAvailable
         }
     }
 
@@ -671,7 +685,7 @@ class OpenSourceViewModel(
         if (xrayCoreDownloadJob?.isActive == true || state.isDownloading || state.isChecking) return
         if (vpnConnectionRepository.currentState.ownsXrayRuntime()) {
             xrayCoreUpdateState.update {
-                it.copy(statusMessage = "Disconnect opensource VPN before updating Xray core")
+                it.copy(statusMessage = "Disconnect the active Xray VPN before updating Xray core")
             }
             return
         }
@@ -800,7 +814,7 @@ class OpenSourceViewModel(
         if (checkJob?.isCompleted == false) return
         if (vpnConnectionRepository.currentState.ownsXrayRuntime()) {
             operation.update {
-                it.copy(message = "Disconnect opensource VPN before checking configurations")
+                it.copy(message = "Disconnect the active Xray VPN before checking configurations")
             }
             return
         }
@@ -1347,6 +1361,7 @@ private fun AppSettings.splitTunnelSettings(): SplitTunnelSettings {
 
 private fun VpnConnectionState.isXrayActive(): Boolean {
     return activeTransport == VpnTransportType.XRAY &&
+        sessionOwner == VpnSessionOwner.OPEN_SOURCE &&
         status in setOf(
             VpnConnectionStatus.CONNECTING,
             VpnConnectionStatus.CONNECTED,

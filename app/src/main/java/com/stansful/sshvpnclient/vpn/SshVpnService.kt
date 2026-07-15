@@ -22,6 +22,7 @@ import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.SshConfig
 import com.stansful.sshvpnclient.domain.model.SshPrivateKey
 import com.stansful.sshvpnclient.domain.model.VpnMode
+import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -63,6 +64,7 @@ class SshVpnService : android.net.VpnService() {
     private var screenOffAtMs: Long = NO_SCREEN_OFF_TIMESTAMP
     private var screenReceiverRegistered = false
     private var isLowRamDevice = false
+    private val trafficActivityMonitor = VpnTrafficActivityMonitor()
     private lateinit var powerManager: PowerManager
     private lateinit var underlyingNetworkMonitor: UnderlyingNetworkMonitor
     private lateinit var protectedSocketRoute: UnderlyingNetworkSocketProtector
@@ -79,6 +81,7 @@ class SshVpnService : android.net.VpnService() {
                     screenOffAtMs = SystemClock.elapsedRealtime()
                     wakeRecoveryJob?.cancel()
                     appContainer.sshConnectionManager.setDeviceInteractive(isInteractive = false)
+                    trafficActivityMonitor.resetBaseline()
                     connectionMonitorSignal.trySend(Unit)
                 }
 
@@ -139,10 +142,28 @@ class SshVpnService : android.net.VpnService() {
             ACTION_CONNECT -> {
                 // startForegroundService() gives us only a short deadline; do this before any I/O.
                 startVpnForeground()
+                if (!shouldAcceptVpnConnectCommand(
+                        state = appContainer.vpnConnectionRepository.currentState,
+                        owner = VpnSessionOwner.SHADOW_SSH,
+                        transport = VpnTransportType.SSH,
+                    )
+                ) {
+                    rejectStaleConnectCommand(startId)
+                    return START_NOT_STICKY
+                }
+                val lease = appContainer.vpnRuntimeLeaseRegistry.claim(
+                    owner = vpnTunnelOwner,
+                    sessionOwner = VpnSessionOwner.SHADOW_SSH,
+                )
+                if (lease == null) {
+                    rejectBusyRuntimeConnectCommand(startId)
+                    return START_NOT_STICKY
+                }
                 underlyingNetworkMonitor.start()
                 connect(
                     preserveDiagnostics = intent.getBooleanExtra(EXTRA_PRESERVE_DIAGNOSTICS, false),
                     startId = startId,
+                    lease = lease,
                 )
             }
             ACTION_DISCONNECT -> disconnect(startId)
@@ -169,7 +190,12 @@ class SshVpnService : android.net.VpnService() {
             screenReceiverRegistered = false
         }
         val repository = appContainer.vpnConnectionRepository
-        if (repository.currentState.activeTransport == VpnTransportType.SSH) {
+        if (isVpnSessionOwnedBy(
+                state = repository.currentState,
+                owner = VpnSessionOwner.SHADOW_SSH,
+                transport = VpnTransportType.SSH,
+            )
+        ) {
             repository.setDisconnected()
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -197,9 +223,9 @@ class SshVpnService : android.net.VpnService() {
     private fun connect(
         preserveDiagnostics: Boolean,
         startId: Int,
+        lease: VpnRuntimeLease,
     ) {
         val runId = connectionRunId.incrementAndGet()
-        val lease = appContainer.vpnRuntimeLeaseRegistry.claim(vpnTunnelOwner)
         runtimeLease = lease
         val commandId = lifecycleCommandId.incrementAndGet()
         serviceScope.launch {
@@ -252,6 +278,14 @@ class SshVpnService : android.net.VpnService() {
         wakeRecoveryJob = serviceScope.launch {
             delay(WAKE_RECOVERY_DEBOUNCE_MS)
             if (!deviceInteractive || !shouldKeepConnectionAlive(runId) || !canReuseVpnPipeline()) {
+                return@launch
+            }
+            val traffic = trafficActivityMonitor.sampleSinceLast()
+            if (shouldDeferVpnDisruption(traffic, elapsedSinceLastForcedCheckMs = 0L)) {
+                appContainer.vpnConnectionRepository.appendDiagnostic(
+                    "Wake recovery skipped because active VPN traffic moved " +
+                        "${traffic.totalBytes / 1_024L} KiB while the screen was off",
+                )
                 return@launch
             }
             val transportProbe = appContainer.sshConnectionManager.probeActiveTransport(
@@ -662,6 +696,9 @@ class SshVpnService : android.net.VpnService() {
         sshSession: Session,
         runId: Long,
     ): ActiveConnectionInterrupt {
+        trafficActivityMonitor.resetBaseline()
+        var pendingDegradationReason: String? = null
+        var degradationDeferredAtMs = 0L
         while (shouldKeepConnectionAlive(runId)) {
             if (!appContainer.tun2SocksManager.isRunning(vpnTunnelOwner)) {
                 return ActiveConnectionInterrupt(
@@ -669,12 +706,25 @@ class SshVpnService : android.net.VpnService() {
                     forceVpnRebuild = true,
                 )
             }
-            val degradationReason = appContainer.tun2SocksManager.consumeDegradationReason(vpnTunnelOwner)
-            if (degradationReason != null) {
-                return ActiveConnectionInterrupt(
-                    message = "TUN forwarding degraded: $degradationReason",
-                    forceVpnRebuild = true,
-                )
+            appContainer.tun2SocksManager.consumeDegradationReason(vpnTunnelOwner)?.let { reason ->
+                if (pendingDegradationReason == null) {
+                    pendingDegradationReason = reason
+                    degradationDeferredAtMs = SystemClock.elapsedRealtime()
+                }
+            }
+            pendingDegradationReason?.let { degradationReason ->
+                val now = SystemClock.elapsedRealtime()
+                val traffic = trafficActivityMonitor.sampleSinceLast()
+                if (!shouldDeferVpnDisruption(
+                        traffic = traffic,
+                        elapsedSinceLastForcedCheckMs = now - degradationDeferredAtMs,
+                    )
+                ) {
+                    return ActiveConnectionInterrupt(
+                        message = "TUN forwarding degraded: $degradationReason",
+                        forceVpnRebuild = true,
+                    )
+                }
             }
             if (!sshSession.isConnected) {
                 return ActiveConnectionInterrupt(
@@ -721,7 +771,12 @@ class SshVpnService : android.net.VpnService() {
         return connectionRunId.get() == runId &&
             !userRequestedDisconnect &&
             !serviceDestroyed &&
-            runtimeLease?.isCurrent() == true
+            runtimeLease?.isCurrent() == true &&
+            isVpnSessionOwnedBy(
+                state = appContainer.vpnConnectionRepository.currentState,
+                owner = VpnSessionOwner.SHADOW_SSH,
+                transport = VpnTransportType.SSH,
+            )
     }
 
     private fun isLifecycleCommandCurrent(runId: Long, commandId: Long, startId: Int): Boolean {
@@ -740,7 +795,12 @@ class SshVpnService : android.net.VpnService() {
             lifecycleCommandId.get() == commandId &&
             !userRequestedDisconnect &&
             !serviceDestroyed &&
-            runtimeLease?.isCurrent() == true
+            runtimeLease?.isCurrent() == true &&
+            isVpnSessionOwnedBy(
+                state = appContainer.vpnConnectionRepository.currentState,
+                owner = VpnSessionOwner.SHADOW_SSH,
+                transport = VpnTransportType.SSH,
+            )
     }
 
     private suspend fun mutateActiveConnectionIfCurrent(
@@ -775,7 +835,15 @@ class SshVpnService : android.net.VpnService() {
                 startId = startId,
                 requireActiveConnection = true,
             ) {
-                appContainer.vpnConnectionRepository.setError(configId, message)
+                val repository = appContainer.vpnConnectionRepository
+                if (isVpnSessionOwnedBy(
+                        state = repository.currentState,
+                        owner = VpnSessionOwner.SHADOW_SSH,
+                        transport = VpnTransportType.SSH,
+                    )
+                ) {
+                    repository.setError(configId, message)
+                }
             }
         }
     }
@@ -908,7 +976,12 @@ class SshVpnService : android.net.VpnService() {
                     startId = startId,
                     requireActiveConnection = false,
                 ) {
-                    if (repository.currentState.activeTransport == VpnTransportType.SSH) {
+                    if (isVpnSessionOwnedBy(
+                            state = repository.currentState,
+                            owner = VpnSessionOwner.SHADOW_SSH,
+                            transport = VpnTransportType.SSH,
+                        )
+                    ) {
                         repository.appendDiagnostic("Stopping VPN connection")
                         repository.setDisconnected()
                         repository.appendDiagnostic("VPN connection disconnected")
@@ -927,6 +1000,28 @@ class SshVpnService : android.net.VpnService() {
         cleanupDisconnectStep("SSH session") {
             appContainer.sshConnectionManager.disconnectOwner(vpnTunnelOwner)
         }
+    }
+
+    private fun rejectStaleConnectCommand(startId: Int) {
+        if (stopSelfResult(startId)) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+    }
+
+    private fun rejectBusyRuntimeConnectCommand(startId: Int) {
+        val repository = appContainer.vpnConnectionRepository
+        if (isVpnSessionOwnedBy(
+                state = repository.currentState,
+                owner = VpnSessionOwner.SHADOW_SSH,
+                transport = VpnTransportType.SSH,
+            )
+        ) {
+            repository.setError(
+                repository.currentState.activeConfigId,
+                "Another VPN runtime is still stopping; try again",
+            )
+        }
+        rejectStaleConnectCommand(startId)
     }
 
     private fun cleanupVpnPipelineForRebuild(

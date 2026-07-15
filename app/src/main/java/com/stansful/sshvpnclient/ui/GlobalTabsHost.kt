@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
@@ -25,6 +26,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
@@ -34,7 +36,10 @@ import com.stansful.sshvpnclient.AppContainer
 import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.domain.model.GlobalTab
 import com.stansful.sshvpnclient.domain.model.OpenSourcePolicy
+import com.stansful.sshvpnclient.domain.model.VpnMode
+import com.stansful.sshvpnclient.ui.apppicker.AppPickerRoute
 import com.stansful.sshvpnclient.ui.opensource.OpenSourceRoute
+import com.stansful.sshvpnclient.ui.smartconnect.SmartConnectRoute
 import com.stansful.sshvpnclient.work.ProxySourceSyncWorker
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -45,12 +50,58 @@ fun GlobalTabsHost(
 ) {
     val settings by container.appSettingsRepository.settings.collectAsStateWithLifecycle()
     val visibleTab = settings.activeGlobalTab
-    var showConsent by remember { mutableStateOf(false) }
+    var consentTab by remember { mutableStateOf<GlobalTab?>(null) }
+    var showGlobalAppPicker by rememberSaveable { mutableStateOf(false) }
+    var activateSelectedAppsAfterPicker by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(settings.activeGlobalTab, settings.showOpenSourceWarningOnEnter) {
-        if (settings.activeGlobalTab == GlobalTab.OPEN_SOURCE && settings.showOpenSourceWarningOnEnter) {
-            showConsent = true
+    val openGlobalAppPicker = {
+        // When SELECTED_APPS has no packages yet, VpnModeSelector deliberately leaves the
+        // previous valid mode in place. Commit the new mode only after the picker saves at least
+        // one package, so a live VPN never observes SELECTED_APPS + empty set.
+        activateSelectedAppsAfterPicker = settings.vpnMode != VpnMode.SELECTED_APPS
+        showGlobalAppPicker = true
+        Unit
+    }
+
+    LaunchedEffect(
+        settings.activeGlobalTab,
+        settings.showOpenSourceWarningOnEnter,
+        settings.showSmartConnectWarningOnEnter,
+        settings.smartConnectConsentVersion,
+    ) {
+        consentTab = when (settings.activeGlobalTab) {
+            GlobalTab.OPEN_SOURCE -> GlobalTab.OPEN_SOURCE
+                .takeIf { settings.showOpenSourceWarningOnEnter }
+            GlobalTab.SMART_CONNECT -> GlobalTab.SMART_CONNECT
+                .takeIf {
+                    settings.showSmartConnectWarningOnEnter &&
+                        settings.smartConnectConsentVersion < OpenSourcePolicy.CONSENT_VERSION
+                }
+            GlobalTab.SHADOW_SSH -> null
         }
+    }
+
+    if (showGlobalAppPicker) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding(),
+        ) {
+            AppPickerRoute(
+                container = container,
+                onBack = {
+                    showGlobalAppPicker = false
+                    val shouldActivateSelectedApps = activateSelectedAppsAfterPicker
+                    activateSelectedAppsAfterPicker = false
+                    if (shouldActivateSelectedApps &&
+                        container.appSettingsRepository.settings.value.selectedAppPackages.isNotEmpty()
+                    ) {
+                        container.appSettingsRepository.setVpnMode(VpnMode.SELECTED_APPS)
+                    }
+                },
+            )
+        }
+        return
     }
 
     Column(
@@ -72,10 +123,10 @@ fun GlobalTabsHost(
                     text = { Text(tab.label) },
                     icon = {
                         Icon(
-                            imageVector = if (tab == GlobalTab.SHADOW_SSH) {
-                                Icons.Default.Terminal
-                            } else {
-                                Icons.Default.Public
+                            imageVector = when (tab) {
+                                GlobalTab.SHADOW_SSH -> Icons.Default.Terminal
+                                GlobalTab.SMART_CONNECT -> Icons.Default.AutoAwesome
+                                GlobalTab.OPEN_SOURCE -> Icons.Default.Public
                             },
                             contentDescription = null,
                         )
@@ -91,34 +142,64 @@ fun GlobalTabsHost(
             ) { tab ->
                 when (tab) {
                     GlobalTab.SHADOW_SSH -> SshVpnNavGraph(container, navController)
+                    GlobalTab.SMART_CONNECT -> SmartConnectRoute(
+                        container = container,
+                        openAppPicker = openGlobalAppPicker,
+                    )
                     GlobalTab.OPEN_SOURCE -> OpenSourceRoute(
                         container = container,
-                        openAppPicker = {
-                            container.appSettingsRepository.setActiveGlobalTab(GlobalTab.SHADOW_SSH)
-                            navController.navigate(Routes.APP_PICKER)
-                        },
+                        openAppPicker = openGlobalAppPicker,
                     )
                 }
             }
         }
     }
 
-    if (showConsent) {
+    consentTab?.let { requestedTab ->
         AlertDialog(
-            onDismissRequest = { showConsent = false },
-            title = { Text(stringResource(R.string.open_source_warning_title)) },
-            text = { Text(stringResource(R.string.open_source_warning_message)) },
+            onDismissRequest = {
+                container.appSettingsRepository.setActiveGlobalTab(GlobalTab.SHADOW_SSH)
+                consentTab = null
+            },
+            title = {
+                Text(
+                    stringResource(
+                        if (requestedTab == GlobalTab.SMART_CONNECT) {
+                            R.string.smart_connect_warning_title
+                        } else {
+                            R.string.open_source_warning_title
+                        },
+                    ),
+                )
+            },
+            text = {
+                Text(
+                    stringResource(
+                        if (requestedTab == GlobalTab.SMART_CONNECT) {
+                            R.string.smart_connect_warning_message
+                        } else {
+                            R.string.open_source_warning_message
+                        },
+                    ),
+                )
+            },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        container.appSettingsRepository.setOpenSourceConsentVersion(
-                            OpenSourcePolicy.CONSENT_VERSION,
-                        )
-                        container.appSettingsRepository.setActiveGlobalTab(GlobalTab.OPEN_SOURCE)
-                        if (container.appSettingsRepository.settings.value.openSourceAutoUpdateEnabled) {
-                            ProxySourceSyncWorker.schedule(container.applicationContext)
+                        if (requestedTab == GlobalTab.SMART_CONNECT) {
+                            container.appSettingsRepository.setSmartConnectConsentVersion(
+                                OpenSourcePolicy.CONSENT_VERSION,
+                            )
+                        } else {
+                            container.appSettingsRepository.setOpenSourceConsentVersion(
+                                OpenSourcePolicy.CONSENT_VERSION,
+                            )
+                            if (container.appSettingsRepository.settings.value.openSourceAutoUpdateEnabled) {
+                                ProxySourceSyncWorker.schedule(container.applicationContext)
+                            }
                         }
-                        showConsent = false
+                        container.appSettingsRepository.setActiveGlobalTab(requestedTab)
+                        consentTab = null
                     },
                 ) { Text(stringResource(R.string.open_source_warning_continue)) }
             },
@@ -126,7 +207,7 @@ fun GlobalTabsHost(
                 TextButton(
                     onClick = {
                         container.appSettingsRepository.setActiveGlobalTab(GlobalTab.SHADOW_SSH)
-                        showConsent = false
+                        consentTab = null
                     },
                 ) { Text(stringResource(R.string.open_source_warning_back)) }
             },

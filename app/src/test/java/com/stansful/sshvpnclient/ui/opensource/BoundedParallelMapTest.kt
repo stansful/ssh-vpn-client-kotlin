@@ -3,6 +3,7 @@ package com.stansful.sshvpnclient.ui.opensource
 import com.stansful.sshvpnclient.domain.model.ProxyTransport
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
+import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
@@ -180,6 +181,7 @@ class BoundedParallelMapTest {
                 vpnState = VpnConnectionState(
                     status = VpnConnectionStatus.CONNECTED,
                     activeTransport = VpnTransportType.XRAY,
+                    sessionOwner = VpnSessionOwner.OPEN_SOURCE,
                 ),
             ).canRemoveUnavailable,
         )

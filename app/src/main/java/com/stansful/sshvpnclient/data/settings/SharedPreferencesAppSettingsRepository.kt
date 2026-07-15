@@ -38,6 +38,13 @@ class SharedPreferencesAppSettingsRepository(
         currentSettings.value = currentSettings.value.copy(showLogsOnOpenSource = show)
     }
 
+    override fun setShowLogsOnSmartConnect(show: Boolean) {
+        preferences.edit {
+            putBoolean(KEY_SHOW_LOGS_ON_SMART_CONNECT, show)
+        }
+        currentSettings.value = currentSettings.value.copy(showLogsOnSmartConnect = show)
+    }
+
     override fun setShowTerminalOnMain(show: Boolean) {
         preferences.edit {
             putBoolean(KEY_SHOW_TERMINAL_ON_MAIN, show)
@@ -106,11 +113,22 @@ class SharedPreferencesAppSettingsRepository(
         currentSettings.value = currentSettings.value.copy(openSourceAutoUpdateEnabled = enabled)
     }
 
+    override fun setSmartConnectConsentVersion(version: Int) {
+        preferences.edit { putInt(KEY_SMART_CONNECT_CONSENT_VERSION, version) }
+        currentSettings.value = currentSettings.value.copy(smartConnectConsentVersion = version)
+    }
+
+    override fun setShowSmartConnectWarningOnEnter(show: Boolean) {
+        preferences.edit { putBoolean(KEY_SHOW_SMART_CONNECT_WARNING_ON_ENTER, show) }
+        currentSettings.value = currentSettings.value.copy(showSmartConnectWarningOnEnter = show)
+    }
+
     private fun readSettings(): AppSettings {
         applyOpenSourceAutoUpdateDefaultMigration()
         return AppSettings(
             showLogsOnMain = preferences.getBoolean(KEY_SHOW_LOGS_ON_MAIN, false),
             showLogsOnOpenSource = preferences.getBoolean(KEY_SHOW_LOGS_ON_OPEN_SOURCE, false),
+            showLogsOnSmartConnect = preferences.getBoolean(KEY_SHOW_LOGS_ON_SMART_CONNECT, false),
             showTerminalOnMain = preferences.getBoolean(KEY_SHOW_TERMINAL_ON_MAIN, false),
             themeMode = AppThemeMode.fromStorageValue(preferences.getString(KEY_THEME_MODE, null)),
             customThemeColors = readCustomThemeColors(),
@@ -134,6 +152,11 @@ class SharedPreferencesAppSettingsRepository(
             openSourceAutoUpdateEnabled = preferences.getBoolean(
                 KEY_OPEN_SOURCE_AUTO_UPDATE_ENABLED,
                 false,
+            ),
+            smartConnectConsentVersion = preferences.getInt(KEY_SMART_CONNECT_CONSENT_VERSION, 0),
+            showSmartConnectWarningOnEnter = preferences.getBoolean(
+                KEY_SHOW_SMART_CONNECT_WARNING_ON_ENTER,
+                true,
             ),
         )
     }
@@ -164,6 +187,7 @@ class SharedPreferencesAppSettingsRepository(
         const val PREFERENCES_NAME = "ssh-vpn-client-settings"
         const val KEY_SHOW_LOGS_ON_MAIN = "show_logs_on_main"
         const val KEY_SHOW_LOGS_ON_OPEN_SOURCE = "show_logs_on_open_source"
+        const val KEY_SHOW_LOGS_ON_SMART_CONNECT = "show_logs_on_smart_connect"
         const val KEY_SHOW_TERMINAL_ON_MAIN = "show_terminal_on_main"
         const val KEY_THEME_MODE = "theme_mode"
         const val KEY_CUSTOM_PRIMARY = "custom_primary"
@@ -183,5 +207,8 @@ class SharedPreferencesAppSettingsRepository(
         const val KEY_OPEN_SOURCE_AUTO_UPDATE_ENABLED = "open_source_auto_update_enabled"
         const val KEY_OPEN_SOURCE_AUTO_UPDATE_DEFAULT_DISABLED_MIGRATION =
             "open_source_auto_update_default_disabled_migration"
+        const val KEY_SMART_CONNECT_CONSENT_VERSION = "smart_connect_consent_version"
+        const val KEY_SHOW_SMART_CONNECT_WARNING_ON_ENTER =
+            "show_smart_connect_warning_on_enter"
     }
 }

@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.SshVpnApplication
 import com.stansful.sshvpnclient.domain.model.VpnMode
+import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
 import java.util.concurrent.atomic.AtomicLong
@@ -103,10 +104,30 @@ class OpenSourceVpnService : android.net.VpnService() {
             ACTION_CONNECT -> {
                 // Meet the foreground-service deadline before repository or native-core I/O.
                 startVpnForeground(profileName = null)
+                val profileId = intent.getStringExtra(EXTRA_PROFILE_ID)
+                if (!shouldAcceptVpnConnectCommand(
+                        state = appContainer.vpnConnectionRepository.currentState,
+                        owner = VpnSessionOwner.OPEN_SOURCE,
+                        transport = VpnTransportType.XRAY,
+                        expectedConfigId = profileId,
+                    )
+                ) {
+                    rejectStaleConnectCommand(startId)
+                    return START_NOT_STICKY
+                }
+                val lease = appContainer.vpnRuntimeLeaseRegistry.claim(
+                    owner = vpnTunnelOwner,
+                    sessionOwner = VpnSessionOwner.OPEN_SOURCE,
+                )
+                if (lease == null) {
+                    rejectBusyRuntimeConnectCommand(startId)
+                    return START_NOT_STICKY
+                }
                 underlyingNetworkMonitor.start()
                 connect(
-                    profileId = intent.getStringExtra(EXTRA_PROFILE_ID),
+                    profileId = profileId,
                     startId = startId,
+                    lease = lease,
                 )
             }
             ACTION_DISCONNECT -> disconnect(startId)
@@ -130,7 +151,12 @@ class OpenSourceVpnService : android.net.VpnService() {
             screenReceiverRegistered = false
         }
         val repository = appContainer.vpnConnectionRepository
-        if (repository.currentState.activeTransport == VpnTransportType.XRAY) {
+        if (isVpnSessionOwnedBy(
+                state = repository.currentState,
+                owner = VpnSessionOwner.OPEN_SOURCE,
+                transport = VpnTransportType.XRAY,
+            )
+        ) {
             repository.setDisconnected()
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -152,9 +178,8 @@ class OpenSourceVpnService : android.net.VpnService() {
         super.onRevoke()
     }
 
-    private fun connect(profileId: String?, startId: Int) {
+    private fun connect(profileId: String?, startId: Int, lease: VpnRuntimeLease) {
         val runId = connectionRunId.incrementAndGet()
-        val lease = appContainer.vpnRuntimeLeaseRegistry.claim(vpnTunnelOwner)
         runtimeLease = lease
         val commandId = lifecycleCommandId.incrementAndGet()
         serviceScope.launch {
@@ -261,7 +286,11 @@ class OpenSourceVpnService : android.net.VpnService() {
         }
 
         val publishedStart = mutateActiveConnectionIfCurrent(runId, commandId) {
-            repository.setConnecting(profile.id, VpnTransportType.XRAY)
+            repository.setConnecting(
+                profile.id,
+                VpnTransportType.XRAY,
+                VpnSessionOwner.OPEN_SOURCE,
+            )
             repository.appendDiagnostic("Starting opensource VPN connection")
             repository.appendDiagnostic(
                 "Selected public profile: ${profile.protocol.name}/${profile.transport.name} " +
@@ -277,7 +306,11 @@ class OpenSourceVpnService : android.net.VpnService() {
             try {
                 if (attempt > 1) {
                     val publishedReconnect = mutateActiveConnectionIfCurrent(runId, commandId) {
-                        repository.setReconnecting(profile.id, VpnTransportType.XRAY)
+                        repository.setReconnecting(
+                            profile.id,
+                            VpnTransportType.XRAY,
+                            VpnSessionOwner.OPEN_SOURCE,
+                        )
                         repository.appendDiagnostic("Xray reconnect attempt $attempt")
                     }
                     if (!publishedReconnect) break
@@ -336,7 +369,11 @@ class OpenSourceVpnService : android.net.VpnService() {
                     error("Underlying network changed during Xray startup")
                 }
                 if (!mutateActiveConnectionIfCurrent(runId, commandId) {
-                        repository.setConnected(profile.id, VpnTransportType.XRAY)
+                        repository.setConnected(
+                            profile.id,
+                            VpnTransportType.XRAY,
+                            VpnSessionOwner.OPEN_SOURCE,
+                        )
                         repository.appendDiagnostic("Xray VPN connection is connected")
                     }
                 ) {
@@ -370,7 +407,11 @@ class OpenSourceVpnService : android.net.VpnService() {
             } catch (error: Exception) {
                 if (!isActiveConnectionCommandCurrent(runId, commandId)) break
                 if (!mutateActiveConnectionIfCurrent(runId, commandId) {
-                        repository.setReconnecting(profile.id, VpnTransportType.XRAY)
+                        repository.setReconnecting(
+                            profile.id,
+                            VpnTransportType.XRAY,
+                            VpnSessionOwner.OPEN_SOURCE,
+                        )
                         repository.appendDiagnostic(
                             "Xray connection failed: ${error.message ?: error::class.java.simpleName}",
                         )
@@ -414,7 +455,12 @@ class OpenSourceVpnService : android.net.VpnService() {
                     startId = startId,
                     requireActiveConnection = false,
                 ) {
-                    if (repository.currentState.activeTransport == VpnTransportType.XRAY) {
+                    if (isVpnSessionOwnedBy(
+                            state = repository.currentState,
+                            owner = VpnSessionOwner.OPEN_SOURCE,
+                            transport = VpnTransportType.XRAY,
+                        )
+                    ) {
                         repository.setDisconnected()
                     }
                 }
@@ -491,7 +537,12 @@ class OpenSourceVpnService : android.net.VpnService() {
         return connectionRunId.get() == runId &&
             !userRequestedDisconnect &&
             !serviceDestroyed &&
-            runtimeLease?.isCurrent() == true
+            runtimeLease?.isCurrent() == true &&
+            isVpnSessionOwnedBy(
+                state = appContainer.vpnConnectionRepository.currentState,
+                owner = VpnSessionOwner.OPEN_SOURCE,
+                transport = VpnTransportType.XRAY,
+            )
     }
 
     private fun isLifecycleCommandCurrent(runId: Long, commandId: Long, startId: Int): Boolean {
@@ -510,7 +561,12 @@ class OpenSourceVpnService : android.net.VpnService() {
             lifecycleCommandId.get() == commandId &&
             !userRequestedDisconnect &&
             !serviceDestroyed &&
-            runtimeLease?.isCurrent() == true
+            runtimeLease?.isCurrent() == true &&
+            isVpnSessionOwnedBy(
+                state = appContainer.vpnConnectionRepository.currentState,
+                owner = VpnSessionOwner.OPEN_SOURCE,
+                transport = VpnTransportType.XRAY,
+            )
     }
 
     private suspend fun mutateActiveConnectionIfCurrent(
@@ -553,7 +609,15 @@ class OpenSourceVpnService : android.net.VpnService() {
                 startId = startId,
                 requireActiveConnection = true,
             ) {
-                appContainer.vpnConnectionRepository.setError(profileId, message)
+                val repository = appContainer.vpnConnectionRepository
+                if (isVpnSessionOwnedBy(
+                        state = repository.currentState,
+                        owner = VpnSessionOwner.OPEN_SOURCE,
+                        transport = VpnTransportType.XRAY,
+                    )
+                ) {
+                    repository.setError(profileId, message)
+                }
             }
         }
     }
@@ -587,6 +651,28 @@ class OpenSourceVpnService : android.net.VpnService() {
         if (connectionRunId.get() != runId) return
         stopOwnedXrayTransport()
         runCatching { appContainer.vpnTunnelManager.close(vpnTunnelOwner) }
+    }
+
+    private fun rejectStaleConnectCommand(startId: Int) {
+        if (stopSelfResult(startId)) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+    }
+
+    private fun rejectBusyRuntimeConnectCommand(startId: Int) {
+        val repository = appContainer.vpnConnectionRepository
+        if (isVpnSessionOwnedBy(
+                state = repository.currentState,
+                owner = VpnSessionOwner.OPEN_SOURCE,
+                transport = VpnTransportType.XRAY,
+            )
+        ) {
+            repository.setError(
+                repository.currentState.activeConfigId,
+                "Another VPN runtime is still stopping; try again",
+            )
+        }
+        rejectStaleConnectCommand(startId)
     }
 
     private fun stopOwnedXrayTransport(): Boolean {

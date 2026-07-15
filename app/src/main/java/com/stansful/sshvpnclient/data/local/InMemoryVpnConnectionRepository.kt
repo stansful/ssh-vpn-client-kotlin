@@ -5,7 +5,9 @@ import android.os.SystemClock
 import androidx.core.content.edit
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
+import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
+import com.stansful.sshvpnclient.domain.model.defaultSessionOwner
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -54,7 +56,11 @@ class InMemoryVpnConnectionRepository(
         applicationScope.launch { restoreDiagnostics() }
     }
 
-    override fun setConnecting(configId: String?, transport: VpnTransportType) {
+    override fun setConnecting(
+        configId: String?,
+        transport: VpnTransportType,
+        sessionOwner: VpnSessionOwner?,
+    ) {
         synchronized(stateLock) {
             diagnosticsTouched = true
             diagnosticsBuffer.clear()
@@ -63,29 +69,40 @@ class InMemoryVpnConnectionRepository(
                 status = VpnConnectionStatus.CONNECTING,
                 activeConfigId = configId,
                 activeTransport = transport,
+                sessionOwner = sessionOwner ?: transport.defaultSessionOwner(),
             )
             enqueuePersistence(emptyList(), force = true)
         }
     }
 
-    override fun setConnected(configId: String, transport: VpnTransportType) {
+    override fun setConnected(
+        configId: String,
+        transport: VpnTransportType,
+        sessionOwner: VpnSessionOwner?,
+    ) {
         updateState { state ->
             state.copy(
                 status = VpnConnectionStatus.CONNECTED,
                 activeConfigId = configId,
                 errorMessage = null,
                 activeTransport = transport,
+                sessionOwner = sessionOwner ?: transport.defaultSessionOwner(),
             )
         }
     }
 
-    override fun setReconnecting(configId: String, transport: VpnTransportType) {
+    override fun setReconnecting(
+        configId: String,
+        transport: VpnTransportType,
+        sessionOwner: VpnSessionOwner?,
+    ) {
         updateState { state ->
             state.copy(
                 status = VpnConnectionStatus.RECONNECTING,
                 activeConfigId = configId,
                 errorMessage = null,
                 activeTransport = transport,
+                sessionOwner = sessionOwner ?: transport.defaultSessionOwner(),
             )
         }
     }
@@ -108,6 +125,7 @@ class InMemoryVpnConnectionRepository(
                 activeConfigId = null,
                 errorMessage = null,
                 activeTransport = null,
+                sessionOwner = null,
             )
             enqueuePersistence(diagnostics, force = true)
         }
@@ -121,6 +139,7 @@ class InMemoryVpnConnectionRepository(
                 activeConfigId = configId,
                 errorMessage = message,
                 activeTransport = null,
+                sessionOwner = null,
             )
             enqueuePersistence(diagnostics, force = true)
         }

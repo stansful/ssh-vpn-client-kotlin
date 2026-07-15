@@ -14,6 +14,8 @@ interface AppSettingsRepository {
 
     fun setShowLogsOnOpenSource(show: Boolean)
 
+    fun setShowLogsOnSmartConnect(show: Boolean)
+
     fun setShowTerminalOnMain(show: Boolean)
 
     fun setThemeMode(themeMode: AppThemeMode)
@@ -33,4 +35,8 @@ interface AppSettingsRepository {
     fun setOpenSourceRiskBannerExpanded(expanded: Boolean)
 
     fun setOpenSourceAutoUpdateEnabled(enabled: Boolean)
+
+    fun setSmartConnectConsentVersion(version: Int)
+
+    fun setShowSmartConnectWarningOnEnter(show: Boolean)
 }

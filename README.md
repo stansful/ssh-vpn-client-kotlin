@@ -51,6 +51,7 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
   - команды и remote output не пишутся в diagnostics.
 - Глобальные вкладки:
   - `shadow-ssh` - основной SSH VPN режим;
+  - `smart` (`Smart Connect`) - полностью автоматический выбор и восстановление публичного Xray-туннеля;
   - `opensource` - импорт и запуск публичных VLESS/VMess/Trojan конфигураций через Xray-core;
   - активная вкладка сохраняется после перезапуска.
 - `opensource` режим:
@@ -62,6 +63,14 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
   - поддерживает выбор активного профиля, multi-select, select all и массовое удаление;
   - проверяет выбранный профиль или все профили запросом к YouTube через Xray;
   - подключает выбранный профиль отдельным Android `VpnService`.
+- `Smart Connect` режим:
+  - хранит каталог, выбор, test status и Tink secrets отдельно от `opensource`;
+  - по нажатию выполняет refresh -> check all -> удаление unavailable/stale (кроме pinned) -> выбор минимального ping -> подключение;
+  - никогда не импортирует, не показывает и не выбирает профили, имя которых содержит `🇷🇺`;
+  - принимает рабочим только tunnel, получивший HTTP `2xx` от YouTube health endpoint;
+  - подтверждает отказ двумя проверками с паузой 2 секунды и только затем запускает полный failover-цикл;
+  - после исчерпания списка повторяет синхронизацию с bounded задержками `30 s -> 60 s -> 120 s -> 5 min -> 15 min`;
+  - использует отдельный foreground `VpnService`, переживает уход UI в background и восстанавливает желаемое состояние после пересоздания процесса Android.
 - Темы:
   - `System` по умолчанию;
   - `Light`;
@@ -133,6 +142,8 @@ https://hub.mos.ru/zieng2/wl/raw/main/list_universal.txt
 
 Поддерживаемые share links: `vless://`, `vmess://`, `trojan://`. Parser сохраняет исходную ссылку в Tink-backed secret storage, а в Room кладёт только metadata и fingerprint.
 
+Smart Connect выполняет HTTP refresh через выбранный физический `Network`, передаёт тот же network в batch Xray probes и затем привязывает к нему live tunnel sockets. Это не даёт проверке случайно уйти через старый validated Wi-Fi, когда фактическим транспортом уже стала мобильная сеть. При непустом локальном каталоге используется conditional ETag refresh; полный payload принудительно скачивается только когда свежих локальных кандидатов нет.
+
 ## Fast reconnect
 
 После обнаружения разрыва приложение оставляет Android `VpnService` TUN interface поднятым, приостанавливает только SSH transport и сразу начинает новый SSH handshake. После успешной аутентификации работающий Kotlin forwarder получает новую JSch `Session` без пересоздания VPN interface.
@@ -176,7 +187,8 @@ Wake recovery основан на системных `SCREEN_OFF/SCREEN_ON` со
 - Иконки PackageManager декодируются максимум двумя параллельными задачами с single-flight и хранятся в LRU до 4 MiB; cache очищается при уходе с app picker. Большие proxy imports используют batch Tink, SQLite `IN`-пакеты максимум по 900 id и одну Room-транзакцию.
 - Поиск public profiles дебаунсится и фильтруется на `Dispatchers.Default`. `Check all` одним batch загружает профили и поднимает один временный Xray runtime с authenticated SOCKS inbound только на `127.0.0.1`. Каждому профилю назначаются уникальные SOCKS username и outbound route, поэтому параллельные probes не смешивают конфигурации.
 - OpenSource action `Remove all unavailable tunnels except pinned` атомарно удаляет только `UNAVAILABLE && !isPinned`, очищает соответствующие encrypted secrets и сохраняет selected fallback; count берётся из полного списка независимо от UI-фильтра.
-- Network probes выполняются только во время foreground-проверки с transient concurrency до 128 и timeout до 5 секунд на профиль. Battery Saver использует nominal cap 64, Android low-RAM — 32; для очень большого списка cap минимально повышается лишь настолько, чтобы уложить все пятисекундные slots в 60 секунд. Для примерно 500 профилей целевое время в normal mode составляет около 10 секунд; защитный общий budget равен 60 секундам. Хвост, который не получил полноценную проверку до hard deadline, получает `NOT_TESTED`, а не ложный `UNAVAILABLE`. Blocking JNI start/stop нельзя безопасно прервать из Kotlin, поэтому target/budget остаются best-effort на аномально зависшем native-вызове.
+- Network probes выполняются только во время foreground-проверки с transient concurrency до 128 и timeout до 5 секунд на профиль. Battery Saver использует nominal cap 64, Android low-RAM — 32; для очень большого списка cap минимально повышается лишь настолько, чтобы уложить все пятисекундные slots в 60 секунд. Для примерно 500 быстро отвечающих профилей целевое время в normal mode составляет около 10 секунд; если все 500 дожидаются полного пятисекундного timeout, физический минимум при concurrency 128 — около 20 секунд плюс запуск core. Защитный общий budget равен 60 секундам. Хвост, который не получил полноценную проверку до hard deadline, получает `NOT_TESTED`, а не ложный `UNAVAILABLE`. Blocking JNI start/stop нельзя безопасно прервать из Kotlin, поэтому target/budget остаются best-effort на аномально зависшем native-вызове.
+- Smart Connect считает 60 секунд общим budget всего refresh/check/prune/select workflow, начиная до HTTP-запроса. Progress публикуется монотонно и не более примерно 100 раз за batch; поздние callbacks после Stop игнорируются. Пустой/all-negative/инфраструктурный snapshot не уничтожает каталог. При наличии хотя бы одного текущего `AVAILABLE` статусы, prune и выбор winner коммитятся одной guarded Room-транзакцией либо целиком откатываются при handoff/settings revision.
 - Xray dialer sockets привязываются к выбранной физической `NOT_VPN` сети. Некорректная конфигурация изолируется от остальных profiles, а bind/runtime failure не превращается в массовый false-negative. UI показывает live completed/total, после чего все terminal results сохраняются одной Room-транзакцией без промежуточных persistent `RUNNING`; после завершения не остаются фоновые probe workers.
 - Xray native start/stop сериализованы reentrant lifecycle gate, поэтому disconnect не оставляет поздно стартовавший unowned core. Dialer/listener socket-protector controllers регистрируются один раз на binding; reconnect меняет только `AtomicReference` delegate и не накапливает callbacks/старые service closures.
 - Отмена public sync немедленно disconnect-ит blocking `HttpURLConnection`, не оставляя сетевой worker ждать read timeout.
@@ -186,6 +198,8 @@ Wake recovery основан на системных `SCREEN_OFF/SCREEN_ON` со
 - VPN runtime не захватывает собственные long-lived `WakeLock`/`WifiLock`; системно планируемый WorkManager может использовать кратковременный управляемый wake lock только на время выполнения worker. VPN foreground notification статичен и имеет low importance.
 - Idle TUN writer, zero-window TCP и offline reconnect используют блокирующее/событийное ожидание вместо короткого polling.
 - При выключенном экране интервалы local monitor и SSH keepalive автоматически увеличиваются и восстанавливаются без reconnect после `SCREEN_ON`.
+- Smart Connect проверяет live YouTube tunnel каждые 10 секунд в первую минуту, затем раз в 30 секунд при активном экране, раз в 120 секунд с выключенным экраном и раз в 300 секунд в Battery Saver. Собственных alarm/wake lock и постоянной GPU-анимации нет.
+- Перед разрушительным SSH rebuild или Smart failover раздельные RX/TX UID traffic counters проверяются без polling. Непрерывный RX не ограничен пятиминутным cap: пока скачивание реально получает не менее 64 KiB между samples, ложная YouTube health-ошибка не разрушает его TCP flow. Для TX-only активности остаётся защитный максимум 5 минут, потому что одни retransmit не доказывают живой обратный путь.
 - При построении нового TUN pipeline системный Battery Saver и Android low-RAM уменьшают только число TCP flow и retained packet pool (`64/32` и `32/32` вместо `128/64`). Throughput-critical SSH/upload windows и TUN queue 256 остаются одинаковыми во всех профилях.
 - Необязательные terminal иконки/вывод освобождаются или ограничиваются, когда соответствующий UI не виден; постоянных декоративных GPU-анимаций нет.
 - Периодические public-source updates объединяются WorkManager и выполняются только при подходящем заряде и физической `VALIDATED + NOT_VPN + NOT_METERED` сети, к которой HTTP явно привязывается через `Network.openConnection`.
@@ -201,7 +215,8 @@ Pagination не используется для списка приложени�
 - Quick Settings tile нельзя автоматически поставить в конкретное место шторки: пользователь должен добавить плитку через редактирование быстрых настроек Android.
 - Release APK, подписанный локальным ignored keystore, подходит для установки на устройство, но не для production-дистрибуции.
 - Публичные `opensource` конфигурации используются на риск пользователя: приложение не может гарантировать безопасность чужого proxy-сервера.
-- Xray runtime core не включается в APK по умолчанию: opensource settings скачивает совместимый `libXray` core из release assets этого же репозитория.
+- Существующее TCP/TLS-соединение нельзя перенести на другой SSH/Xray server только клиентскими средствами. Приложение подавляет ложные и слишком частые rebuild/failover во время активной загрузки, но при реальной потере сервера или физической сети браузеру всё равно потребуется HTTP Range resume (`Продолжить`).
+- Xray runtime core не включается в APK по умолчанию: и Smart Connect, и opensource settings умеют самостоятельно скачать совместимый `libXray` core из release assets этого же репозитория.
 
 ## Требования
 
@@ -331,6 +346,7 @@ app/src/main/java/com/stansful/sshvpnclient/
     key/        SSH key persistence
     local/      Room and VPN state repositories
     proxy/      public proxy parser, Room repository, source sync
+    smart/      isolated Smart Connect Room repository and source boundary
     secret/     Tink-backed secret storage
     settings/   app settings persistence
   domain/
@@ -339,6 +355,7 @@ app/src/main/java/com/stansful/sshvpnclient/
     usecase/
   ui/
     opensource/ public profile list, import, checks, connect controls
+    smartconnect/ automatic Smart Connect control and settings
     main/       main screen, settings, diagnostics, terminal
     apps/       selected-apps picker
     configs/
@@ -347,7 +364,7 @@ app/src/main/java/com/stansful/sshvpnclient/
     keyedit/
     theme/
   vpn/
-    Android VpnService, SSH manager, Kotlin TUN forwarder, OpenSource Xray service, QS tile
+    Android VpnService, SSH manager, Kotlin TUN forwarder, OpenSource/Smart Xray services, QS tile
   work/
     periodic public proxy sync
   xray/

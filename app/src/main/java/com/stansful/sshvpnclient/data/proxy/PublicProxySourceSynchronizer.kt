@@ -31,12 +31,21 @@ class PublicProxySourceSynchronizer(
     context: Context,
     private val proxyProfileRepository: ProxyProfileRepository,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val sourceUrl: String = OpenSourcePolicy.SOURCE_URL,
+    preferencesName: String = DEFAULT_PREFERENCES_NAME,
+    private val userAgent: String = DEFAULT_USER_AGENT,
 ) : ProxySourceSynchronizer {
     private val preferences = context.applicationContext.getSharedPreferences(
-        PREFERENCES_NAME,
+        preferencesName,
         Context.MODE_PRIVATE,
     )
     private val synchronizationMutex = Mutex()
+
+    init {
+        require(sourceUrl.isNotBlank()) { "Proxy source URL must not be blank" }
+        require(preferencesName.isNotBlank()) { "Proxy sync preferences name must not be blank" }
+        require(userAgent.isNotBlank()) { "Proxy sync user agent must not be blank" }
+    }
 
     override suspend fun synchronize(
         force: Boolean,
@@ -51,7 +60,7 @@ class PublicProxySourceSynchronizer(
         force: Boolean,
         connectionFactory: ProxySourceConnectionFactory?,
     ): ProxySyncResult {
-        val url = URL(OpenSourcePolicy.SOURCE_URL)
+        val url = URL(sourceUrl)
         val rawConnection = connectionFactory?.open(url) ?: url.openConnection()
         val connection = (rawConnection as? HttpURLConnection)
             ?: error("Public configuration source did not open an HTTP connection")
@@ -61,7 +70,7 @@ class PublicProxySourceSynchronizer(
             readTimeout = READ_TIMEOUT_MS
             instanceFollowRedirects = false
             setRequestProperty("Accept", "text/plain")
-            setRequestProperty("User-Agent", USER_AGENT)
+            setRequestProperty("User-Agent", userAgent)
             if (!force) {
                 preferences.getString(KEY_ETAG, null)?.let { etag ->
                     setRequestProperty("If-None-Match", etag)
@@ -82,7 +91,7 @@ class PublicProxySourceSynchronizer(
                     val result = proxyProfileRepository.import(
                         text = raw,
                         source = ProxyProfileSource.REMOTE,
-                        sourceUrl = OpenSourcePolicy.SOURCE_URL,
+                        sourceUrl = sourceUrl,
                     )
                     preferences.edit {
                         getHeaderField("ETag")?.let { putString(KEY_ETAG, it) }
@@ -139,10 +148,10 @@ class PublicProxySourceSynchronizer(
     }
 
     private companion object {
-        const val PREFERENCES_NAME = "open-source-proxy-sync"
+        const val DEFAULT_PREFERENCES_NAME = "open-source-proxy-sync"
         const val KEY_ETAG = "etag"
         const val KEY_LAST_SUCCESS_AT = "last_success_at"
-        const val USER_AGENT = "shadow-ssh-android-opensource-sync"
+        const val DEFAULT_USER_AGENT = "shadow-ssh-android-opensource-sync"
         const val CONNECT_TIMEOUT_MS = 10_000
         const val READ_TIMEOUT_MS = 15_000
         const val MAX_RESPONSE_BYTES = 2 * 1_024 * 1_024

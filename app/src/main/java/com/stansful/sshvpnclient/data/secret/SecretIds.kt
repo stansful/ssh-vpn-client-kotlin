@@ -7,4 +7,6 @@ object SecretIds {
     fun proxyProfile(profileId: String) = "proxy-profile-$profileId"
     fun proxyProfileRevision(profileId: String, revisionId: String) =
         "proxy-profile-$profileId-$revisionId"
+    fun smartProxyProfileRevision(profileId: String, revisionId: String) =
+        "smart-proxy-profile-$profileId-$revisionId"
 }

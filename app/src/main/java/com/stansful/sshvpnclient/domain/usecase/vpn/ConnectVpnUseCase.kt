@@ -6,6 +6,7 @@ import androidx.core.content.ContextCompat
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
+import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
@@ -13,6 +14,9 @@ import com.stansful.sshvpnclient.domain.repository.SshPrivateKeyRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.vpn.SshVpnService
 import com.stansful.sshvpnclient.vpn.OpenSourceVpnService
+import com.stansful.sshvpnclient.vpn.SmartConnectVpnService
+import com.stansful.sshvpnclient.vpn.canProceedAfterVpnOwnerStop
+import com.stansful.sshvpnclient.vpn.canPublishVpnStartFailure
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -26,28 +30,34 @@ class ConnectVpnUseCase(
     suspend operator fun invoke(preserveDiagnostics: Boolean = false) {
         val config = configRepository.getSelectedConfig()
         if (config == null) {
-            vpnConnectionRepository.setError(null, "No configuration selected")
+            publishStartFailure(null, "No configuration selected")
             return
         }
 
         val settings = appSettingsRepository.settings.value
         if (settings.vpnMode == VpnMode.SELECTED_APPS && settings.selectedAppPackages.isEmpty()) {
-            vpnConnectionRepository.setError(config.id, "No apps selected")
+            publishStartFailure(config.id, "No apps selected")
             return
         }
 
         if (config.authType == AuthType.PRIVATE_KEY) {
             val keyId = config.privateKeyId
             if (keyId.isNullOrBlank() || keyRepository.getById(keyId) == null) {
-                vpnConnectionRepository.setError(config.id, "Selected SSH key not found")
+                publishStartFailure(config.id, "Selected SSH key not found")
                 return
             }
         }
 
-        if (vpnConnectionRepository.currentState.activeTransport == VpnTransportType.XRAY) {
-            context.applicationContext.startService(
-                OpenSourceVpnService.disconnectIntent(context.applicationContext),
-            )
+        val stateBeforeSwitch = vpnConnectionRepository.currentState
+        if (stateBeforeSwitch.activeTransport == VpnTransportType.XRAY) {
+            val disconnectIntent = if (
+                stateBeforeSwitch.sessionOwner == VpnSessionOwner.SMART_CONNECT
+            ) {
+                SmartConnectVpnService.stopIntent(context.applicationContext)
+            } else {
+                OpenSourceVpnService.disconnectIntent(context.applicationContext)
+            }
+            context.applicationContext.startService(disconnectIntent)
             withTimeoutOrNull(TRANSPORT_SWITCH_TIMEOUT_MS) {
                 vpnConnectionRepository.state.first { state ->
                     state.status == VpnConnectionStatus.DISCONNECTED ||
@@ -56,6 +66,14 @@ class ConnectVpnUseCase(
             }
         } else {
             context.stopService(Intent(context, OpenSourceVpnService::class.java))
+            context.stopService(Intent(context, SmartConnectVpnService::class.java))
+        }
+        if (!canProceedAfterVpnOwnerStop(
+                stoppedOwner = stateBeforeSwitch.sessionOwner,
+                currentState = vpnConnectionRepository.currentState,
+            )
+        ) {
+            return
         }
 
         if (preserveDiagnostics) {
@@ -70,6 +88,12 @@ class ConnectVpnUseCase(
                 preserveDiagnostics = preserveDiagnostics,
             ),
         )
+    }
+
+    private fun publishStartFailure(configId: String?, message: String) {
+        if (canPublishVpnStartFailure(vpnConnectionRepository.currentState)) {
+            vpnConnectionRepository.setError(configId, message)
+        }
     }
 
     private companion object {

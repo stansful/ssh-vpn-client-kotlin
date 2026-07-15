@@ -20,6 +20,8 @@ class XrayConfigBuilderTest {
         val inbound = config.getJSONArray("inbounds").getJSONObject(0)
         val outbound = config.getJSONArray("outbounds").getJSONObject(0)
 
+        assertEquals(1, config.getJSONArray("inbounds").length())
+        assertEquals(false, config.has("routing"))
         assertEquals("tun", inbound.getString("protocol"))
         assertEquals("vless", outbound.getString("protocol"))
         assertEquals("reality", outbound.getJSONObject("streamSettings").getString("security"))
@@ -29,6 +31,45 @@ class XrayConfigBuilderTest {
                 .getJSONObject("realitySettings")
                 .getString("publicKey"),
         )
+    }
+
+    @Test
+    fun `live tun health endpoint is authenticated loopback and shares proxy outbound`() {
+        val config = JSONObject(
+            builder.buildTunConfig(
+                profile = profile(),
+                liveHealthEndpoint = XrayLiveHealthEndpoint(
+                    port = 12_345,
+                    username = "health-user",
+                    password = "health-password",
+                ),
+            ),
+        )
+
+        val inbounds = config.getJSONArray("inbounds")
+        val tunInbound = inbounds.getJSONObject(0)
+        val healthInbound = inbounds.getJSONObject(1)
+        val healthSettings = healthInbound.getJSONObject("settings")
+        val account = healthSettings.getJSONArray("accounts").getJSONObject(0)
+        val outbounds = config.getJSONArray("outbounds")
+        val route = config.getJSONObject("routing").getJSONArray("rules").getJSONObject(0)
+        val routedInbounds = route.getJSONArray("inboundTag")
+
+        assertEquals(2, inbounds.length())
+        assertEquals("tun-in", tunInbound.getString("tag"))
+        assertEquals("127.0.0.1", healthInbound.getString("listen"))
+        assertEquals(12_345, healthInbound.getInt("port"))
+        assertEquals("socks", healthInbound.getString("protocol"))
+        assertEquals("live-health-in", healthInbound.getString("tag"))
+        assertEquals("password", healthSettings.getString("auth"))
+        assertEquals(false, healthSettings.getBoolean("udp"))
+        assertEquals("health-user", account.getString("user"))
+        assertEquals("health-password", account.getString("pass"))
+        assertEquals(1, outbounds.length())
+        assertEquals("proxy-out", outbounds.getJSONObject(0).getString("tag"))
+        assertEquals("tun-in", routedInbounds.getString(0))
+        assertEquals("live-health-in", routedInbounds.getString(1))
+        assertEquals("proxy-out", route.getString("outboundTag"))
     }
 
     @Test

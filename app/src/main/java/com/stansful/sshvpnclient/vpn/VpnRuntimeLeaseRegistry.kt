@@ -1,5 +1,6 @@
 package com.stansful.sshvpnclient.vpn
 
+import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import kotlinx.coroutines.CancellationException
 
 class VpnRuntimeLeaseRegistry {
@@ -7,10 +8,18 @@ class VpnRuntimeLeaseRegistry {
     private var nextGeneration = 0L
     private var currentLease: VpnRuntimeLease? = null
 
-    fun claim(owner: Any): VpnRuntimeLease = synchronized(lock) {
+    /**
+     * Claims the process-wide VPN runtime without ever superseding a different logical mode.
+     * Transport switching must invalidate the previous lease first; a stale service command can
+     * therefore be rejected without cancelling the live owner it raced with.
+     */
+    fun claim(owner: Any, sessionOwner: VpnSessionOwner): VpnRuntimeLease? = synchronized(lock) {
+        val activeLease = currentLease
+        if (activeLease != null && activeLease.sessionOwner != sessionOwner) return@synchronized null
         VpnRuntimeLease(
             registry = this,
             owner = owner,
+            sessionOwner = sessionOwner,
             generation = ++nextGeneration,
         ).also { lease -> currentLease = lease }
     }
@@ -41,6 +50,7 @@ class VpnRuntimeLeaseRegistry {
 class VpnRuntimeLease internal constructor(
     private val registry: VpnRuntimeLeaseRegistry,
     internal val owner: Any,
+    internal val sessionOwner: VpnSessionOwner,
     internal val generation: Long,
 ) {
     fun isCurrent(): Boolean = registry.isCurrent(this)
