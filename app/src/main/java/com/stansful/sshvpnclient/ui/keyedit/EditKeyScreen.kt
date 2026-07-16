@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.ui.keyedit
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
@@ -18,7 +19,9 @@ import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
 import com.stansful.sshvpnclient.ui.common.ErrorMessage
 import com.stansful.sshvpnclient.ui.common.FormField
+import com.stansful.sshvpnclient.ui.common.InsetGroup
 import com.stansful.sshvpnclient.ui.common.PrimaryActionButton
+import com.stansful.sshvpnclient.ui.common.SectionHeader
 import com.stansful.sshvpnclient.ui.common.SecretFormField
 import com.stansful.sshvpnclient.ui.common.VerticalGap
 
@@ -59,44 +62,68 @@ private fun EditKeyScreen(
         onBack = onBack,
     ) {
         Column(
-            modifier = Modifier.verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
-            FormField(
-                value = state.form.name,
-                onValueChange = { value -> onFormChange { it.copy(name = value) } },
-                label = "Key name",
-                placeholder = "e.g. production-ed25519",
-                error = state.errors["name"],
-            )
-            SecretFormField(
-                value = state.form.privateKey,
-                onValueChange = { value -> onFormChange { it.copy(privateKey = value) } },
-                label = "Private key",
-                placeholder = OPENSSH_PRIVATE_KEY_PLACEHOLDER,
-                error = state.errors["privateKey"],
-                singleLine = false,
-                minLines = 8,
-                copyLabel = "Private key",
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
-            )
-            SecretFormField(
-                value = state.form.passphrase,
-                onValueChange = { value -> onFormChange { it.copy(passphrase = value) } },
-                label = "Passphrase",
-                placeholder = "Optional private key passphrase",
-                copyLabel = "Passphrase",
-            )
-            FormField(
-                value = state.form.note,
-                onValueChange = { value -> onFormChange { it.copy(note = value) } },
-                label = "Note",
-                placeholder = "Optional key description",
-                singleLine = false,
-                minLines = 3,
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeader("Key details")
+                InsetGroup {
+                    FormField(
+                        value = state.form.name,
+                        onValueChange = { value -> onFormChange { it.copy(name = value) } },
+                        label = "Key name",
+                        placeholder = "e.g. production-ed25519",
+                        error = state.errors["name"],
+                    )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeader(
+                    title = "Private key",
+                    subtitle = "The key stays on this device and is stored as sensitive data.",
+                )
+                InsetGroup {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        SecretFormField(
+                            value = state.form.privateKey,
+                            onValueChange = { value -> onFormChange { it.copy(privateKey = value) } },
+                            label = "Private key",
+                            placeholder = OPENSSH_PRIVATE_KEY_PLACEHOLDER,
+                            error = state.errors["privateKey"],
+                            singleLine = false,
+                            minLines = 8,
+                            copyLabel = "Private key",
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                        )
+                        SecretFormField(
+                            value = state.form.passphrase,
+                            onValueChange = { value -> onFormChange { it.copy(passphrase = value) } },
+                            label = "Passphrase",
+                            placeholder = "Optional private key passphrase",
+                            copyLabel = "Passphrase",
+                        )
+                    }
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeader("Notes")
+                InsetGroup {
+                    FormField(
+                        value = state.form.note,
+                        onValueChange = { value -> onFormChange { it.copy(note = value) } },
+                        label = "Note",
+                        placeholder = "Optional key description",
+                        singleLine = false,
+                        minLines = 3,
+                    )
+                }
+            }
             ErrorMessage(state.message)
-            PrimaryActionButton(text = "Save", onClick = onSave)
+            PrimaryActionButton(text = "Save key", onClick = onSave)
             VerticalGap()
         }
     }

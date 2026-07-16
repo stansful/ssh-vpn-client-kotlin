@@ -804,7 +804,7 @@ class XrayCoreBridge(
 
     companion object {
         const val CORE_UNAVAILABLE_MESSAGE =
-            "Xray runtime core is not installed. Download it from opensource settings."
+            "Xray runtime core is not installed. Download it from Public Routes settings."
         private const val TEST_TIMEOUT_SECONDS = 5
         private const val TEST_URL = "https://www.youtube.com/generate_204"
     }

@@ -26,7 +26,7 @@ class ConnectProxyVpnUseCase(
     suspend operator fun invoke() {
         val profile = proxyProfileRepository.getSelected()
         if (profile == null) {
-            publishStartFailure(null, "No opensource configuration selected")
+            publishStartFailure(null, "No public route selected")
             return
         }
         val settings = appSettingsRepository.settings.value

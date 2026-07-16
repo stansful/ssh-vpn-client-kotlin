@@ -12,7 +12,6 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -21,9 +20,8 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -55,7 +53,9 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -65,9 +65,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilledTonalButton
@@ -92,8 +92,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
@@ -102,9 +100,9 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
@@ -128,7 +126,14 @@ import com.stansful.sshvpnclient.ui.common.AppUpdateAvailableDialog
 import com.stansful.sshvpnclient.ui.common.AppUpdateSettingsSection
 import com.stansful.sshvpnclient.ui.common.AppUpdateUiState
 import com.stansful.sshvpnclient.ui.common.AppScreen
+import com.stansful.sshvpnclient.ui.common.AppSheetCornerRadius
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
+import com.stansful.sshvpnclient.ui.common.EmptyState
+import com.stansful.sshvpnclient.ui.common.InsetGroup
+import com.stansful.sshvpnclient.ui.common.InsetRow
+import com.stansful.sshvpnclient.ui.common.SectionHeader
+import com.stansful.sshvpnclient.ui.common.SheetTitle
+import com.stansful.sshvpnclient.ui.common.StatusCapsule
 import com.stansful.sshvpnclient.ui.common.formatFileSize
 import com.stansful.sshvpnclient.ui.common.openAppUpdateInstaller
 import com.stansful.sshvpnclient.ui.main.CustomThemeColorsEditor
@@ -242,9 +247,10 @@ private fun OpenSourceScreen(
     var pendingDeleteIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var settingsVisible by remember { mutableStateOf(false) }
     var searchVisible by remember { mutableStateOf(false) }
+    var topMenuExpanded by remember { mutableStateOf(false) }
 
     AppScreen(
-        title = if (state.selectionMode) "Selected: ${state.selectedIds.size}" else "opensource",
+        title = if (state.selectionMode) "Selected: ${state.selectedIds.size}" else "Public Routes",
         actions = {
             if (state.selectionMode) {
                 IconButton(onClick = viewModel::selectAll) {
@@ -268,11 +274,31 @@ private fun OpenSourceScreen(
                 IconButton(onClick = { settingsVisible = true }) {
                     Icon(Icons.Default.Settings, contentDescription = "Settings")
                 }
-                IconButton(onClick = viewModel::showBulkImport) {
-                    Icon(Icons.Default.ContentPaste, contentDescription = "Import from clipboard")
-                }
-                IconButton(onClick = { viewModel.openEditor() }) {
-                    Icon(Icons.Default.Add, contentDescription = "Add configuration")
+                Box {
+                    IconButton(onClick = { topMenuExpanded = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "More actions")
+                    }
+                    DropdownMenu(
+                        expanded = topMenuExpanded,
+                        onDismissRequest = { topMenuExpanded = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Add configuration") },
+                            leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) },
+                            onClick = {
+                                topMenuExpanded = false
+                                viewModel.openEditor()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Import from clipboard") },
+                            leadingIcon = { Icon(Icons.Default.ContentPaste, contentDescription = null) },
+                            onClick = {
+                                topMenuExpanded = false
+                                viewModel.showBulkImport()
+                            },
+                        )
+                    }
                 }
             }
         },
@@ -295,36 +321,39 @@ private fun OpenSourceScreen(
                 onConnect = if (state.xrayConnected) viewModel::disconnect else onConnect,
             )
             AnimatedVisibility(visible = searchVisible || state.query.isNotBlank() || state.pinnedOnly) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = state.query,
-                        onValueChange = viewModel::setQuery,
-                        label = { Text("Search configurations") },
-                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                        trailingIcon = {
-                            IconButton(
-                                onClick = {
-                                    viewModel.setQuery("")
-                                    viewModel.setPinnedOnly(false)
-                                    searchVisible = false
-                                },
-                            ) {
-                                Icon(Icons.Default.Close, contentDescription = "Close search")
-                            }
-                        },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    FilterChip(
-                        selected = state.pinnedOnly,
-                        onClick = { viewModel.setPinnedOnly(!state.pinnedOnly) },
-                        label = { Text("Pinned") },
-                        leadingIcon = if (state.pinnedOnly) {
-                            { Icon(Icons.Default.PushPin, contentDescription = null, modifier = Modifier.size(18.dp)) }
-                        } else {
-                            null
-                        },
-                    )
+                InsetGroup(contentPadding = PaddingValues(12.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = state.query,
+                            onValueChange = viewModel::setQuery,
+                            label = { Text("Search configurations") },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                            trailingIcon = {
+                                IconButton(
+                                    onClick = {
+                                        viewModel.setQuery("")
+                                        viewModel.setPinnedOnly(false)
+                                        searchVisible = false
+                                    },
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "Close search")
+                                }
+                            },
+                            singleLine = true,
+                            shape = MaterialTheme.shapes.medium,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        FilterChip(
+                            selected = state.pinnedOnly,
+                            onClick = { viewModel.setPinnedOnly(!state.pinnedOnly) },
+                            label = { Text("Pinned only") },
+                            leadingIcon = if (state.pinnedOnly) {
+                                { Icon(Icons.Default.PushPin, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                            } else {
+                                null
+                            },
+                        )
+                    }
                 }
             }
             state.message?.let { message ->
@@ -342,7 +371,7 @@ private fun OpenSourceScreen(
                 DiagnosticsLogPanel(state.vpnState.diagnostics)
             }
             if (state.profiles.isEmpty()) {
-                EmptyProxyList()
+                EmptyProxyList(onAdd = { viewModel.openEditor() })
             } else {
                 val listState = rememberLazyListState()
                 Box(modifier = Modifier.fillMaxSize()) {
@@ -350,7 +379,7 @@ private fun OpenSourceScreen(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(bottom = if (state.profiles.size > SCROLL_JUMP_THRESHOLD) 72.dp else 0.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         items(state.profiles, key = ProxyProfileSummary::id) { profile ->
                             ProxyProfileCard(
@@ -525,7 +554,7 @@ private fun ScrollJumpButtons(
 ) {
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(8.dp),
+        shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
         contentColor = MaterialTheme.colorScheme.onSurface,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
@@ -536,10 +565,10 @@ private fun ScrollJumpButtons(
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            FilledTonalIconButton(onClick = onScrollToTop, modifier = Modifier.size(42.dp)) {
+            FilledTonalIconButton(onClick = onScrollToTop, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Scroll to top")
             }
-            FilledTonalIconButton(onClick = onScrollToBottom, modifier = Modifier.size(42.dp)) {
+            FilledTonalIconButton(onClick = onScrollToBottom, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Scroll to bottom")
             }
         }
@@ -551,33 +580,15 @@ private fun RiskBanner(
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
 ) {
-    Surface(
-        color = MaterialTheme.colorScheme.errorContainer,
-        contentColor = MaterialTheme.colorScheme.onErrorContainer,
-        shape = RoundedCornerShape(8.dp),
-    ) {
+    InsetGroup(contentPadding = PaddingValues(0.dp)) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .animateContentSize()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth().animateContentSize(),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = stringResource(R.string.open_source_banner_title),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                )
-                IconButton(
-                    onClick = { onExpandedChange(!expanded) },
-                    modifier = Modifier.size(40.dp),
-                ) {
+            InsetRow(
+                title = stringResource(R.string.open_source_banner_title),
+                subtitle = if (expanded) null else "Review before using public routes",
+                onClick = { onExpandedChange(!expanded) },
+                trailing = {
                     Icon(
                         imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                         contentDescription = if (expanded) {
@@ -585,19 +596,17 @@ private fun RiskBanner(
                         } else {
                             stringResource(R.string.show_diagnostics)
                         },
-                        tint = if (expanded) {
-                            MaterialTheme.colorScheme.onErrorContainer
-                        } else {
-                            MaterialTheme.colorScheme.onErrorContainer
-                        },
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(22.dp),
                     )
-                }
-            }
+                },
+            )
             AnimatedVisibility(visible = expanded) {
                 Text(
                     text = stringResource(R.string.open_source_warning_message),
                     style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
                 )
             }
         }
@@ -610,14 +619,8 @@ private fun DiagnosticsLogPanel(diagnostics: List<String>) {
     val clipboard = LocalClipboard.current
     val coroutineScope = rememberCoroutineScope()
 
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
-        shape = RoundedCornerShape(8.dp),
-    ) {
+    InsetGroup {
         Column(
-            modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
@@ -723,72 +726,93 @@ private fun OpenSourceSettingsSheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surface,
+        containerColor = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onSurface,
         scrimColor = Color.Black.copy(alpha = 0.42f),
         dragHandle = { BottomSheetDefaults.DragHandle(color = MaterialTheme.colorScheme.outline) },
-        shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
+        shape = RoundedCornerShape(
+            topStart = AppSheetCornerRadius,
+            topEnd = AppSheetCornerRadius,
+        ),
     ) {
         Column(
             modifier = Modifier
+                .fillMaxWidth()
                 .padding(horizontal = 20.dp, vertical = 8.dp)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
-            Text(
-                text = stringResource(R.string.settings),
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
+            SheetTitle(
+                title = stringResource(R.string.settings),
+                subtitle = "Public route connection and update preferences",
             )
 
-            SettingsSwitchRow(
-                title = stringResource(R.string.debug_logs),
-                checked = settings.showLogsOnOpenSource,
-                onCheckedChange = onShowLogsChange,
-            )
-            SettingsSwitchRow(
-                title = stringResource(R.string.show_warning_dialog),
-                checked = settings.showOpenSourceWarningOnEnter,
-                onCheckedChange = onShowWarningDialogChange,
-            )
-            SettingsSwitchRow(
-                title = "Auto-refresh public configurations",
-                checked = settings.openSourceAutoUpdateEnabled,
-                onCheckedChange = onAutoUpdateChange,
-            )
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
-
-            XrayCoreUpdateSection(
-                xrayCoreAvailable = xrayCoreAvailable,
-                state = xrayCoreUpdateState,
-                xrayActive = xrayActive,
-                onCheckUpdates = onCheckXrayCoreUpdates,
-                onDownload = onDownloadXrayCore,
-                onCancelDownload = onCancelXrayCoreDownload,
-            )
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
-
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(stringResource(R.string.vpn_mode), style = MaterialTheme.typography.labelLarge)
-                VpnModeSelector(
-                    selected = settings.vpnMode,
-                    selectedAppsCount = settings.selectedAppPackages.size,
-                    onSelected = onVpnModeChange,
-                    onOpenAppPicker = onOpenAppPicker,
-                    deferEmptySelectedAppsMode = true,
-                )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeader(title = "General")
+                InsetGroup(contentPadding = PaddingValues(0.dp)) {
+                    Column {
+                        SettingsSwitchRow(
+                            title = stringResource(R.string.debug_logs),
+                            checked = settings.showLogsOnOpenSource,
+                            onCheckedChange = onShowLogsChange,
+                        )
+                        HorizontalDivider(
+                            modifier = Modifier.padding(start = 16.dp),
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f),
+                        )
+                        SettingsSwitchRow(
+                            title = stringResource(R.string.show_warning_dialog),
+                            checked = settings.showOpenSourceWarningOnEnter,
+                            onCheckedChange = onShowWarningDialogChange,
+                        )
+                        HorizontalDivider(
+                            modifier = Modifier.padding(start = 16.dp),
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f),
+                        )
+                        SettingsSwitchRow(
+                            title = "Auto-refresh public configurations",
+                            checked = settings.openSourceAutoUpdateEnabled,
+                            onCheckedChange = onAutoUpdateChange,
+                        )
+                    }
+                }
             }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeader(title = "Xray core")
+                InsetGroup {
+                    XrayCoreUpdateSection(
+                        xrayCoreAvailable = xrayCoreAvailable,
+                        state = xrayCoreUpdateState,
+                        xrayActive = xrayActive,
+                        onCheckUpdates = onCheckXrayCoreUpdates,
+                        onDownload = onDownloadXrayCore,
+                        onCancelDownload = onCancelXrayCoreDownload,
+                    )
+                }
+            }
 
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(stringResource(R.string.theme), style = MaterialTheme.typography.labelLarge)
-                ThemeModeSelector(
-                    selected = settings.themeMode,
-                    onSelected = onThemeModeChange,
-                )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeader(title = stringResource(R.string.vpn_mode))
+                InsetGroup {
+                    VpnModeSelector(
+                        selected = settings.vpnMode,
+                        selectedAppsCount = settings.selectedAppPackages.size,
+                        onSelected = onVpnModeChange,
+                        onOpenAppPicker = onOpenAppPicker,
+                        deferEmptySelectedAppsMode = true,
+                    )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeader(title = stringResource(R.string.theme))
+                InsetGroup {
+                    ThemeModeSelector(
+                        selected = settings.themeMode,
+                        onSelected = onThemeModeChange,
+                    )
+                }
                 AnimatedVisibility(visible = settings.themeMode == AppThemeMode.CUSTOM) {
                     CustomThemeColorsEditor(
                         colors = settings.customThemeColors,
@@ -797,27 +821,34 @@ private fun OpenSourceSettingsSheet(
                 }
             }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeader(title = "Updates")
+                InsetGroup {
+                    AppUpdateSettingsSection(
+                        updateState = updateState,
+                        onCheckForUpdates = onCheckForUpdates,
+                        onResumeUpdate = onResumeUpdate,
+                        onInstallUpdate = onInstallUpdate,
+                        showTitle = false,
+                    )
+                }
+            }
 
-            AppUpdateSettingsSection(
-                updateState = updateState,
-                onCheckForUpdates = onCheckForUpdates,
-                onResumeUpdate = onResumeUpdate,
-                onInstallUpdate = onInstallUpdate,
-            )
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
-
-            GitHubLinkRow(
-                onClick = { uriHandler.openUri(GITHUB_REPOSITORY_URL) },
-                onCopyClick = {
-                    coroutineScope.launch {
-                        clipboard.setClipEntry(
-                            ClipEntry(ClipData.newPlainText("GitHub repository", GITHUB_REPOSITORY_URL)),
-                        )
-                    }
-                },
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeader(title = "About")
+                GitHubLinkRow(
+                    onClick = { uriHandler.openUri(GITHUB_REPOSITORY_URL) },
+                    onCopyClick = {
+                        coroutineScope.launch {
+                            clipboard.setClipEntry(
+                                ClipEntry(
+                                    ClipData.newPlainText("GitHub repository", GITHUB_REPOSITORY_URL),
+                                ),
+                            )
+                        }
+                    },
+                )
+            }
 
             Box(modifier = Modifier.padding(bottom = 12.dp))
         }
@@ -836,7 +867,6 @@ private fun XrayCoreUpdateSection(
     val uriHandler = LocalUriHandler.current
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Xray runtime core", style = MaterialTheme.typography.labelLarge)
         Text(
             text = if (xrayCoreAvailable) {
                 "Installed for this app. Runtime ABI: ${state.runtimeAbi}"
@@ -850,7 +880,7 @@ private fun XrayCoreUpdateSection(
             onClick = onCheckUpdates,
             enabled = !state.isChecking && !state.isDownloading,
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(8.dp),
+            shape = MaterialTheme.shapes.medium,
         ) {
             if (state.isChecking) {
                 CircularProgressIndicator(
@@ -935,7 +965,7 @@ private fun XrayCoreAssetRow(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(8.dp),
+        shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
         contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
     ) {
@@ -970,7 +1000,7 @@ private fun XrayCoreAssetRow(
                     }
                 },
                 enabled = downloading || (asset != null && enabled),
-                shape = RoundedCornerShape(8.dp),
+                shape = MaterialTheme.shapes.medium,
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
             ) {
                 if (downloading) {
@@ -997,40 +1027,13 @@ private fun GitHubLinkRow(
     onClick: () -> Unit,
     onCopyClick: () -> Unit,
 ) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressed by interactionSource.collectIsPressedAsState()
-    val scale by androidx.compose.animation.core.animateFloatAsState(
-        targetValue = if (pressed) 0.98f else 1f,
-        animationSpec = androidx.compose.animation.core.tween(120),
-        label = "opensource-github-link-scale",
-    )
     val colorScheme = MaterialTheme.colorScheme
-    val darkTheme = colorScheme.background.luminance() < 0.5f
-
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = if (darkTheme) {
-            colorScheme.surfaceVariant.copy(alpha = 0.72f)
-        } else {
-            colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        },
-        contentColor = colorScheme.onSurface,
-        border = BorderStroke(1.dp, colorScheme.outline.copy(alpha = 0.28f)),
-        modifier = Modifier
-            .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null,
-                role = Role.Button,
-                onClick = onClick,
-            ),
-    ) {
+    InsetGroup(contentPadding = PaddingValues(0.dp)) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(horizontal = 16.dp, vertical = 11.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1057,7 +1060,7 @@ private fun GitHubLinkRow(
             }
             IconButton(
                 onClick = onCopyClick,
-                modifier = Modifier.size(44.dp),
+                modifier = Modifier.size(48.dp),
             ) {
                 Icon(
                     Icons.Default.ContentCopy,
@@ -1079,19 +1082,62 @@ private fun OpenSourceActions(
     onRemoveUnavailable: () -> Unit,
     onConnect: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        state.selectedProfile?.let { profile ->
-            Text(
-                text = "Selected: ${profile.name}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-            )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
+    val statusText = when {
+        state.xrayConnected -> "Connected"
+        state.sshActive -> "SSH active"
+        state.vpnState.status == VpnConnectionStatus.ERROR -> "Error"
+        state.isSyncing -> "Refreshing"
+        else -> "Ready"
+    }
+    val statusColor = when {
+        state.xrayConnected -> MaterialTheme.colorScheme.secondary
+        state.vpnState.status == VpnConnectionStatus.ERROR -> MaterialTheme.colorScheme.error
+        state.sshActive || state.isSyncing -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val refreshColor = MaterialTheme.colorScheme.primary
+    val refreshEnabled = !state.isSyncing && !state.isRemovingUnavailable
+    val checkAllColor = if (state.isChecking) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.primary
+    }
+    val checkAllEnabled = (state.profiles.isNotEmpty() || state.isChecking) &&
+        state.xrayCoreAvailable &&
+        !state.isRemovingUnavailable
+
+    InsetGroup {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    SectionHeader(title = "Connection")
+                    Text(
+                        text = state.selectedProfile?.name ?: "Select a route below",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    state.selectedProfile?.let { profile ->
+                        Text(
+                            text = "${profile.protocol.scheme} · ${profile.host}:${profile.port}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                StatusCapsule(text = statusText, color = statusColor)
+            }
+
             Button(
                 onClick = onConnect,
                 enabled = state.xrayConnected || state.canStartOpenSource,
@@ -1108,136 +1154,173 @@ private fun OpenSourceActions(
                     },
                 ),
                 contentPadding = ButtonDefaults.ContentPadding,
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp),
+                shape = MaterialTheme.shapes.medium,
             ) {
                 Icon(Icons.Default.PowerSettingsNew, contentDescription = null)
                 Text(
                     when {
                         state.xrayConnected -> "Disconnect"
-                        state.sshActive -> "Switch to opensource"
+                        state.sshActive -> "Switch to Public Routes"
                         else -> "Connect"
                     },
                     modifier = Modifier.padding(start = 6.dp),
                     style = MaterialTheme.typography.labelLarge,
                 )
             }
-            FilledTonalButton(
-                onClick = onRefresh,
-                enabled = !state.isSyncing && !state.isRemovingUnavailable,
-                modifier = Modifier.weight(1f),
-                contentPadding = ButtonDefaults.ContentPadding,
-                shape = RoundedCornerShape(8.dp),
-            ) {
-                if (state.isSyncing) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                    )
-                } else {
-                    Icon(Icons.Default.Refresh, contentDescription = null)
-                }
-                Text(
-                    "Refresh",
-                    modifier = Modifier.padding(start = 6.dp),
-                    style = MaterialTheme.typography.labelLarge,
-                )
-            }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            CheckSelectedButton(
-                state = state,
-                onCheckSelected = onCheckSelected,
-                modifier = Modifier.weight(1f),
-            )
-            FilledTonalButton(
-                onClick = if (state.isChecking) onCancelChecks else onCheckAll,
-                enabled = (state.profiles.isNotEmpty() || state.isChecking) &&
-                    state.xrayCoreAvailable &&
-                    !state.isRemovingUnavailable,
-                modifier = Modifier.weight(1f),
-                contentPadding = ButtonDefaults.ContentPadding,
-                shape = RoundedCornerShape(8.dp),
-            ) {
-                Icon(
-                    if (state.isChecking) Icons.Default.Cancel else Icons.Default.Check,
-                    contentDescription = null,
-                )
-                Text(
-                    if (state.isChecking) "Cancel" else "Check all",
-                    modifier = Modifier.padding(start = 6.dp),
-                    style = MaterialTheme.typography.labelLarge,
-                )
-            }
-        }
-        AnimatedVisibility(
-            visible = state.unavailableUnpinnedCount > 0 || state.isRemovingUnavailable,
-        ) {
-            FilledTonalButton(
-                onClick = onRemoveUnavailable,
-                enabled = state.canRemoveUnavailable,
-                colors = ButtonDefaults.filledTonalButtonColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                ),
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))
+            SectionHeader(title = "Route tools")
+
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                contentPadding = ButtonDefaults.ContentPadding,
-                shape = RoundedCornerShape(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                if (state.isRemovingUnavailable) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                    )
-                } else {
-                    Icon(Icons.Default.Delete, contentDescription = null)
-                }
-                Text(
-                    text = if (state.isRemovingUnavailable) {
-                        stringResource(R.string.open_source_removing_unavailable)
-                    } else {
-                        stringResource(
-                            R.string.open_source_remove_unavailable_button,
-                            state.unavailableUnpinnedCount,
+                Button(
+                    onClick = onRefresh,
+                    enabled = refreshEnabled,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = refreshColor.copy(alpha = 0.16f),
+                        contentColor = refreshColor,
+                        disabledContainerColor = refreshColor.copy(alpha = 0.08f),
+                        disabledContentColor = refreshColor.copy(alpha = 0.55f),
+                    ),
+                    border = BorderStroke(
+                        1.dp,
+                        refreshColor.copy(alpha = if (refreshEnabled) 0.42f else 0.18f),
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 50.dp),
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    if (state.isSyncing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = refreshColor,
                         )
-                    },
-                    modifier = Modifier.padding(start = 6.dp),
-                    style = MaterialTheme.typography.labelLarge,
+                    } else {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                    }
+                    Text(
+                        "Refresh",
+                        modifier = Modifier.padding(start = 6.dp),
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
+                Button(
+                    onClick = if (state.isChecking) onCancelChecks else onCheckAll,
+                    enabled = checkAllEnabled,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = checkAllColor.copy(alpha = 0.16f),
+                        contentColor = checkAllColor,
+                        disabledContainerColor = checkAllColor.copy(alpha = 0.08f),
+                        disabledContentColor = checkAllColor.copy(alpha = 0.55f),
+                    ),
+                    border = BorderStroke(
+                        1.dp,
+                        checkAllColor.copy(alpha = if (checkAllEnabled) 0.42f else 0.18f),
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 50.dp),
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    Icon(
+                        if (state.isChecking) Icons.Default.Cancel else Icons.Default.Check,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        if (state.isChecking) "Cancel" else "Check all",
+                        modifier = Modifier.padding(start = 6.dp),
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
+            }
+
+            state.selectedProfile?.let {
+                CheckSelectedButton(
+                    state = state,
+                    onCheckSelected = onCheckSelected,
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
-        }
-        if (state.isChecking && state.checkTotal > 0) {
-            LinearProgressIndicator(
-                progress = { state.checkCompleted.toFloat() / state.checkTotal.toFloat() },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Text(
-                text = state.checkProgressText ?: "${state.checkCompleted}/${state.checkTotal}",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        if (!state.xrayCoreAvailable) {
-            Text(
-                text = "Xray runtime core is not installed. Download it in settings.",
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        if (state.vpnState.activeTransport?.name == "XRAY" &&
-            state.vpnState.sessionOwner == VpnSessionOwner.OPEN_SOURCE
-        ) {
-            Text(
-                text = "Status: ${state.vpnState.status.name.lowercase()}",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (state.vpnState.status == VpnConnectionStatus.ERROR) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
+
+            AnimatedVisibility(
+                visible = state.unavailableUnpinnedCount > 0 || state.isRemovingUnavailable,
+            ) {
+                TextButton(
+                    onClick = onRemoveUnavailable,
+                    enabled = state.canRemoveUnavailable,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp),
+                    contentPadding = ButtonDefaults.ContentPadding,
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    if (state.isRemovingUnavailable) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Icon(Icons.Default.Delete, contentDescription = null)
+                    }
+                    Text(
+                        text = if (state.isRemovingUnavailable) {
+                            stringResource(R.string.open_source_removing_unavailable)
+                        } else {
+                            stringResource(
+                                R.string.open_source_remove_unavailable_button,
+                                state.unavailableUnpinnedCount,
+                            )
+                        },
+                        modifier = Modifier.padding(start = 6.dp),
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
+            }
+
+            if (state.isChecking && state.checkTotal > 0) {
+                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    LinearProgressIndicator(
+                        progress = { state.checkCompleted.toFloat() / state.checkTotal.toFloat() },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        text = state.checkProgressText ?: "${state.checkCompleted}/${state.checkTotal} · Checking tunnels",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            if (!state.xrayCoreAvailable) {
+                Text(
+                    text = "Xray runtime core is not installed. Download it in settings.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (state.vpnState.activeTransport?.name == "XRAY" &&
+                state.vpnState.sessionOwner == VpnSessionOwner.OPEN_SOURCE
+            ) {
+                Text(
+                    text = "Status: ${state.vpnState.status.name.lowercase()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (state.vpnState.status == VpnConnectionStatus.ERROR) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
         }
     }
 }
@@ -1249,94 +1332,62 @@ private fun CheckSelectedButton(
     modifier: Modifier = Modifier,
 ) {
     val status = state.selectedProfile?.lastTestStatus ?: ProxyTestStatus.NOT_TESTED
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressed by interactionSource.collectIsPressedAsState()
-    val scale by androidx.compose.animation.core.animateFloatAsState(
-        targetValue = if (pressed) 0.98f else 1f,
-        animationSpec = tween(120),
-        label = "opensource-check-selected-scale",
-    )
-    val containerColor by animateColorAsState(
-        targetValue = status.checkButtonContainerColor(),
-        animationSpec = tween(180),
-        label = "opensource-check-selected-container",
-    )
-    val contentColor by animateColorAsState(
-        targetValue = status.checkButtonContentColor(),
-        animationSpec = tween(180),
-        label = "opensource-check-selected-content",
-    )
-
-    FilledTonalButton(
-        onClick = onCheckSelected,
-        enabled = state.selectedProfile != null &&
-            !state.isChecking &&
-            !state.isRemovingUnavailable &&
-            state.xrayCoreAvailable,
-        interactionSource = interactionSource,
-        colors = ButtonDefaults.filledTonalButtonColors(
-            containerColor = containerColor,
-            contentColor = contentColor,
-            disabledContainerColor = containerColor.copy(alpha = 0.62f),
-            disabledContentColor = contentColor.copy(alpha = 0.72f),
-        ),
-        modifier = modifier.graphicsLayer {
-            scaleX = scale
-            scaleY = scale
-        },
-        contentPadding = ButtonDefaults.ContentPadding,
-        shape = RoundedCornerShape(8.dp),
-    ) {
-        val icon = status.checkButtonIcon()
-        icon?.let { Icon(it, contentDescription = null) }
-        Text(
-            text = status.checkButtonText(),
-            modifier = Modifier.padding(start = if (icon == null) 0.dp else 6.dp),
-            style = MaterialTheme.typography.labelLarge,
-        )
-    }
-}
-
-@Composable
-private fun ProxyTestStatus.checkButtonContainerColor(): Color {
-    return when (this) {
-        ProxyTestStatus.NOT_TESTED -> MaterialTheme.colorScheme.surfaceVariant
+    val contentColor = when (status) {
+        ProxyTestStatus.NOT_TESTED -> MaterialTheme.colorScheme.primary
         ProxyTestStatus.RUNNING -> MaterialTheme.colorScheme.primary
         ProxyTestStatus.AVAILABLE -> MaterialTheme.colorScheme.secondary
         ProxyTestStatus.UNAVAILABLE,
         ProxyTestStatus.UNSUPPORTED,
         -> MaterialTheme.colorScheme.error
     }
-}
+    val enabled = state.selectedProfile != null &&
+        !state.isChecking &&
+        !state.isRemovingUnavailable &&
+        state.xrayCoreAvailable
 
-@Composable
-private fun ProxyTestStatus.checkButtonContentColor(): Color {
-    return when (this) {
-        ProxyTestStatus.NOT_TESTED -> MaterialTheme.colorScheme.onSurfaceVariant
-        ProxyTestStatus.RUNNING -> MaterialTheme.colorScheme.onPrimary
-        ProxyTestStatus.AVAILABLE -> MaterialTheme.colorScheme.onSecondary
-        ProxyTestStatus.UNAVAILABLE,
-        ProxyTestStatus.UNSUPPORTED,
-        -> MaterialTheme.colorScheme.onError
-    }
-}
-
-private fun ProxyTestStatus.checkButtonIcon() = when (this) {
-    ProxyTestStatus.NOT_TESTED -> null
-    ProxyTestStatus.RUNNING -> Icons.Default.Refresh
-    ProxyTestStatus.AVAILABLE -> Icons.Default.Check
-    ProxyTestStatus.UNAVAILABLE,
-    ProxyTestStatus.UNSUPPORTED,
-    -> Icons.Default.Close
-}
-
-private fun ProxyTestStatus.checkButtonText(): String {
-    return when (this) {
-        ProxyTestStatus.NOT_TESTED -> "Check selected"
-        ProxyTestStatus.RUNNING -> "Checking"
-        ProxyTestStatus.AVAILABLE -> "Available"
-        ProxyTestStatus.UNAVAILABLE -> "Unavailable"
-        ProxyTestStatus.UNSUPPORTED -> "Unsupported"
+    Button(
+        onClick = onCheckSelected,
+        enabled = enabled,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = contentColor.copy(alpha = 0.16f),
+            contentColor = contentColor,
+            disabledContainerColor = contentColor.copy(alpha = 0.08f),
+            disabledContentColor = contentColor.copy(alpha = 0.55f),
+        ),
+        border = BorderStroke(
+            1.dp,
+            contentColor.copy(alpha = if (enabled) 0.42f else 0.18f),
+        ),
+        modifier = modifier.heightIn(min = 50.dp),
+        contentPadding = ButtonDefaults.ContentPadding,
+        shape = MaterialTheme.shapes.medium,
+    ) {
+        when (status) {
+            ProxyTestStatus.RUNNING -> CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = contentColor,
+            )
+            ProxyTestStatus.NOT_TESTED,
+            ProxyTestStatus.AVAILABLE,
+            -> Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+            ProxyTestStatus.UNAVAILABLE,
+            ProxyTestStatus.UNSUPPORTED,
+            -> Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+        }
+        Text(
+            text = when (status) {
+                ProxyTestStatus.NOT_TESTED -> "Check selected route"
+                ProxyTestStatus.RUNNING -> "Checking selected route"
+                ProxyTestStatus.AVAILABLE -> "Selected route is available"
+                ProxyTestStatus.UNAVAILABLE -> "Selected route is unavailable"
+                ProxyTestStatus.UNSUPPORTED -> "Selected route is unsupported"
+            },
+            modifier = Modifier.padding(start = 7.dp),
+            style = MaterialTheme.typography.labelLarge,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -1354,38 +1405,56 @@ private fun ProxyProfileCard(
     onDelete: () -> Unit,
     onPinChange: (Boolean) -> Unit,
 ) {
-    val borderColor = when {
-        checked -> MaterialTheme.colorScheme.secondary
-        profile.isSelected -> MaterialTheme.colorScheme.primary
-        profile.isPinned -> MaterialTheme.colorScheme.tertiary
-        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+    var menuExpanded by remember(profile.id) { mutableStateOf(false) }
+    val rowTint = when {
+        checked -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.10f)
+        profile.isSelected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+        else -> Color.Transparent
     }
-    Card(
+    val hasStatusLine = profile.lastTestStatus != ProxyTestStatus.NOT_TESTED ||
+        profile.isStale ||
+        hostPingMs != null
+
+    InsetGroup(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onLongClick),
-        border = BorderStroke(if (profile.isSelected || checked) 2.dp else 1.dp, borderColor),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(8.dp),
+        contentPadding = PaddingValues(0.dp),
     ) {
         Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(rowTint)
+                .padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (profile.isSelected || checked) {
-                    Icon(Icons.Default.Check, contentDescription = if (checked) "Selected for action" else "Active")
+                    Icon(
+                        Icons.Default.Check,
+                        contentDescription = if (checked) "Selected for action" else "Active",
+                        tint = if (checked) {
+                            MaterialTheme.colorScheme.secondary
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        modifier = Modifier.size(20.dp),
+                    )
                 }
                 Text(
                     text = profile.name,
                     modifier = Modifier
                         .padding(start = if (profile.isSelected || checked) 8.dp else 0.dp)
                         .weight(1f),
-                    style = MaterialTheme.typography.titleSmall,
+                    style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.SemiBold,
-                    maxLines = 2,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                IconButton(onClick = { onPinChange(!profile.isPinned) }) {
+                IconButton(
+                    onClick = { onPinChange(!profile.isPinned) },
+                    modifier = Modifier.size(48.dp),
+                ) {
                     Icon(
                         Icons.Default.PushPin,
                         contentDescription = if (profile.isPinned) "Unpin" else "Pin",
@@ -1397,47 +1466,107 @@ private fun ProxyProfileCard(
                     )
                 }
                 if (!selectionMode) {
-                    IconButton(onClick = onCopy) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy")
-                    }
-                    IconButton(onClick = onEdit) {
-                        Icon(Icons.Default.Edit, contentDescription = "Edit")
-                    }
-                    IconButton(onClick = onDelete) {
-                        Icon(Icons.Default.Delete, contentDescription = "Delete")
+                    Box {
+                        IconButton(
+                            onClick = { menuExpanded = true },
+                            modifier = Modifier.size(48.dp),
+                        ) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Configuration actions")
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Copy") },
+                                leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onCopy()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Edit") },
+                                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onEdit()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error,
+                                    )
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    onDelete()
+                                },
+                            )
+                        }
                     }
                 }
             }
-            Text("${profile.host}:${profile.port}", style = MaterialTheme.typography.bodySmall)
             Text(
-                "${profile.protocol.name} · ${profile.transport.name} · ${profile.security.name}",
+                "${profile.protocol.scheme} · ${profile.host}:${profile.port}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
+            Text(
+                "${profile.transport.name} · ${profile.security.name}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (hasStatusLine) {
                 Row(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 5.dp, end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    if (profile.isPinned) StatusLabel("Pinned", MaterialTheme.colorScheme.tertiary)
-                    if (profile.isStale) StatusLabel("Stale", MaterialTheme.colorScheme.error)
                     when (profile.lastTestStatus) {
-                        ProxyTestStatus.AVAILABLE -> StatusLabel(
-                            profile.lastLatencyMs?.let { "${it}ms" } ?: "Available",
+                        ProxyTestStatus.AVAILABLE -> StatusCapsule(
+                            profile.lastLatencyMs?.let { "${it} ms" } ?: "Available",
                             MaterialTheme.colorScheme.secondary,
                         )
-                        ProxyTestStatus.UNAVAILABLE -> StatusLabel("Unavailable", MaterialTheme.colorScheme.error)
-                        ProxyTestStatus.RUNNING -> StatusLabel("Checking", MaterialTheme.colorScheme.primary)
-                        ProxyTestStatus.UNSUPPORTED -> StatusLabel("Unsupported", MaterialTheme.colorScheme.error)
+                        ProxyTestStatus.UNAVAILABLE -> StatusCapsule(
+                            "Unavailable",
+                            MaterialTheme.colorScheme.error,
+                        )
+                        ProxyTestStatus.RUNNING -> StatusCapsule(
+                            "Checking",
+                            MaterialTheme.colorScheme.primary,
+                        )
+                        ProxyTestStatus.UNSUPPORTED -> StatusCapsule(
+                            "Unsupported",
+                            MaterialTheme.colorScheme.error,
+                        )
                         ProxyTestStatus.NOT_TESTED -> Unit
                     }
-                }
-                hostPingMs?.let { latencyMs ->
-                    StatusLabel("ping $latencyMs ms", MaterialTheme.colorScheme.primary)
+                    if (profile.isStale) {
+                        Text(
+                            text = "Stale",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    Box(modifier = Modifier.weight(1f))
+                    hostPingMs?.let { latencyMs ->
+                        Text(
+                            text = "Host $latencyMs ms",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
@@ -1445,16 +1574,13 @@ private fun ProxyProfileCard(
 }
 
 @Composable
-private fun StatusLabel(text: String, color: Color) {
-    Text(text = text, color = color, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-}
-
-@Composable
-private fun EmptyProxyList() {
-    Text(
-        text = "No public configurations yet",
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+private fun EmptyProxyList(onAdd: () -> Unit) {
+    EmptyState(
+        icon = Icons.Default.Public,
+        title = "No configurations",
+        message = "Refresh public routes or add a configuration manually.",
+        actionLabel = "Add configuration",
+        onAction = onAdd,
     )
 }
 

@@ -1,8 +1,8 @@
 package com.stansful.sshvpnclient.ui.keys
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -12,9 +12,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -25,16 +27,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stansful.sshvpnclient.AppContainer
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
+import com.stansful.sshvpnclient.ui.common.EmptyState
 import com.stansful.sshvpnclient.ui.common.ErrorMessage
+import com.stansful.sshvpnclient.ui.common.InsetGroup
+import com.stansful.sshvpnclient.ui.common.InsetRow
 import com.stansful.sshvpnclient.ui.common.formatDateTime
 
 @Composable
@@ -75,13 +78,14 @@ private fun KeyListScreen(
             }
         },
     ) {
+        ErrorMessage(state.message)
         if (state.items.isEmpty()) {
             EmptyKeyList(onAdd)
         } else {
-            ErrorMessage(state.message)
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 items(state.items, key = { it.key.id }) { item ->
                     KeyListCard(
@@ -106,7 +110,7 @@ private fun KeyListScreen(
                         pendingDelete = null
                     },
                 ) {
-                    Text("Delete")
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
@@ -120,18 +124,16 @@ private fun KeyListScreen(
 
 @Composable
 private fun EmptyKeyList(onAdd: () -> Unit) {
-    Column(
+    EmptyState(
+        icon = Icons.Default.Key,
+        title = "No SSH keys",
+        message = "Store a private key securely for key-based authentication.",
+        actionLabel = "Add SSH key",
+        onAction = onAdd,
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        Text("No SSH keys yet", style = MaterialTheme.typography.titleMedium)
-        FilledTonalButton(onClick = onAdd, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Default.Add, contentDescription = null)
-            Text("Add SSH key", modifier = Modifier.padding(start = 8.dp))
-        }
-    }
+    )
 }
 
 @Composable
@@ -140,31 +142,53 @@ private fun KeyListCard(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = item.key.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f),
-                )
-                IconButton(onClick = onEdit) {
-                    Icon(Icons.Default.Edit, contentDescription = "Edit")
+    var menuExpanded by remember { mutableStateOf(false) }
+    val details = buildString {
+        append("Used by ${item.usageCount} configurations")
+        append(" • Updated ${formatDateTime(item.key.updatedAt)}")
+        item.key.note?.takeIf { it.isNotBlank() }?.let { note -> append("\n$note") }
+    }
+
+    InsetGroup(contentPadding = PaddingValues(0.dp)) {
+        InsetRow(
+            title = item.key.name,
+            subtitle = details,
+            icon = Icons.Default.Key,
+            onClick = onEdit,
+            trailing = {
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "SSH key actions")
+                    }
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Edit") },
+                            leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onEdit()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onDelete()
+                            },
+                        )
+                    }
                 }
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete")
-                }
-            }
-            Text("Used by: ${item.usageCount} configs")
-            item.key.note?.let { Text("Note: $it") }
-            Text("Updated: ${formatDateTime(item.key.updatedAt)}")
-        }
+            },
+        )
     }
 }

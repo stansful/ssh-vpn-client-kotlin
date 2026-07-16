@@ -259,7 +259,7 @@ class OpenSourceVpnService : android.net.VpnService() {
                 commandId = commandId,
                 startId = startId,
                 profileId = profileId,
-                message = "No opensource configuration selected",
+                message = "No public route selected",
             )
             return
         }
@@ -292,7 +292,7 @@ class OpenSourceVpnService : android.net.VpnService() {
                 VpnTransportType.XRAY,
                 VpnSessionOwner.OPEN_SOURCE,
             )
-            repository.appendDiagnostic("Starting opensource VPN connection")
+            repository.appendDiagnostic("Starting public route VPN connection")
             repository.appendDiagnostic(
                 "Selected public profile: ${profile.protocol.name}/${profile.transport.name} " +
                     "${profile.host}:${profile.port}",

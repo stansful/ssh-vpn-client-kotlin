@@ -1,8 +1,8 @@
 # shadow-ssh Android: техническая документация
 
-Дата ревью проекта: 2026-07-15.
+Дата ревью проекта: 2026-07-16.
 
-Документ описывает текущее устройство Android-приложения `shadow-ssh`: архитектуру, основные сценарии, хранение данных, VPN runtime, OpenSource/Xray runtime, обновления, сборку, безопасность и известные ограничения.
+Документ описывает текущее устройство Android-приложения `shadow-ssh`: архитектуру, основные сценарии, хранение данных, VPN runtime, Public Routes (`OpenSource` внутри кода)/Xray runtime, обновления, сборку, безопасность и известные ограничения.
 
 ## 1. Назначение приложения
 
@@ -10,7 +10,7 @@
 
 - `shadow-ssh`: VPN поверх SSH. Android `VpnService` поднимает TUN-интерфейс, а пользовательский TCP/DNS forwarder прокидывает трафик через SSH `direct-tcpip` каналы.
 - `smart` (`Smart Connect`): изолированно обновляет и проверяет публичный Xray-каталог, удаляет подтверждённо недоступные профили, выбирает минимальный ping и автоматически восстанавливает VPN при подтверждённом отказе.
-- `opensource`: VPN поверх публичных VLESS/VMess/Trojan конфигураций. Android `VpnService` поднимает TUN-интерфейс, а runtime Xray core обрабатывает TUN и выбранный proxy profile.
+- `Public Routes` (persisted/internal id `opensource`): VPN поверх публичных VLESS/VMess/Trojan конфигураций. Android `VpnService` поднимает TUN-интерфейс, а runtime Xray core обрабатывает TUN и выбранный proxy profile.
 
 Все режимы используют общий routing mode, общий выбор приложений, общую тему, updater приложения и process-wide VPN state/lease. Smart-каталог, его Room rows, selection, sync metadata и Tink secrets не пересекаются с OpenSource. Одновременно активной может быть только одна VPN-сессия.
 
@@ -93,7 +93,7 @@ UI не создает инфраструктуру напрямую. Экран
 
 - `shadow-ssh`.
 - `smart` (`Smart Connect`).
-- `opensource`.
+- `Public Routes` (internal id `opensource`).
 
 Активная вкладка сохраняется в настройках (`activeGlobalTab`).
 
@@ -106,7 +106,7 @@ UI не создает инфраструктуру напрямую. Экран
 - `EDIT_KEY` - создание/редактирование приватного ключа.
 - `APP_PICKER` - выбор приложений для `Selected apps`.
 
-`smart` и `opensource` отображаются отдельными route внутри `GlobalTabsHost` и используют единый глобальный app picker без переключения на SSH navigation graph.
+`smart` и `Public Routes` отображаются отдельными route внутри `GlobalTabsHost` и используют единый глобальный app picker без переключения на SSH navigation graph.
 
 ## 7. Общие настройки приложения
 
@@ -150,6 +150,14 @@ App picker:
 - Кеширует список на 5 минут.
 - Сортирует сначала пользовательские приложения, затем системные.
 - В UI отображает label, package name, marker `System` и иконку приложения.
+- Декодирует иконки максимум двумя IO-задачами, объединяет одинаковые запросы и хранит bitmap в 4 MiB LRU с TTL 5 минут между повторными открытиями экрана.
+
+UI design system:
+
+- Сохраняет существующие launcher icon и чёрно-оранжевую dark-палитру.
+- Использует единую системную sans-serif типографику, стандартную нижнюю навигацию и grouped inset-поверхности с общей шкалой радиусов.
+- Не использует blur, shader effects или бесконечные декоративные анимации; короткие press/state transitions создаются только во время пользовательского действия или смены состояния.
+- Root tabs сохраняют собственное состояние, а нижняя панель скрывается на SSH secondary screens и в глобальном app picker.
 
 Режима bypass в текущей модели нет.
 
@@ -777,7 +785,7 @@ Install:
 
 Release APK:
 
-- `appVersionName = 2.5.7`.
+- `appVersionName = 2.5.6`.
 - `versionCode = major * 1_000_000 + minor * 1_000 + patch`.
 - ABI splits включены для:
   - `arm64-v8a`.
@@ -874,7 +882,7 @@ Backup:
 - Xray core вынесен из APK и скачивается по ABI.
 - Release build включает R8 и resource shrinking.
 - PackageManager app list кешируется на 5 минут.
-- Package icons декодируются максимум двумя параллельными `Dispatchers.IO` задачами, одинаковые запросы объединяются single-flight, результат хранится в LRU до 4 MiB.
+- Package icons декодируются максимум двумя параллельными `Dispatchers.IO` задачами, одинаковые запросы объединяются single-flight, результат хранится в LRU до 4 MiB с TTL 5 минут и повторно используется после закрытия app picker.
 - Public proxy import получает существующие fingerprints batch-запросами, staging secrets делает одним durable Tink commit, а Room switch выполняет одной транзакцией.
 - Public config auto-refresh выключен по умолчанию; если пользователь включает его, WorkManager запускается раз в 12 часов с flex 4 часа и constraints `network unmetered` + `battery not low`. Worker дополнительно требует физическую `VALIDATED + NOT_VPN + NOT_METERED` сеть и открывает HTTP через `Network.openConnection`.
 - VPN runtime не держит собственный long-lived wake/wifi lock. WorkManager/Android могут использовать кратковременный управляемый wake lock на время worker.

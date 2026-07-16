@@ -4,7 +4,7 @@
 
 `shadow-ssh` - Android-приложение, которое создаёт локальный VPN-интерфейс на устройстве и использует SSH-сервер или публичный Xray-compatible proxy profile как транспорт до внешних сайтов и сервисов.
 
-Цель пользователя: выбрать SSH-конфигурацию или публичный `opensource` профиль, подключиться и направить сетевой трафик приложений через выбранный туннель без изменения серверной части.
+Цель пользователя: выбрать SSH-конфигурацию или профиль из `Public Routes`, подключиться и направить сетевой трафик приложений через выбранный туннель без изменения серверной части.
 
 ## Участники
 
@@ -16,7 +16,7 @@
   - отображает Quick Settings tile.
 - Приложение `shadow-ssh`.
 - SSH-сервер пользователя.
-- Публичный proxy-сервер из `opensource` конфигурации.
+- Публичный proxy-сервер из конфигурации `Public Routes`.
 - Публичный источник списков конфигураций.
 - Внешние сайты и сервисы.
 
@@ -37,7 +37,7 @@ flowchart TD
 
 Приложение защищает SSH socket от попадания обратно в VPN routing. Иначе SSH-соединение начало бы маршрутизироваться через собственный VPN-интерфейс и соединение могло бы зависнуть или оборваться.
 
-Для `opensource` режима приложение передаёт TUN fd официальному Xray-core Android binding. Xray сам управляет выбранным публичным протоколом и транспортом, а приложение отвечает за UI, storage, split tunneling, lifecycle, socket protect и проверку доступности.
+Для режима `Public Routes` (внутреннее имя `OpenSource`) приложение передаёт TUN fd официальному Xray-core Android binding. Xray сам управляет выбранным публичным протоколом и транспортом, а приложение отвечает за UI, storage, split tunneling, lifecycle, socket protect и проверку доступности.
 
 ## Основной сценарий подключения
 
@@ -56,17 +56,17 @@ flowchart TD
 10. DNS-запросы обрабатываются как DNS-over-TCP через SSH.
 11. Статус на главном экране становится `Connected`.
 
-## Сценарий opensource
+## Сценарий Public Routes
 
-`opensource` - отдельная глобальная вкладка рядом с `shadow-ssh`.
+`Public Routes` - отдельная глобальная вкладка рядом с `shadow-ssh`.
 
 Первый вход:
 
-1. Пользователь открывает вкладку `opensource`.
+1. Пользователь открывает вкладку `Public Routes`.
 2. Приложение показывает предупреждение: публичные конфигурации используются на риск пользователя, разработчик/автор приложения не несёт ответственности за их безопасность и безопасность пользователя.
 3. Если пользователь нажимает `Нет`, приложение возвращает его на вкладку `shadow-ssh`.
 4. Если пользователь нажимает `Согласен`, версия согласия сохраняется в settings. При изменении текста предупреждения можно поднять версию и показать согласие заново.
-5. На экране `opensource` всегда остаётся риск-баннер.
+5. На экране `Public Routes` всегда остаётся риск-баннер.
 
 Импорт и синхронизация:
 
@@ -342,14 +342,14 @@ Metadata проверки, незавершённой загрузки и про
 - Diagnostics bounded, публикуются пакетно раз в 250 ms и показываются виртуализированным списком.
 - Неактивные Compose-экраны прекращают сбор Flow по lifecycle.
 - Поиск приложений имеет debounce 200 ms, а результат PackageManager кэшируется на 5 минут.
-- Иконки приложений декодируются максимум двумя параллельными IO-задачами с single-flight и сохраняются в bounded LRU; bulk-import proxy профилей использует batch secret persistence, SQLite-пакеты максимум по 900 id и одну Room-транзакцию.
+- Иконки приложений декодируются максимум двумя параллельными IO-задачами с single-flight и сохраняются в bounded 4 MiB LRU с TTL 5 минут между повторными открытиями app picker; bulk-import proxy профилей использует batch secret persistence, SQLite-пакеты максимум по 900 id и одну Room-транзакцию.
 - Смена режима VPN или selected apps при активном соединении объединяется в один controlled reconnect; параллельные reconnect-задачи не создаются.
 - SSH terminal и VPN connection loop выполняют блокирующий I/O вне UI-потока и отменяются вместе с владельцем lifecycle/service; невидимый terminal shell не остаётся активным.
 - OpenSource batch check использует один Xray runtime и до 128 transient HTTPS probes по уникальным authenticated SOCKS routes. UI получает live progress, результаты фиксируются одной terminal Room-транзакцией без `RUNNING`, а после завершения фоновых probe workers нет. Цель для примерно 500 profiles — около 10 секунд при защитном 60-секундном budget; timeout отдельного probe — до 5 секунд, hard-deadline tail остаётся `NOT_TESTED`. Проверка не запускается параллельно активному Xray VPN; отмена public sync принудительно закрывает blocking HTTP connection.
 - Xray native start/stop сериализованы lifecycle gate, а socket-protector controllers регистрируются один раз и меняют только текущий delegate. Это закрывает late-start race при disconnect и не накапливает callbacks/старые service closures после reconnect.
 - Idle TUN writer и zero-window TCP ждут события без polling; outbound TCP кеширует до 64 возвращённых MTU-буферов для повторного использования и применяет primitive sender без boxing. Upload coalesce-ится в bounded 64 KiB блоки, flush обрабатывает один блок за task, а sticky window tracker снимается только отдельным актуальным reopen ACK. FIN futures отменяются при раннем close, активный half-close продлевается по фактической активности, а stale half-close закрывается после 60 секунд idle; rejected/retransmitted upload payload не копируется. Это ограничение retained cache, а не всех transient allocations под нагрузкой.
 - SSH monitor работает с интервалом 5/30 секунд, Xray — 10/30 секунд для screen-on/off. Keepalive профиля ограничен безопасным диапазоном 15–300 секунд и увеличивается минимум до 120 секунд при выключенном экране.
-- Ресурсный профиль составляет `128/64/32 flow` для normal/Battery Saver/low-RAM, но во всех режимах сохраняет `4 MiB SSH window / 512 KiB upload / TUN queue 256`. Retained packet pool равен `64/32/32`. Постоянных декоративных GPU-анимаций нет, VPN runtime не держит собственные long-lived wake/wifi locks. WorkManager может кратковременно использовать управляемый wake lock во время выполнения worker.
+- Ресурсный профиль составляет `128/64/32 flow` для normal/Battery Saver/low-RAM, но во всех режимах сохраняет `4 MiB SSH window / 512 KiB upload / TUN queue 256`. Retained packet pool равен `64/32/32`. UI использует непрозрачные inset-поверхности и короткие state/press transitions без blur, shaders и бесконечных декоративных GPU-анимаций; VPN runtime не держит собственные long-lived wake/wifi locks. WorkManager может кратковременно использовать управляемый wake lock во время выполнения worker.
 - В production-коде отсутствуют `GlobalScope` и `runBlocking`.
 
 Pagination для app picker не применяется: Android `PackageManager` возвращает локальный snapshot без page API, а отображение большого списка виртуализировано.

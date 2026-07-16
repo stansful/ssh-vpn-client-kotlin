@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -31,6 +32,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -56,6 +58,8 @@ import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 
@@ -67,15 +71,28 @@ fun AppScreen(
     actions: @Composable () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
+    val backgroundBrush = appBackgroundBrush()
     Scaffold(
-        modifier = Modifier.background(appBackgroundBrush()),
-        containerColor = MaterialTheme.colorScheme.background,
+        modifier = Modifier.background(backgroundBrush),
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
-                title = { Text(title) },
+                title = {
+                    Text(
+                        text = title,
+                        style = if (onBack == null) {
+                            MaterialTheme.typography.headlineMedium
+                        } else {
+                            MaterialTheme.typography.titleLarge
+                        },
+                        fontWeight = if (onBack == null) FontWeight.Bold else FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
+                    containerColor = Color.Transparent,
+                    scrolledContainerColor = MaterialTheme.colorScheme.background,
                 ),
                 windowInsets = WindowInsets(0.dp),
                 navigationIcon = {
@@ -92,9 +109,8 @@ fun AppScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(appBackgroundBrush())
                 .padding(paddingValues)
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = 20.dp),
         ) {
             content()
         }
@@ -127,6 +143,7 @@ fun FormField(
         keyboardOptions = keyboardOptions,
         visualTransformation = visualTransformation,
         trailingIcon = trailingIcon,
+        shape = MaterialTheme.shapes.medium,
         modifier = modifier.fillMaxWidth(),
     )
 }
@@ -248,11 +265,18 @@ fun SwitchRow(
 fun ErrorMessage(message: String?) {
     if (message == null) return
     Spacer(Modifier.height(8.dp))
-    Text(
-        text = message,
-        color = MaterialTheme.colorScheme.error,
-        style = MaterialTheme.typography.bodyMedium,
-    )
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+        contentColor = MaterialTheme.colorScheme.error,
+    ) {
+        Text(
+            text = message,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
 }
 
 @Composable
@@ -265,7 +289,7 @@ fun PrimaryActionButton(
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.97f else 1f,
+        targetValue = if (pressed) 0.985f else 1f,
         animationSpec = tween(120),
         label = "primary-button-scale",
     )
@@ -276,10 +300,12 @@ fun PrimaryActionButton(
         interactionSource = interactionSource,
         modifier = modifier
             .fillMaxWidth()
+            .heightIn(min = 54.dp)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
             },
+        shape = MaterialTheme.shapes.medium,
     ) {
         Text(text)
     }
@@ -304,10 +330,12 @@ fun SecondaryActionButton(
         interactionSource = interactionSource,
         modifier = modifier
             .fillMaxWidth()
+            .heightIn(min = 50.dp)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
             },
+        shape = MaterialTheme.shapes.medium,
     ) {
         Text(text)
     }

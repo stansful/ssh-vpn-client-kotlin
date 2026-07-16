@@ -4,22 +4,20 @@ import android.content.pm.PackageManager
 import android.os.SystemClock
 import android.util.LruCache
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Search
@@ -32,21 +30,20 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -55,6 +52,9 @@ import com.stansful.sshvpnclient.AppContainer
 import com.stansful.sshvpnclient.domain.model.InstalledAppInfo
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
+import com.stansful.sshvpnclient.ui.common.InsetGroup
+import com.stansful.sshvpnclient.ui.common.InsetRow
+import com.stansful.sshvpnclient.ui.common.StatusCapsule
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -78,10 +78,6 @@ fun AppPickerRoute(
     }
 
     BackHandler(onBack = saveAndBack)
-    DisposableEffect(Unit) {
-        onDispose { AppIconMemoryCache.clear() }
-    }
-
     AppPickerScreen(
         state = state,
         onQueryChange = viewModel::setQuery,
@@ -107,6 +103,7 @@ private fun AppPickerScreen(
         },
     ) {
         Column(
+            modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             OutlinedTextField(
@@ -115,41 +112,39 @@ private fun AppPickerScreen(
                 label = { Text("Search") },
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 singleLine = true,
+                shape = MaterialTheme.shapes.medium,
                 modifier = Modifier.fillMaxWidth(),
             )
 
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = MaterialTheme.colorScheme.surface,
-                contentColor = MaterialTheme.colorScheme.onSurface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Selected", fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "${state.selectedCount}",
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
+            InsetGroup(contentPadding = PaddingValues(0.dp)) {
+                InsetRow(
+                    title = "Selected applications",
+                    subtitle = "Only these apps will use the VPN in selected apps mode.",
+                    trailing = {
+                        StatusCapsule(
+                            text = state.selectedCount.toString(),
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    },
+                )
             }
 
             if (state.isLoading) {
-                Row(
+                Box(
                     modifier = Modifier
+                        .weight(1f)
                         .fillMaxWidth()
                         .padding(vertical = 24.dp),
-                    horizontalArrangement = Arrangement.Center,
+                    contentAlignment = Alignment.Center,
                 ) {
                     CircularProgressIndicator()
                 }
             } else {
                 LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentPadding = PaddingValues(bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(
@@ -174,30 +169,28 @@ private fun AppRow(
     checked: Boolean,
     onToggle: () -> Unit,
 ) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val pressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.98f else 1f,
-        animationSpec = tween(120),
-        label = "app-row-scale",
-    )
-
     Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+        shape = MaterialTheme.shapes.medium,
+        color = if (checked) {
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+        } else {
+            MaterialTheme.colorScheme.surface
+        },
         contentColor = MaterialTheme.colorScheme.onSurface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)),
+        border = BorderStroke(
+            1.dp,
+            if (checked) {
+                MaterialTheme.colorScheme.primary.copy(alpha = 0.38f)
+            } else {
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
+            },
+        ),
         modifier = Modifier
             .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null,
+            .toggleable(
+                value = checked,
                 role = Role.Checkbox,
-                onClick = onToggle,
+                onValueChange = { onToggle() },
             ),
     ) {
         Row(
@@ -214,11 +207,16 @@ private fun AppRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(app.label, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = app.label,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
                     if (app.isSystem) {
-                        Text(
-                            "System",
-                            style = MaterialTheme.typography.labelSmall,
+                        StatusCapsule(
+                            text = "System",
                             color = MaterialTheme.colorScheme.primary,
                         )
                     }
@@ -227,11 +225,14 @@ private fun AppRow(
                     app.packageName,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             Checkbox(
                 checked = checked,
                 onCheckedChange = null,
+                modifier = Modifier.clearAndSetSemantics { },
             )
         }
     }
@@ -253,7 +254,7 @@ private fun AppIcon(packageName: String) {
     }
     val modifier = Modifier
         .size(APP_ICON_SIZE)
-        .clip(RoundedCornerShape(8.dp))
+        .clip(MaterialTheme.shapes.small)
     val bitmap = iconBitmap
 
     if (bitmap == null) {
@@ -296,10 +297,6 @@ private object AppIconMemoryCache {
 
     fun get(packageName: String, sizePx: Int): ImageBitmap? =
         getFresh(key(packageName, sizePx))?.bitmap
-
-    fun clear() {
-        cache.evictAll()
-    }
 
     suspend fun load(
         packageManager: PackageManager,

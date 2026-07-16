@@ -52,9 +52,9 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
 - Глобальные вкладки:
   - `shadow-ssh` - основной SSH VPN режим;
   - `smart` (`Smart Connect`) - полностью автоматический выбор и восстановление публичного Xray-туннеля;
-  - `opensource` - импорт и запуск публичных VLESS/VMess/Trojan конфигураций через Xray-core;
+  - `Public Routes` (внутренний режим `opensource`) - импорт и запуск публичных VLESS/VMess/Trojan конфигураций через Xray-core;
   - активная вкладка сохраняется после перезапуска.
-- `opensource` режим:
+- `Public Routes` режим:
   - перед первым входом показывает предупреждение о рисках публичных конфигураций;
   - риск-баннер всегда остаётся на экране вкладки;
   - автообновление публичного списка выключено по умолчанию; если включить его в настройках, WorkManager ждёт unmetered-сеть и не низкий заряд, а сам worker дополнительно выбирает физическую `VALIDATED + NOT_VPN + NOT_METERED` сеть;
@@ -78,7 +78,7 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
   - `Custom` с RGB-настройкой цветов, которые сохраняются после перезапуска.
 - Ссылка на GitHub в Settings с кнопкой копирования.
 - Автоматическая проверка GitHub Releases не чаще раза в 24 часа и ручная кнопка
-  `Check for updates` в настройках SSH, OpenSource и Smart Connect.
+  `Check for updates` в настройках SSH, Public Routes и Smart Connect.
 - Обновление через resumable HTTPS downloader и стандартный Android installer с in-app
   прогрессом, продолжением `.part`/HTTP Range после обрыва, восстановлением кнопки `Install`
   после перезапуска и проверкой SHA-256, package name, SemVer, versionCode и signing certificate.
@@ -107,7 +107,7 @@ Target websites / services
 
 TCP-трафик из TUN проксируется через SSH `direct-tcpip`. DNS-запросы VPN обрабатываются как DNS-over-TCP через SSH. Произвольный non-DNS UDP сейчас не проксируется и отбрасывается локальным forwarding layer. Для SSH режима используется blocking TUN с MTU `8500`/MSS `8460`; Xray сохраняет собственный MTU `1500`.
 
-## OpenSource / Xray поток
+## Public Routes / Xray поток
 
 ```text
 Selected Android apps / all apps
@@ -125,7 +125,7 @@ Selected VLESS / VMess / Trojan public profile
 Target websites / services
 ```
 
-OpenSource TUN работает в dual-stack режиме: IPv4 и IPv6 default routes/DNS включаются только для Xray, тогда как IPv4-only SSH forwarder сохраняет прежний контракт. Physical network выбирается по политике active -> current -> validated fallback -> доступная `INTERNET + NOT_VPN`, поэтому cellular не блокируется во время задержки Android validation и не заменяется старым Wi-Fi после создания VPN. Перед запуском core libXray DNS инициализируется DNS-сервером из `LinkProperties` выбранной сети; dialer fd сначала проходит `VpnService.protect`, затем best-effort `Network.bindSocket`, что исключает возврат VLESS socket обратно в TUN.
+Public Routes (внутренний runtime `OpenSource`) работает в dual-stack режиме: IPv4 и IPv6 default routes/DNS включаются только для Xray, тогда как IPv4-only SSH forwarder сохраняет прежний контракт. Physical network выбирается по политике active -> current -> validated fallback -> доступная `INTERNET + NOT_VPN`, поэтому cellular не блокируется во время задержки Android validation и не заменяется старым Wi-Fi после создания VPN. Перед запуском core libXray DNS инициализируется DNS-сервером из `LinkProperties` выбранной сети; dialer fd сначала проходит `VpnService.protect`, затем best-effort `Network.bindSocket`, что исключает возврат VLESS socket обратно в TUN.
 
 Xray-core собирается из исходников официального `XTLS/libXray` с закреплённым commit:
 
@@ -187,7 +187,8 @@ Wake recovery основан на системных `SCREEN_OFF/SCREEN_ON` со
 - Upload каждого TCP flow имеет bounded 512 KiB очередь и TCP backpressure; принятые мелкие payload coalesce-ятся максимум в восемь блоков по 64 KiB, два завершённых блока переиспользуются. Один flow обрабатывает не более одного блока за control task, поэтому параллельные upload не монополизируют executor. Sticky zero-window tracker требует отдельный актуальный reopen ACK и не теряет его из-за пакета со старым sequence. FIN закрывает SSH output только после drain подтверждённого хвоста. Normal/Battery Saver/low-RAM ограничивают число flow соответственно 128/64/32, не уменьшая transport window или upload capacity.
 - TUN output проходит через один bounded writer с blocking `take()` без idle wakeups. Краткий пик очереди ждёт до 5 секунд, не уничтожая весь forwarder после прежнего односекундного провала. Пул кеширует для повторного использования до 64 возвращённых полных MTU-буферов (~531 KiB при MTU 8500); это предел retained cache, а не абсолютный предел одновременно выделенных буферов при нагрузке. Packet sender имеет primitive JVM signature без boxing, cleanup запускается только по FIN/давлению.
 - DNS использует отдельный bounded executor и hard timeout 10 секунд; idle timeout threads завершаются автоматически. FIN cleanup futures отменяются при раннем закрытии flow и удаляются из scheduler queue.
-- Иконки PackageManager декодируются максимум двумя параллельными задачами с single-flight и хранятся в LRU до 4 MiB; cache очищается при уходе с app picker. Большие proxy imports используют batch Tink, SQLite `IN`-пакеты максимум по 900 id и одну Room-транзакцию.
+- Иконки PackageManager декодируются максимум двумя параллельными задачами с single-flight и хранятся в LRU до 4 MiB с TTL 5 минут; небольшой cache переживает повторное открытие app picker и не заставляет устройство заново декодировать те же bitmap. Большие proxy imports используют batch Tink, SQLite `IN`-пакеты максимум по 900 id и одну Room-транзакцию.
+- Compose UI использует общую систему непрозрачных inset-поверхностей, системную sans-serif типографику и короткие state/press transitions. Blur, shaders, бесконечные декоративные анимации и постоянные graphics layers не используются; чёрно-оранжевая палитра и launcher icon сохранены.
 - Поиск public profiles дебаунсится и фильтруется на `Dispatchers.Default`. `Check all` одним batch загружает профили и поднимает один временный Xray runtime с authenticated SOCKS inbound только на `127.0.0.1`. Каждому профилю назначаются уникальные SOCKS username и outbound route, поэтому параллельные probes не смешивают конфигурации.
 - OpenSource action `Remove all unavailable tunnels except pinned` атомарно удаляет только `UNAVAILABLE && !isPinned`, очищает соответствующие encrypted secrets и сохраняет selected fallback; count берётся из полного списка независимо от UI-фильтра.
 - Network probes выполняются только во время foreground-проверки с transient concurrency до 128 и timeout до 5 секунд на профиль. Battery Saver использует nominal cap 64, Android low-RAM — 32; для очень большого списка cap минимально повышается лишь настолько, чтобы уложить все пятисекундные slots в 60 секунд. Для примерно 500 быстро отвечающих профилей целевое время в normal mode составляет около 10 секунд; если все 500 дожидаются полного пятисекундного timeout, физический минимум при concurrency 128 — около 20 секунд плюс запуск core. Защитный общий budget равен 60 секундам. Хвост, который не получил полноценную проверку до hard deadline, получает `NOT_TESTED`, а не ложный `UNAVAILABLE`. Blocking JNI start/stop нельзя безопасно прервать из Kotlin, поэтому target/budget остаются best-effort на аномально зависшем native-вызове.

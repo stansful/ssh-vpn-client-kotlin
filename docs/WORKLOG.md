@@ -39,6 +39,42 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-07-16 - Dark system surfaces and Public Routes action hierarchy
+
+Result:
+
+- Renamed the user-facing `OpenSource` workspace to `Public Routes` with the compact bottom-tab label `Public`; internal classes, persisted ids, preferences, service actions and database contracts remain unchanged.
+- Painted the active theme background behind the status-bar inset and global app picker, so Android 15+ edge-to-edge no longer reveals the native white window in Dark mode.
+- Added an opaque theme background to `SshVpnNavGraph` and a black native window/system-bar fallback, removing the white frame during Configurations/SSH Keys fade/slide transitions and before the first Compose frame.
+- Replaced low-emphasis Refresh, Check all/Cancel and selected-route test text actions with bordered tonal buttons: primary for tools, success for an available route and error for failures/Cancel.
+- Removed the redundant `Connection details` section from the SSH root screen.
+- Verified `git diff --check`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success, 0 errors; only two dependency-update notices remain.
+- Verified `./scripts/build-release.sh`: success with R8/resource shrinking.
+- Verified the universal APK with `apksigner`: APK Signature Scheme v2, one signer.
+
+### 2026-07-16 - Apple-inspired UI system
+
+Goal:
+
+- Redesign the complete Compose interface with restrained Apple-inspired hierarchy while preserving the existing launcher icon, black/orange identity, VPN behavior, updater behavior, and battery-conscious runtime.
+
+Result:
+
+- Added a shared typography, shape and inset-group design system with opaque surfaces, clear section hierarchy, 48+ dp interaction targets and no blur/shader/infinite decorative animation.
+- Replaced the root floating/segmented navigation experiment with a standard full-width bottom tab bar; SSH secondary screens and the global app picker hide it.
+- Redesigned SSH, Smart Connect and OpenSource connection controls, live check progress, profile rows, diagnostics, terminal and settings without changing their ViewModel callbacks.
+- Redesigned configuration/key lists and editors, app picker and custom theme editor; the theme editor now applies a local draft explicitly instead of persisting every typed RGB digit.
+- Kept PackageManager icon decoding bounded to two IO tasks and retained its 4 MiB LRU for five minutes across repeated app-picker openings.
+- Preserved all launcher, mipmap and splash resources unchanged.
+- Verified `git diff --check`: success.
+- Verified `./scripts/test.sh`: success.
+- Verified `./scripts/lint.sh`: success, 0 errors; only two dependency-update notices remain.
+- Verified `./scripts/build-release.sh`: success with R8/resource shrinking.
+- Verified the universal release APK with `apksigner`: APK Signature Scheme v2, one signer.
+- No Android device was attached, so this pass has compile/static verification but no physical-device screenshot pass.
+
 ### 2026-06-23 - Before Block 55
 
 Goal:

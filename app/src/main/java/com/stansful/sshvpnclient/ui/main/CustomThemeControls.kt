@@ -1,5 +1,6 @@
 package com.stansful.sshvpnclient.ui.main
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -11,12 +12,18 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,55 +37,128 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
+import com.stansful.sshvpnclient.ui.common.InsetGroup
+import com.stansful.sshvpnclient.ui.common.SectionHeader
 
 @Composable
 internal fun CustomThemeColorsEditor(
     colors: CustomThemeColors,
     onColorsChange: (CustomThemeColors) -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        CustomThemePreview(colors)
+    var draft by remember(colors) { mutableStateOf(colors) }
+    var showAdvanced by remember { mutableStateOf(false) }
+    val hasChanges = draft != colors
 
-        ColorEditorRow(
-            label = "Primary",
-            color = colors.primary,
-            onColorChange = { onColorsChange(colors.copy(primary = it)) },
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SectionHeader(
+            title = "Custom palette",
+            subtitle = "Preview changes, then apply them once.",
         )
-        ColorEditorRow(
-            label = "Success",
-            color = colors.secondary,
-            onColorChange = { onColorsChange(colors.copy(secondary = it)) },
-        )
-        ColorEditorRow(
-            label = "Background",
-            color = colors.background,
-            onColorChange = { onColorsChange(colors.copy(background = it)) },
-        )
-        ColorEditorRow(
-            label = "Surface",
-            color = colors.surface,
-            onColorChange = { onColorsChange(colors.copy(surface = it)) },
-        )
-        ColorEditorRow(
-            label = "Surface variant",
-            color = colors.surfaceVariant,
-            onColorChange = { onColorsChange(colors.copy(surfaceVariant = it)) },
-        )
-        ColorEditorRow(
-            label = "Text",
-            color = colors.onSurface,
-            onColorChange = { onColorsChange(colors.copy(onSurface = it)) },
-        )
-        ColorEditorRow(
-            label = "Outline",
-            color = colors.outline,
-            onColorChange = { onColorsChange(colors.copy(outline = it)) },
-        )
-        ColorEditorRow(
-            label = "Error",
-            color = colors.error,
-            onColorChange = { onColorsChange(colors.copy(error = it)) },
-        )
+        InsetGroup {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                CustomThemePreview(draft)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilledTonalButton(
+                        onClick = { draft = shadowThemeColors() },
+                        modifier = Modifier.weight(1f),
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Text("Shadow")
+                    }
+                    FilledTonalButton(
+                        onClick = { draft = CustomThemeColors.defaultLight() },
+                        modifier = Modifier.weight(1f),
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Text("Light")
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { draft = colors },
+                        enabled = hasChanges,
+                        modifier = Modifier.weight(1f),
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Text("Revert")
+                    }
+                    Button(
+                        onClick = { onColorsChange(draft) },
+                        enabled = hasChanges,
+                        modifier = Modifier.weight(1f),
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Text("Apply")
+                    }
+                }
+            }
+        }
+
+        TextButton(
+            onClick = { showAdvanced = !showAdvanced },
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.medium,
+        ) {
+            Text(if (showAdvanced) "Hide RGB controls" else "Advanced RGB controls")
+            androidx.compose.material3.Icon(
+                imageVector = if (showAdvanced) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = null,
+                modifier = Modifier.padding(start = 6.dp),
+            )
+        }
+
+        AnimatedVisibility(visible = showAdvanced) {
+            InsetGroup {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    ColorEditorRow(
+                        label = "Primary",
+                        color = draft.primary,
+                        onColorChange = { draft = draft.copy(primary = it) },
+                    )
+                    ColorEditorRow(
+                        label = "Success",
+                        color = draft.secondary,
+                        onColorChange = { draft = draft.copy(secondary = it) },
+                    )
+                    ColorEditorRow(
+                        label = "Background",
+                        color = draft.background,
+                        onColorChange = { draft = draft.copy(background = it) },
+                    )
+                    ColorEditorRow(
+                        label = "Surface",
+                        color = draft.surface,
+                        onColorChange = { draft = draft.copy(surface = it) },
+                    )
+                    ColorEditorRow(
+                        label = "Surface variant",
+                        color = draft.surfaceVariant,
+                        onColorChange = { draft = draft.copy(surfaceVariant = it) },
+                    )
+                    ColorEditorRow(
+                        label = "Text",
+                        color = draft.onSurface,
+                        onColorChange = { draft = draft.copy(onSurface = it) },
+                    )
+                    ColorEditorRow(
+                        label = "Outline",
+                        color = draft.outline,
+                        onColorChange = { draft = draft.copy(outline = it) },
+                    )
+                    ColorEditorRow(
+                        label = "Error",
+                        color = draft.error,
+                        onColorChange = { draft = draft.copy(error = it) },
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -88,7 +168,7 @@ private fun CustomThemePreview(colors: CustomThemeColors) {
         color = Color(colors.surface),
         contentColor = Color(colors.onSurface),
         border = BorderStroke(1.dp, Color(colors.outline)),
-        shape = RoundedCornerShape(8.dp),
+        shape = MaterialTheme.shapes.medium,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
@@ -204,7 +284,7 @@ private fun RgbTextField(
 
 @Composable
 private fun ColorSwatch(color: Int) {
-    val shape = RoundedCornerShape(8.dp)
+    val shape = MaterialTheme.shapes.small
     Box(
         modifier = Modifier
             .size(38.dp)
@@ -217,6 +297,17 @@ private fun ColorSwatch(color: Int) {
             ),
     )
 }
+
+private fun shadowThemeColors(): CustomThemeColors = CustomThemeColors(
+    primary = 0xFFFF9F1C.toInt(),
+    secondary = 0xFF28C76F.toInt(),
+    background = 0xFF000000.toInt(),
+    surface = 0xFF090909.toInt(),
+    surfaceVariant = 0xFF17110A.toInt(),
+    onSurface = 0xFFF6F1EA.toInt(),
+    outline = 0xFF3A2A18.toInt(),
+    error = 0xFFFF6B6B.toInt(),
+)
 
 private fun Int.redChannel(): Int = (this ushr RED_SHIFT) and CHANNEL_MASK
 

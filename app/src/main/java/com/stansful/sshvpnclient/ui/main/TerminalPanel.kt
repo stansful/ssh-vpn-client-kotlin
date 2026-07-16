@@ -16,7 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -24,7 +24,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -47,9 +46,12 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import com.stansful.sshvpnclient.ui.common.SectionHeader
+import com.stansful.sshvpnclient.ui.common.StatusCapsule
 
 @Composable
 internal fun TerminalPanel(
@@ -89,34 +91,46 @@ internal fun TerminalPanel(
         }
     }
 
-    GlassPanel {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("SSH Terminal", style = MaterialTheme.typography.labelLarge)
-                    Text(
-                        text = terminalStatusLabel(
-                            connected = state.isConnected,
-                            terminalState = terminalState,
-                        ),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                IconButton(
-                    onClick = {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SectionHeader("Terminal")
+        GlassPanel {
+            Column {
+                Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
                         if (expanded) {
                             onCloseTerminal()
                         }
                         expanded = !expanded
+                    }
+                    .padding(horizontal = 16.dp, vertical = 13.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("SSH Terminal", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = "Private command channel",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                StatusCapsule(
+                    text = terminalStatusLabel(
+                        connected = state.isConnected,
+                        terminalState = terminalState,
+                    ),
+                    color = if (terminalState.isOpen) {
+                        MaterialTheme.colorScheme.secondary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
                     },
+                    modifier = Modifier.padding(end = 4.dp),
+                )
+                Box(
+                    modifier = Modifier.size(48.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
                     val icon = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore
                     val description = if (expanded) "Hide terminal" else "Show terminal"
@@ -124,44 +138,49 @@ internal fun TerminalPanel(
                 }
             }
 
-            AnimatedVisibility(
-                visible = expanded,
-                enter = fadeIn(tween(150)) + slideInVertically(tween(150)) { -it / 5 },
-                exit = fadeOut(tween(120)),
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    TerminalOutputBox(
-                        output = terminalState.output,
-                        errorMessage = terminalState.errorMessage,
-                        scrollState = outputScrollState,
-                        onFocusInput = {
-                            focusRequester.requestFocus()
-                            keyboardController?.show()
-                        },
-                    )
-                    OutlinedTextField(
-                        value = terminalState.input,
-                        onValueChange = onTerminalInputChange,
-                        enabled = state.isConnected && terminalState.isOpen,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(focusRequester),
-                        singleLine = true,
-                        leadingIcon = {
-                            Text(
-                                text = "$",
+                AnimatedVisibility(
+                    visible = expanded,
+                    enter = fadeIn(tween(150)) + slideInVertically(tween(150)) { -it / 5 },
+                    exit = fadeOut(tween(120)),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        TerminalOutputBox(
+                            output = terminalState.output,
+                            errorMessage = terminalState.errorMessage,
+                            scrollState = outputScrollState,
+                            onFocusInput = {
+                                focusRequester.requestFocus()
+                                keyboardController?.show()
+                            },
+                        )
+                        OutlinedTextField(
+                            value = terminalState.input,
+                            onValueChange = onTerminalInputChange,
+                            enabled = state.isConnected && terminalState.isOpen,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(focusRequester),
+                            singleLine = true,
+                            leadingIcon = {
+                                Text(
+                                    text = "$",
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(
+                                onSend = { onSubmitTerminalInput() },
+                            ),
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(
                                 fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(
-                            onSend = { onSubmitTerminalInput() },
-                        ),
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(
-                            fontFamily = FontFamily.Monospace,
-                        ),
-                    )
+                            ),
+                            shape = MaterialTheme.shapes.medium,
+                        )
+                    }
                 }
             }
         }
@@ -187,7 +206,7 @@ private fun TerminalOutputBox(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 180.dp, max = 320.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .clip(MaterialTheme.shapes.medium)
             .background(backgroundColor)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -197,20 +216,22 @@ private fun TerminalOutputBox(
             .padding(12.dp)
             .verticalScroll(scrollState),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(
-                text = output.ifBlank { " " },
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = colorScheme.onSurface,
-            )
-            errorMessage?.let { message ->
+        SelectionContainer {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    text = message,
+                    text = output.ifBlank { " " },
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
-                    color = colorScheme.error,
+                    color = colorScheme.onSurface,
                 )
+                errorMessage?.let { message ->
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = colorScheme.error,
+                    )
+                }
             }
         }
     }

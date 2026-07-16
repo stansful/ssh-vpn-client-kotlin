@@ -11,7 +11,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.progressSemantics
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
@@ -55,13 +55,18 @@ fun AppUpdateSettingsSection(
     onCheckForUpdates: () -> Unit,
     onResumeUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
+    showTitle: Boolean = true,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Application updates", style = MaterialTheme.typography.labelLarge)
+        if (showTitle) {
+            Text("Application updates", style = MaterialTheme.typography.labelLarge)
+        }
         FilledTonalButton(
             onClick = onCheckForUpdates,
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 50.dp),
+            shape = MaterialTheme.shapes.medium,
         ) {
             if (updateState.isChecking) {
                 CircularProgressIndicator(
@@ -106,6 +111,7 @@ fun AppUpdateAvailableDialog(
         ?.takeIf { it.versionName == update.versionName }
     AlertDialog(
         onDismissRequest = onLater,
+        shape = MaterialTheme.shapes.extraLarge,
         title = { Text("Update available: ${update.versionName}") },
         text = {
             Column(
@@ -129,41 +135,39 @@ fun AppUpdateAvailableDialog(
                 downloading?.let { state ->
                     DownloadProgressContent(state)
                 }
+                TextButton(
+                    onClick = onOpenRelease,
+                    modifier = Modifier.align(Alignment.Start),
+                ) {
+                    Text("View release notes")
+                }
             }
         },
         confirmButton = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.End,
+            FilledTonalButton(
+                onClick = if (readyToInstall != null) onInstall else onDownload,
+                enabled = downloading == null,
+                shape = MaterialTheme.shapes.medium,
             ) {
-                FilledTonalButton(
-                    onClick = if (readyToInstall != null) onInstall else onDownload,
-                    enabled = downloading == null,
-                    shape = RoundedCornerShape(8.dp),
-                ) {
-                    Icon(
-                        imageVector = if (readyToInstall != null) {
-                            Icons.Default.SystemUpdateAlt
-                        } else {
-                            Icons.Default.Download
-                        },
-                        contentDescription = null,
-                    )
-                    Text(
-                        text = when {
-                            readyToInstall != null -> "Install"
-                            downloading != null -> "Downloading"
-                            else -> "Download"
-                        },
-                        modifier = Modifier.padding(start = 8.dp),
-                    )
-                }
-                Row {
-                    TextButton(onClick = onOpenRelease) { Text("Open release") }
-                    TextButton(onClick = onLater) { Text("Later") }
-                }
+                Icon(
+                    imageVector = if (readyToInstall != null) {
+                        Icons.Default.SystemUpdateAlt
+                    } else {
+                        Icons.Default.Download
+                    },
+                    contentDescription = null,
+                )
+                Text(
+                    text = when {
+                        readyToInstall != null -> "Install"
+                        downloading != null -> "Downloading"
+                        else -> "Download"
+                    },
+                    modifier = Modifier.padding(start = 8.dp),
+                )
             }
         },
+        dismissButton = { TextButton(onClick = onLater) { Text("Later") } },
     )
 }
 
@@ -181,7 +185,7 @@ private fun UpdateDownloadStatus(
                 modifier = Modifier.fillMaxWidth(),
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                shape = RoundedCornerShape(8.dp),
+                shape = MaterialTheme.shapes.medium,
             ) {
                 Column(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -223,8 +227,10 @@ private fun UpdateDownloadStatus(
         is AppUpdateDownloadState.ReadyToInstall -> {
             FilledTonalButton(
                 onClick = onInstall,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 50.dp),
+                shape = MaterialTheme.shapes.medium,
             ) {
                 Icon(Icons.Default.SystemUpdateAlt, contentDescription = null)
                 Text(
@@ -238,8 +244,10 @@ private fun UpdateDownloadStatus(
             if (downloadState.canResume) {
                 FilledTonalButton(
                     onClick = onResume,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 50.dp),
+                    shape = MaterialTheme.shapes.medium,
                 ) {
                     Icon(Icons.Default.Download, contentDescription = null)
                     Text(
@@ -261,10 +269,16 @@ private fun DownloadProgressContent(downloadState: AppUpdateDownloadState.Downlo
         if (progress != null) {
             LinearProgressIndicator(
                 progress = { progress },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .progressSemantics(progress),
             )
         } else {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .progressSemantics(),
+            )
         }
         val totalBytes = downloadState.totalBytes
         Text(

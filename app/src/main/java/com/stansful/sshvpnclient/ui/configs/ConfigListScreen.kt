@@ -1,9 +1,8 @@
 package com.stansful.sshvpnclient.ui.configs
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -14,9 +13,11 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -27,9 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -37,7 +36,10 @@ import com.stansful.sshvpnclient.AppContainer
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
+import com.stansful.sshvpnclient.ui.common.EmptyState
 import com.stansful.sshvpnclient.ui.common.ErrorMessage
+import com.stansful.sshvpnclient.ui.common.InsetGroup
+import com.stansful.sshvpnclient.ui.common.InsetRow
 
 @Composable
 fun ConfigListRoute(
@@ -79,13 +81,14 @@ private fun ConfigListScreen(
             }
         },
     ) {
+        ErrorMessage(state.message)
         if (state.items.isEmpty()) {
             EmptyConfigList(onAdd)
         } else {
-            ErrorMessage(state.message)
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 items(state.items, key = { it.config.id }) { item ->
                     ConfigListCard(
@@ -111,7 +114,7 @@ private fun ConfigListScreen(
                         pendingDelete = null
                     },
                 ) {
-                    Text("Delete")
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
@@ -125,18 +128,16 @@ private fun ConfigListScreen(
 
 @Composable
 private fun EmptyConfigList(onAdd: () -> Unit) {
-    Column(
+    EmptyState(
+        icon = Icons.Default.Terminal,
+        title = "No SSH configurations",
+        message = "Add a server to start a secure connection.",
+        actionLabel = "Add configuration",
+        onAction = onAdd,
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        Text("No SSH configurations yet", style = MaterialTheme.typography.titleMedium)
-        FilledTonalButton(onClick = onAdd, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Default.Add, contentDescription = null)
-            Text("Add configuration", modifier = Modifier.padding(start = 8.dp))
-        }
-    }
+    )
 }
 
 @Composable
@@ -147,43 +148,62 @@ private fun ConfigListCard(
     onDelete: () -> Unit,
 ) {
     val config = item.config
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onSelect),
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (item.isSelected) {
-                    Icon(Icons.Default.Check, contentDescription = "Selected")
-                }
-                Text(
-                    text = config.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(start = if (item.isSelected) 8.dp else 0.dp),
-                )
-                IconButton(onClick = onEdit) {
-                    Icon(Icons.Default.Edit, contentDescription = "Edit")
-                }
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete")
-                }
-            }
-            Text("${config.username}@${config.host}:${config.port}")
-            Text("Auth: ${config.authType.label}")
-            if (config.authType == AuthType.PRIVATE_KEY) {
-                Text("Key: ${item.keyName ?: "Missing key"}")
-            }
-            config.note?.let { Text("Note: $it") }
+    var menuExpanded by remember { mutableStateOf(false) }
+    val details = buildString {
+        append("${config.username}@${config.host}:${config.port}")
+        append("\n${config.authType.label}")
+        if (config.authType == AuthType.PRIVATE_KEY) {
+            append(" • ${item.keyName ?: "Missing key"}")
         }
+        config.note?.takeIf { it.isNotBlank() }?.let { note -> append("\n$note") }
+    }
+
+    InsetGroup(contentPadding = PaddingValues(0.dp)) {
+        InsetRow(
+            title = config.name,
+            subtitle = details,
+            onClick = onSelect,
+            trailing = {
+                if (item.isSelected) {
+                    Icon(
+                        Icons.Default.Check,
+                        contentDescription = "Selected",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Configuration actions")
+                    }
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Edit") },
+                            leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                            onClick = {
+                                menuExpanded = false
+                                onEdit()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onDelete()
+                            },
+                        )
+                    }
+                }
+            },
+        )
     }
 }
