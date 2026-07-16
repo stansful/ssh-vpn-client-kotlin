@@ -330,6 +330,7 @@ private fun MainScreen(
             },
             updateState = state.updateState,
             onCheckForUpdates = onCheckForUpdates,
+            onResumeUpdate = onDownloadUpdate,
             onInstallUpdate = onInstallUpdate,
             onDismiss = { settingsVisible = false },
         )
@@ -790,6 +791,7 @@ private fun SettingsSheet(
     onOpenAppPicker: () -> Unit,
     updateState: AppUpdateUiState,
     onCheckForUpdates: () -> Unit,
+    onResumeUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -857,6 +859,7 @@ private fun SettingsSheet(
             AppUpdateSettingsSection(
                 updateState = updateState,
                 onCheckForUpdates = onCheckForUpdates,
+                onResumeUpdate = onResumeUpdate,
                 onInstallUpdate = onInstallUpdate,
             )
 

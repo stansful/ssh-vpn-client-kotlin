@@ -631,9 +631,14 @@ class OpenSourceViewModel(
     }
 
     fun downloadAvailableUpdate() {
-        val update = appUpdateState.value.availableUpdate ?: return
-        appUpdateDownloader.download(update)
-        appUpdateState.update { it.copy(availableUpdate = null, statusMessage = null) }
+        val update = appUpdateState.value.availableUpdate
+        if (update != null) {
+            appUpdateDownloader.download(update)
+            appUpdateState.update { it.copy(availableUpdate = null, statusMessage = null) }
+        } else {
+            appUpdateDownloader.resume()
+            appUpdateState.update { it.copy(statusMessage = null) }
+        }
     }
 
     fun onUpdateActionFailed(message: String) {

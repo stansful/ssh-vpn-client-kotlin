@@ -53,6 +53,7 @@ data class AppUpdateUiState(
 fun AppUpdateSettingsSection(
     updateState: AppUpdateUiState,
     onCheckForUpdates: () -> Unit,
+    onResumeUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -77,6 +78,7 @@ fun AppUpdateSettingsSection(
         }
         UpdateDownloadStatus(
             downloadState = updateState.downloadState,
+            onResume = onResumeUpdate,
             onInstall = onInstallUpdate,
         )
         updateState.statusMessage?.let { message ->
@@ -168,6 +170,7 @@ fun AppUpdateAvailableDialog(
 @Composable
 private fun UpdateDownloadStatus(
     downloadState: AppUpdateDownloadState,
+    onResume: () -> Unit,
     onInstall: () -> Unit,
 ) {
     when (downloadState) {
@@ -231,7 +234,21 @@ private fun UpdateDownloadStatus(
             }
         }
 
-        is AppUpdateDownloadState.Failed,
+        is AppUpdateDownloadState.Failed -> {
+            if (downloadState.canResume) {
+                FilledTonalButton(
+                    onClick = onResume,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null)
+                    Text(
+                        text = "Resume update download",
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
+            }
+        }
         AppUpdateDownloadState.Idle,
         -> Unit
     }

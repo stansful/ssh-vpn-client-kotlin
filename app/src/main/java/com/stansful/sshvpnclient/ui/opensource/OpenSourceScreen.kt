@@ -485,6 +485,7 @@ private fun OpenSourceScreen(
             onCancelXrayCoreDownload = viewModel::cancelXrayCoreDownload,
             updateState = state.updateState,
             onCheckForUpdates = viewModel::checkForUpdates,
+            onResumeUpdate = viewModel::downloadAvailableUpdate,
             onInstallUpdate = onInstallUpdate,
             onDismiss = { settingsVisible = false },
         )
@@ -712,6 +713,7 @@ private fun OpenSourceSettingsSheet(
     onCancelXrayCoreDownload: () -> Unit,
     updateState: AppUpdateUiState,
     onCheckForUpdates: () -> Unit,
+    onResumeUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -800,6 +802,7 @@ private fun OpenSourceSettingsSheet(
             AppUpdateSettingsSection(
                 updateState = updateState,
                 onCheckForUpdates = onCheckForUpdates,
+                onResumeUpdate = onResumeUpdate,
                 onInstallUpdate = onInstallUpdate,
             )
 

@@ -734,10 +734,21 @@ APK asset selection:
 
 Download:
 
-- Используется Android DownloadManager.
+- Используется app-owned resumable `HttpURLConnection` downloader: системный DownloadManager
+  намеренно не используется, поскольку его отдельный UID может остаться в
+  `WAITING_FOR_NETWORK` при активном full-tunnel VPN.
+- `ValidatedPhysicalNetworkSelector` перебирает `ConnectivityManager.allNetworks`, исключает VPN
+  и выбирает validated Ethernet/Wi-Fi/cellular. Загрузчик делает до четырёх ограниченных попыток,
+  начиная с app-owned default route (через SSH, если он активен) и чередуя его с заново выбранной физической сетью,
+  поэтому переживает Wi-Fi/cellular handoff и блокировку прямого маршрута.
+- Redirects обрабатываются вручную: только HTTPS, не более пяти переходов и только GitHub/
+  `*.githubusercontent.com`.
 - Destination: external app-specific Downloads `/updates`.
-- Download state восстанавливается после restart.
-- Показывается progress: downloaded bytes, total bytes, percent, paused state.
+- Незавершённый файл хранится как `.part`; HTTP Range + If-Range позволяют продолжить загрузку
+  после обрыва сети или перезапуска процесса. После исчерпания автоматических попыток UI показывает
+  `Resume update download`, не требуя повторного запроса GitHub release metadata.
+- Проверяются опубликованный размер APK и hard limit 512 MiB.
+- Показывается progress: downloaded bytes, total bytes и percent.
 
 Validation перед install:
 
@@ -766,7 +777,7 @@ Install:
 
 Release APK:
 
-- `appVersionName = 2.5.6`.
+- `appVersionName = 2.5.7`.
 - `versionCode = major * 1_000_000 + minor * 1_000 + patch`.
 - ABI splits включены для:
   - `arm64-v8a`.

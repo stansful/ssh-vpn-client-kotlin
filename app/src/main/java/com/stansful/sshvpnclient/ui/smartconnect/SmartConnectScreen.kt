@@ -339,6 +339,7 @@ private fun SmartConnectScreen(
             onCancelXrayCoreDownload = onCancelXrayCoreDownload,
             updateState = state.updateState,
             onCheckForUpdates = onCheckForUpdates,
+            onResumeUpdate = onDownloadUpdate,
             onInstallUpdate = onInstallUpdate,
             onOpenAppPicker = {
                 settingsVisible = false
@@ -861,6 +862,7 @@ private fun SmartConnectSettingsSheet(
     onCancelXrayCoreDownload: () -> Unit,
     updateState: AppUpdateUiState,
     onCheckForUpdates: () -> Unit,
+    onResumeUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
     onOpenAppPicker: () -> Unit,
     onDismiss: () -> Unit,
@@ -949,6 +951,7 @@ private fun SmartConnectSettingsSheet(
                 AppUpdateSettingsSection(
                     updateState = updateState,
                     onCheckForUpdates = onCheckForUpdates,
+                    onResumeUpdate = onResumeUpdate,
                     onInstallUpdate = onInstallUpdate,
                 )
             }

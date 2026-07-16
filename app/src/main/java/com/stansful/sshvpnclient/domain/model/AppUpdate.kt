@@ -38,5 +38,8 @@ sealed interface AppUpdateDownloadState {
         val versionName: String,
         val contentUri: String,
     ) : AppUpdateDownloadState
-    data class Failed(val message: String) : AppUpdateDownloadState
+    data class Failed(
+        val message: String,
+        val canResume: Boolean = false,
+    ) : AppUpdateDownloadState
 }

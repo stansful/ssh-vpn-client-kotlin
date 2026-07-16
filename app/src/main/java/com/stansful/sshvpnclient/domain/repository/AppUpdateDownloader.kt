@@ -8,4 +8,6 @@ interface AppUpdateDownloader {
     val state: StateFlow<AppUpdateDownloadState>
 
     fun download(update: AppUpdateInfo)
+
+    fun resume()
 }
