@@ -18,9 +18,11 @@ import com.stansful.sshvpnclient.data.smart.IsolatedSmartProxySourceSynchronizer
 import com.stansful.sshvpnclient.data.secret.TinkSecretStorage
 import com.stansful.sshvpnclient.data.settings.SharedPreferencesAppSettingsRepository
 import com.stansful.sshvpnclient.data.update.AndroidAppUpdateDownloader
+import com.stansful.sshvpnclient.data.update.DefaultAppUpdateCoordinator
 import com.stansful.sshvpnclient.data.update.GitHubAppUpdateRepository
 import com.stansful.sshvpnclient.data.update.GitHubXrayCoreUpdateRepository
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
+import com.stansful.sshvpnclient.domain.repository.AppUpdateCoordinator
 import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
 import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
 import com.stansful.sshvpnclient.domain.repository.InstalledAppsRepository
@@ -144,6 +146,13 @@ class AppContainer(
     val appUpdateDownloader: AppUpdateDownloader by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         AndroidAppUpdateDownloader(
             context = appContext,
+            applicationScope = applicationScope,
+        )
+    }
+    val appUpdateCoordinator: AppUpdateCoordinator by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        DefaultAppUpdateCoordinator(
+            repository = appUpdateRepository,
+            downloader = appUpdateDownloader,
             applicationScope = applicationScope,
         )
     }

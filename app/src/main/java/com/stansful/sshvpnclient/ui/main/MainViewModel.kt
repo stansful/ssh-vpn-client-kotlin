@@ -4,8 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
-import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
-import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.SshConfigSummary
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
@@ -13,8 +11,7 @@ import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
-import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
-import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
+import com.stansful.sshvpnclient.domain.repository.AppUpdateCoordinator
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
@@ -118,14 +115,12 @@ class MainViewModel(
     private val disconnectVpnUseCase: DisconnectVpnUseCase,
     private val sshConnectionManager: SshConnectionManager,
     observeVpnConnectionStateUseCase: ObserveVpnConnectionStateUseCase,
-    private val appUpdateRepository: AppUpdateRepository,
-    private val appUpdateDownloader: AppUpdateDownloader,
+    private val appUpdateCoordinator: AppUpdateCoordinator,
 ) : ViewModel() {
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
     private val isTunnelCheckRunning = MutableStateFlow(false)
     private val tunnelCheckResult = MutableStateFlow(TunnelCheckResult.IDLE)
     private val terminalState = MutableStateFlow(TerminalUiState())
-    private val appUpdateState = MutableStateFlow(AppUpdateUiState())
     private val terminalLock = Any()
     private val terminalOutputBuffer = BoundedTerminalOutputBuffer(MAX_TERMINAL_OUTPUT_CHARACTERS)
     private var terminalGeneration = 0L
@@ -133,7 +128,6 @@ class MainViewModel(
     @Volatile
     private var terminalSession: SshTerminalSession? = null
     private var settingsReconnectJob: Job? = null
-    private var updateCheckJob: Job? = null
     private var settingsReconnectStarted = false
     private val vpnState = observeVpnConnectionStateUseCase().stateIn(
         scope = viewModelScope,
@@ -161,7 +155,7 @@ class MainViewModel(
         isTunnelCheckRunning,
         tunnelCheckResult,
         terminalState,
-        appUpdateState,
+        appUpdateCoordinator.state,
     ) { state, isTunnelCheckRunning, tunnelCheckResult, terminalState, updateState ->
         state.copy(
             isTunnelCheckRunning = isTunnelCheckRunning,
@@ -198,36 +192,6 @@ class MainViewModel(
                     closeTerminal()
                 }
             }
-        }
-        viewModelScope.launch {
-            appUpdateDownloader.state.collect { downloadState ->
-                appUpdateState.update { state ->
-                    state.copy(
-                        downloadState = downloadState,
-                        statusMessage = when (downloadState) {
-                            is AppUpdateDownloadState.Downloading -> {
-                                val progress = downloadState.progressPercent?.let { " · $it%" }.orEmpty()
-                                val paused = if (downloadState.isPaused) " · paused" else ""
-                                "Downloading shadow-ssh ${downloadState.versionName}$progress$paused"
-                            }
-                            is AppUpdateDownloadState.Failed -> downloadState.message
-                            is AppUpdateDownloadState.ReadyToInstall ->
-                                "shadow-ssh ${downloadState.versionName} is ready to install"
-                            AppUpdateDownloadState.Idle -> {
-                                if (state.downloadState is AppUpdateDownloadState.Idle) {
-                                    state.statusMessage
-                                } else {
-                                    null
-                                }
-                            }
-                        },
-                    )
-                }
-            }
-        }
-        viewModelScope.launch {
-            delay(AUTOMATIC_UPDATE_CHECK_DELAY_MS)
-            checkForUpdates(manual = false)
         }
     }
 
@@ -406,64 +370,19 @@ class MainViewModel(
     }
 
     fun checkForUpdates(manual: Boolean = true) {
-        if (updateCheckJob?.isActive == true) return
-        updateCheckJob = viewModelScope.launch {
-            appUpdateState.update {
-                it.copy(
-                    isChecking = true,
-                    statusMessage = if (manual) null else it.statusMessage,
-                )
-            }
-            runCatching {
-                appUpdateRepository.checkForUpdate(force = manual)
-            }.onSuccess { result ->
-                appUpdateState.update { state ->
-                    when (result) {
-                        is AppUpdateCheckResult.Available -> state.copy(
-                            isChecking = false,
-                            availableUpdate = result.update,
-                            statusMessage = null,
-                        )
-                        AppUpdateCheckResult.UpToDate -> state.copy(
-                            isChecking = false,
-                            availableUpdate = null,
-                            statusMessage = if (manual) "shadow-ssh is up to date" else null,
-                        )
-                        AppUpdateCheckResult.NotDue -> state.copy(isChecking = false)
-                    }
-                }
-            }.onFailure { error ->
-                appUpdateState.update { state ->
-                    state.copy(
-                        isChecking = false,
-                        statusMessage = if (manual) {
-                            error.message ?: "Unable to check for updates"
-                        } else {
-                            state.statusMessage
-                        },
-                    )
-                }
-            }
-        }
+        appUpdateCoordinator.checkForUpdates(manual)
     }
 
     fun dismissAvailableUpdate() {
-        appUpdateState.update { it.copy(availableUpdate = null) }
+        appUpdateCoordinator.dismissAvailableUpdate()
     }
 
     fun downloadAvailableUpdate() {
-        val update = appUpdateState.value.availableUpdate
-        if (update != null) {
-            appUpdateDownloader.download(update)
-            appUpdateState.update { it.copy(availableUpdate = null, statusMessage = null) }
-        } else {
-            appUpdateDownloader.resume()
-            appUpdateState.update { it.copy(statusMessage = null) }
-        }
+        appUpdateCoordinator.downloadAvailableUpdate()
     }
 
     fun onUpdateActionFailed(message: String) {
-        appUpdateState.update { it.copy(statusMessage = message) }
+        appUpdateCoordinator.onActionFailed(message)
     }
 
     override fun onCleared() {
@@ -639,7 +558,6 @@ class MainViewModel(
     }
 
     private companion object {
-        const val AUTOMATIC_UPDATE_CHECK_DELAY_MS = 1_500L
         const val SETTINGS_CHANGE_DEBOUNCE_MS = 250L
         const val SETTINGS_RECONNECT_DELAY_MS = 450L
         const val TERMINAL_OUTPUT_UI_BATCH_MS = 250L

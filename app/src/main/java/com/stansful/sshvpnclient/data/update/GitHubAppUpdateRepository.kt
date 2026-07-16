@@ -3,9 +3,9 @@ package com.stansful.sshvpnclient.data.update
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
-import android.net.NetworkCapabilities
 import android.os.Build
 import androidx.core.content.edit
+import com.stansful.sshvpnclient.data.network.ValidatedPhysicalNetworkSelector
 import com.stansful.sshvpnclient.domain.model.AndroidAbi
 import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
 import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
@@ -31,6 +31,7 @@ class GitHubAppUpdateRepository(
 ) : AppUpdateRepository {
     private val appContext = context.applicationContext
     private val connectivityManager = appContext.getSystemService(ConnectivityManager::class.java)
+    private val physicalNetworkSelector = ValidatedPhysicalNetworkSelector(appContext)
     private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     private val checkMutex = Mutex()
 
@@ -75,7 +76,21 @@ class GitHubAppUpdateRepository(
 
     private fun loadLatestRelease(): CachedHttpResponse {
         val etag = preferences.getString(KEY_ETAG, null)
-        val connection = openConnection(URL(LATEST_RELEASE_API_URL))
+        val url = URL(LATEST_RELEASE_API_URL)
+        return withPhysicalFirstRouteFallback(
+            physicalRoute = physicalNetworkSelector.select(),
+            defaultRoute = runCatching { connectivityManager.activeNetwork }.getOrNull(),
+        ) { network ->
+            loadLatestReleaseOnRoute(url, etag, network)
+        }
+    }
+
+    private fun loadLatestReleaseOnRoute(
+        url: URL,
+        etag: String?,
+        network: Network?,
+    ): CachedHttpResponse {
+        val connection = openConnection(url, network)
         try {
             connection.requestMethod = "GET"
             connection.connectTimeout = CONNECT_TIMEOUT_MS
@@ -105,24 +120,13 @@ class GitHubAppUpdateRepository(
         }
     }
 
-    private fun openConnection(url: URL): HttpURLConnection {
-        val network = findValidatedNonVpnNetwork()
+    private fun openConnection(url: URL, network: Network?): HttpURLConnection {
         val connection = if (network != null) {
             network.openConnection(url)
         } else {
             url.openConnection()
         }
         return connection as HttpURLConnection
-    }
-
-    private fun findValidatedNonVpnNetwork(): Network? {
-        val network = connectivityManager.activeNetwork ?: return null
-        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return null
-        return network.takeIf {
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-        }
     }
 
     private fun readLimitedResponse(connection: HttpURLConnection): String {

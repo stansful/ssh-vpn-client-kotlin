@@ -4,8 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
-import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
-import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSource
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSummary
@@ -22,8 +20,7 @@ import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.model.XrayCoreAsset
 import com.stansful.sshvpnclient.domain.model.XrayCoreRelease
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
-import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
-import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
+import com.stansful.sshvpnclient.domain.repository.AppUpdateCoordinator
 import com.stansful.sshvpnclient.domain.repository.ProxyProfileRepository
 import com.stansful.sshvpnclient.domain.repository.ProxySourceSynchronizer
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
@@ -167,8 +164,7 @@ class OpenSourceViewModel(
     private val connectProxyVpnUseCase: ConnectProxyVpnUseCase,
     private val disconnectVpnUseCase: DisconnectVpnUseCase,
     private val vpnConnectionRepository: VpnConnectionRepository,
-    private val appUpdateRepository: AppUpdateRepository,
-    private val appUpdateDownloader: AppUpdateDownloader,
+    private val appUpdateCoordinator: AppUpdateCoordinator,
     private val xrayCoreUpdateRepository: XrayCoreUpdateRepository,
 ) : ViewModel() {
     private val query = MutableStateFlow("")
@@ -187,13 +183,11 @@ class OpenSourceViewModel(
     private val operation = MutableStateFlow(OperationState())
     private val dialogState = MutableStateFlow(DialogState())
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
-    private val appUpdateState = MutableStateFlow(AppUpdateUiState())
     private val xrayCoreAvailable = MutableStateFlow(false)
     private val xrayCoreUpdateState = MutableStateFlow(
         XrayCoreUpdateUiState(runtimeAbi = xrayCoreUpdateRepository.runtimeAbi),
     )
     private var checkJob: Job? = null
-    private var updateCheckJob: Job? = null
     private var xrayCoreDownloadJob: Job? = null
     private var settingsReconnectJob: Job? = null
     private var settingsReconnectStarted = false
@@ -212,32 +206,6 @@ class OpenSourceViewModel(
                     }
                     previousSplitTunnelSettings = nextSplitTunnelSettings
                 }
-        }
-        viewModelScope.launch {
-            appUpdateDownloader.state.collect { downloadState ->
-                appUpdateState.update { state ->
-                    state.copy(
-                        downloadState = downloadState,
-                        statusMessage = when (downloadState) {
-                            is AppUpdateDownloadState.Downloading -> {
-                                val progress = downloadState.progressPercent?.let { " · $it%" }.orEmpty()
-                                val paused = if (downloadState.isPaused) " · paused" else ""
-                                "Downloading shadow-ssh ${downloadState.versionName}$progress$paused"
-                            }
-                            is AppUpdateDownloadState.Failed -> downloadState.message
-                            is AppUpdateDownloadState.ReadyToInstall ->
-                                "shadow-ssh ${downloadState.versionName} is ready to install"
-                            AppUpdateDownloadState.Idle -> {
-                                if (state.downloadState is AppUpdateDownloadState.Idle) {
-                                    state.statusMessage
-                                } else {
-                                    null
-                                }
-                            }
-                        },
-                    )
-                }
-            }
         }
     }
 
@@ -297,7 +265,7 @@ class OpenSourceViewModel(
         profileListState,
         auxiliaryState,
         appSettingsRepository.settings,
-        appUpdateState,
+        appUpdateCoordinator.state,
         xrayCoreUpdateState,
     ) { profileState, auxiliary, appSettings, updateState, coreUpdateState ->
         val operation = auxiliary.operation
@@ -594,55 +562,19 @@ class OpenSourceViewModel(
     }
 
     fun checkForUpdates() {
-        if (updateCheckJob?.isActive == true) return
-        updateCheckJob = viewModelScope.launch {
-            appUpdateState.update { it.copy(isChecking = true, statusMessage = null) }
-            runCatching {
-                appUpdateRepository.checkForUpdate(force = true)
-            }.onSuccess { result ->
-                appUpdateState.update { state ->
-                    when (result) {
-                        is AppUpdateCheckResult.Available -> state.copy(
-                            isChecking = false,
-                            availableUpdate = result.update,
-                            statusMessage = null,
-                        )
-                        AppUpdateCheckResult.UpToDate -> state.copy(
-                            isChecking = false,
-                            availableUpdate = null,
-                            statusMessage = "shadow-ssh is up to date",
-                        )
-                        AppUpdateCheckResult.NotDue -> state.copy(isChecking = false)
-                    }
-                }
-            }.onFailure { error ->
-                appUpdateState.update {
-                    it.copy(
-                        isChecking = false,
-                        statusMessage = error.message ?: "Unable to check for updates",
-                    )
-                }
-            }
-        }
+        appUpdateCoordinator.checkForUpdates()
     }
 
     fun dismissAvailableUpdate() {
-        appUpdateState.update { it.copy(availableUpdate = null) }
+        appUpdateCoordinator.dismissAvailableUpdate()
     }
 
     fun downloadAvailableUpdate() {
-        val update = appUpdateState.value.availableUpdate
-        if (update != null) {
-            appUpdateDownloader.download(update)
-            appUpdateState.update { it.copy(availableUpdate = null, statusMessage = null) }
-        } else {
-            appUpdateDownloader.resume()
-            appUpdateState.update { it.copy(statusMessage = null) }
-        }
+        appUpdateCoordinator.downloadAvailableUpdate()
     }
 
     fun onUpdateActionFailed(message: String) {
-        appUpdateState.update { it.copy(statusMessage = message) }
+        appUpdateCoordinator.onActionFailed(message)
     }
 
     fun checkXrayCoreUpdates() {

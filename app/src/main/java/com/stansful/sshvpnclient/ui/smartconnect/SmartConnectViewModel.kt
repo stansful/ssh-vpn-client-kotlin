@@ -5,8 +5,6 @@ import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.data.local.SmartConnectStateStore
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
-import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
-import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSummary
 import com.stansful.sshvpnclient.domain.model.ProxyTestStatus
@@ -20,8 +18,7 @@ import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.model.XrayCoreAsset
 import com.stansful.sshvpnclient.domain.model.XrayCoreRelease
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
-import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
-import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
+import com.stansful.sshvpnclient.domain.repository.AppUpdateCoordinator
 import com.stansful.sshvpnclient.domain.repository.SmartProxyProfileRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.repository.XrayCoreUpdateRepository
@@ -119,8 +116,7 @@ class SmartConnectViewModel(
     private val disconnectVpnUseCase: DisconnectVpnUseCase,
     private val xrayCoreBridge: XrayCoreBridge,
     private val xrayCoreUpdateRepository: XrayCoreUpdateRepository,
-    private val appUpdateRepository: AppUpdateRepository,
-    private val appUpdateDownloader: AppUpdateDownloader,
+    private val appUpdateCoordinator: AppUpdateCoordinator,
 ) : ViewModel() {
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
     private val actionMessage = MutableStateFlow<String?>(null)
@@ -128,11 +124,9 @@ class SmartConnectViewModel(
     private val xrayCoreUpdate = MutableStateFlow(
         SmartXrayCoreUpdateUiState(runtimeAbi = xrayCoreUpdateRepository.runtimeAbi),
     )
-    private val appUpdateState = MutableStateFlow(AppUpdateUiState())
     private val isStartPending = MutableStateFlow(false)
     private var startJob: Job? = null
     private var xrayCoreDownloadJob: Job? = null
-    private var updateCheckJob: Job? = null
 
     private val rankedProfiles = proxyProfileRepository.observeSummaries()
         .map(::rankAvailableSmartProfiles)
@@ -160,7 +154,7 @@ class SmartConnectViewModel(
         )
     }
 
-    private val updateStates = combine(xrayCoreUpdate, appUpdateState, ::SmartUpdateStates)
+    private val updateStates = combine(xrayCoreUpdate, appUpdateCoordinator.state, ::SmartUpdateStates)
 
     val uiState = combine(
         contentState,
@@ -184,32 +178,6 @@ class SmartConnectViewModel(
 
     init {
         refreshXrayCoreAvailability()
-        viewModelScope.launch {
-            appUpdateDownloader.state.collect { downloadState ->
-                appUpdateState.update { state ->
-                    state.copy(
-                        downloadState = downloadState,
-                        statusMessage = when (downloadState) {
-                            is AppUpdateDownloadState.Downloading -> {
-                                val progress = downloadState.progressPercent?.let { " · $it%" }.orEmpty()
-                                val paused = if (downloadState.isPaused) " · paused" else ""
-                                "Downloading shadow-ssh ${downloadState.versionName}$progress$paused"
-                            }
-                            is AppUpdateDownloadState.Failed -> downloadState.message
-                            is AppUpdateDownloadState.ReadyToInstall ->
-                                "shadow-ssh ${downloadState.versionName} is ready to install"
-                            AppUpdateDownloadState.Idle -> {
-                                if (state.downloadState is AppUpdateDownloadState.Idle) {
-                                    state.statusMessage
-                                } else {
-                                    null
-                                }
-                            }
-                        },
-                    )
-                }
-            }
-        }
     }
 
     /** Validates local UI preconditions before Android's VPN permission dialog is opened. */
@@ -446,60 +414,19 @@ class SmartConnectViewModel(
     }
 
     fun checkForUpdates() {
-        if (updateCheckJob?.isActive == true) return
-        updateCheckJob = viewModelScope.launch {
-            appUpdateState.update { it.copy(isChecking = true, statusMessage = null) }
-            try {
-                when (val result = appUpdateRepository.checkForUpdate(force = true)) {
-                    is AppUpdateCheckResult.Available -> appUpdateState.update {
-                        it.copy(
-                            isChecking = false,
-                            availableUpdate = result.update,
-                            statusMessage = null,
-                        )
-                    }
-                    AppUpdateCheckResult.UpToDate -> appUpdateState.update {
-                        it.copy(
-                            isChecking = false,
-                            availableUpdate = null,
-                            statusMessage = "shadow-ssh is up to date",
-                        )
-                    }
-                    AppUpdateCheckResult.NotDue -> appUpdateState.update {
-                        it.copy(isChecking = false)
-                    }
-                }
-            } catch (error: CancellationException) {
-                appUpdateState.update { it.copy(isChecking = false) }
-                throw error
-            } catch (error: Exception) {
-                appUpdateState.update {
-                    it.copy(
-                        isChecking = false,
-                        statusMessage = error.message ?: "Unable to check for updates",
-                    )
-                }
-            }
-        }
+        appUpdateCoordinator.checkForUpdates()
     }
 
     fun dismissAvailableUpdate() {
-        appUpdateState.update { it.copy(availableUpdate = null) }
+        appUpdateCoordinator.dismissAvailableUpdate()
     }
 
     fun downloadAvailableUpdate() {
-        val update = appUpdateState.value.availableUpdate
-        if (update != null) {
-            appUpdateDownloader.download(update)
-            appUpdateState.update { it.copy(availableUpdate = null, statusMessage = null) }
-        } else {
-            appUpdateDownloader.resume()
-            appUpdateState.update { it.copy(statusMessage = null) }
-        }
+        appUpdateCoordinator.downloadAvailableUpdate()
     }
 
     fun onUpdateActionFailed(message: String) {
-        appUpdateState.update { it.copy(statusMessage = message) }
+        appUpdateCoordinator.onActionFailed(message)
     }
 
     fun setShowLogsOnSmartConnect(show: Boolean) {

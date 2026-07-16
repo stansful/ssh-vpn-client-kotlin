@@ -29,8 +29,7 @@ class AppViewModelFactory(
                 disconnectVpnUseCase = container.disconnectVpnUseCase,
                 xrayCoreBridge = container.xrayCoreBridge,
                 xrayCoreUpdateRepository = container.xrayCoreUpdateRepository,
-                appUpdateRepository = container.appUpdateRepository,
-                appUpdateDownloader = container.appUpdateDownloader,
+                appUpdateCoordinator = container.appUpdateCoordinator,
             )
 
             modelClass.isAssignableFrom(OpenSourceViewModel::class.java) -> OpenSourceViewModel(
@@ -41,8 +40,7 @@ class AppViewModelFactory(
                 connectProxyVpnUseCase = container.connectProxyVpnUseCase,
                 disconnectVpnUseCase = container.disconnectVpnUseCase,
                 vpnConnectionRepository = container.vpnConnectionRepository,
-                appUpdateRepository = container.appUpdateRepository,
-                appUpdateDownloader = container.appUpdateDownloader,
+                appUpdateCoordinator = container.appUpdateCoordinator,
                 xrayCoreUpdateRepository = container.xrayCoreUpdateRepository,
             )
 
@@ -54,8 +52,7 @@ class AppViewModelFactory(
                 disconnectVpnUseCase = container.disconnectVpnUseCase,
                 sshConnectionManager = container.sshConnectionManager,
                 observeVpnConnectionStateUseCase = container.observeVpnConnectionStateUseCase,
-                appUpdateRepository = container.appUpdateRepository,
-                appUpdateDownloader = container.appUpdateDownloader,
+                appUpdateCoordinator = container.appUpdateCoordinator,
             )
 
             modelClass.isAssignableFrom(AppPickerViewModel::class.java) -> AppPickerViewModel(

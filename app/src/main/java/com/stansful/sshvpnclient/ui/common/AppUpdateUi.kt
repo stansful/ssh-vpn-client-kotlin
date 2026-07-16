@@ -40,14 +40,10 @@ import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
 import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
+import com.stansful.sshvpnclient.domain.model.AppUpdateState
 import java.util.Locale
 
-data class AppUpdateUiState(
-    val isChecking: Boolean = false,
-    val availableUpdate: AppUpdateInfo? = null,
-    val statusMessage: String? = null,
-    val downloadState: AppUpdateDownloadState = AppUpdateDownloadState.Idle,
-)
+typealias AppUpdateUiState = AppUpdateState
 
 @Composable
 fun AppUpdateSettingsSection(
@@ -63,6 +59,7 @@ fun AppUpdateSettingsSection(
         }
         FilledTonalButton(
             onClick = onCheckForUpdates,
+            enabled = !updateState.isChecking,
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 50.dp),
@@ -135,12 +132,6 @@ fun AppUpdateAvailableDialog(
                 downloading?.let { state ->
                     DownloadProgressContent(state)
                 }
-                TextButton(
-                    onClick = onOpenRelease,
-                    modifier = Modifier.align(Alignment.Start),
-                ) {
-                    Text("View release notes")
-                }
             }
         },
         confirmButton = {
@@ -167,7 +158,12 @@ fun AppUpdateAvailableDialog(
                 )
             }
         },
-        dismissButton = { TextButton(onClick = onLater) { Text("Later") } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onOpenRelease) { Text("Release notes") }
+                TextButton(onClick = onLater) { Text("Later") }
+            }
+        },
     )
 }
 

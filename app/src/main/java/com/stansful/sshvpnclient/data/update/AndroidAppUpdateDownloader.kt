@@ -182,12 +182,12 @@ class AndroidAppUpdateDownloader(
         if (!partial.renameTo(destination)) {
             throw IOException("Unable to store the downloaded update")
         }
-        validateDownloadedApk()
+        validateDownloadedApk(restoring = false)
     }
 
     /**
-     * Starts with the app-owned default route so an active SSH tunnel remains useful against DPI,
-     * then alternates with a freshly selected physical network. Unlike Android DownloadManager,
+     * Starts with a validated physical route so an active VPN cannot stall the update before the
+     * first byte, then alternates with the app-owned default route. Unlike Android DownloadManager,
      * both connections belong to this process and a Wi-Fi/mobile handoff can be retried safely.
      */
     private suspend fun downloadAcrossAvailableRoutes(
@@ -199,7 +199,10 @@ class AndroidAppUpdateDownloader(
         var lastFailure: Exception? = null
         repeat(MAX_ROUTE_ATTEMPTS) { attempt ->
             coroutineContext.ensureActive()
-            val network = if (attempt % 2 == 0) null else physicalNetworkSelector.select()
+            val network = when (appUpdateRouteKind(attempt)) {
+                AppUpdateRouteKind.PHYSICAL -> physicalNetworkSelector.select()
+                AppUpdateRouteKind.DEFAULT -> null
+            }
             try {
                 downloadToPartial(
                     sourceUrl = sourceUrl,
@@ -213,14 +216,15 @@ class AndroidAppUpdateDownloader(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
+                if (!shouldRetryAppUpdateRouteFailure(error)) throw error
                 lastFailure = error
                 if (attempt + 1 < MAX_ROUTE_ATTEMPTS) {
                     delay(ROUTE_RETRY_DELAYS_MS[attempt])
                 }
             }
         }
-        val detail = lastFailure?.message ?: "all available routes failed"
-        throw IOException("Update download failed: $detail", lastFailure)
+        val finalFailure = lastFailure ?: IOException("All available update routes failed")
+        throw IOException("Update download failed: ${finalFailure.message}", finalFailure)
     }
 
     private suspend fun downloadToPartial(
@@ -417,7 +421,7 @@ class AndroidAppUpdateDownloader(
         removeLegacyDownloadManagerJob()
         val file = preferences.getString(KEY_FILE_PATH, null)?.let(::File)
         if (file?.isFile == true && file.length() > 0L) {
-            validateDownloadedApk()
+            validateDownloadedApk(restoring = true)
             return
         }
         if (pendingUpdateSnapshot() != null) {
@@ -439,7 +443,7 @@ class AndroidAppUpdateDownloader(
         preferences.edit(commit = true) { remove(KEY_LEGACY_DOWNLOAD_ID) }
     }
 
-    private fun validateDownloadedApk() {
+    private fun validateDownloadedApk(restoring: Boolean) {
         val file = preferences.getString(KEY_FILE_PATH, null)?.let(::File)
             ?: return failAndClear("Downloaded update path is missing")
         val expectedVersion = preferences.getString(KEY_VERSION_NAME, null)
@@ -466,11 +470,16 @@ class AndroidAppUpdateDownloader(
         if (SemanticVersion.parse(archiveInfo.versionName) != SemanticVersion.parse(expectedVersion)) {
             return failAndClear("Downloaded APK version does not match the GitHub release")
         }
-        if (PackageInfoCompat.getLongVersionCode(archiveInfo) <= PackageInfoCompat.getLongVersionCode(installedInfo)) {
+        val downloadedVersionCode = PackageInfoCompat.getLongVersionCode(archiveInfo)
+        val installedVersionCode = PackageInfoCompat.getLongVersionCode(installedInfo)
+        if (shouldDiscardRestoredAppUpdate(restoring, downloadedVersionCode, installedVersionCode)) {
             file.delete()
             clearPendingMetadata()
             mutableState.value = AppUpdateDownloadState.Idle
             return
+        }
+        appUpdateVersionCodeError(downloadedVersionCode, installedVersionCode)?.let { message ->
+            return failAndClear(message)
         }
         if (!signaturesMatch(installedInfo, archiveInfo)) {
             return failAndClear("Downloaded APK signing certificate does not match the installed app")
@@ -681,6 +690,35 @@ internal enum class AppUpdateResponseAction {
     RETRY_FROM_ZERO,
     FAIL,
 }
+
+internal enum class AppUpdateRouteKind {
+    PHYSICAL,
+    DEFAULT,
+}
+
+internal fun appUpdateRouteKind(attempt: Int): AppUpdateRouteKind {
+    require(attempt >= 0) { "Route attempt cannot be negative" }
+    return if (attempt % 2 == 0) AppUpdateRouteKind.PHYSICAL else AppUpdateRouteKind.DEFAULT
+}
+
+internal fun shouldRetryAppUpdateRouteFailure(error: Exception): Boolean {
+    return error is IOException || error is AppUpdateException
+}
+
+internal fun appUpdateVersionCodeError(
+    downloadedVersionCode: Long,
+    installedVersionCode: Long,
+): String? {
+    if (downloadedVersionCode > installedVersionCode) return null
+    return "Downloaded APK versionCode $downloadedVersionCode is not newer than " +
+        "installed versionCode $installedVersionCode"
+}
+
+internal fun shouldDiscardRestoredAppUpdate(
+    restoring: Boolean,
+    downloadedVersionCode: Long,
+    installedVersionCode: Long,
+): Boolean = restoring && downloadedVersionCode <= installedVersionCode
 
 internal fun chooseAppUpdateResponseAction(
     existingBytes: Long,

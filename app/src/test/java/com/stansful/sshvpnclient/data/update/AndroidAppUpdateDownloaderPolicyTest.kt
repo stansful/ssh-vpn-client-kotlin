@@ -1,5 +1,6 @@
 package com.stansful.sshvpnclient.data.update
 
+import java.io.IOException
 import java.net.HttpURLConnection
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,6 +9,53 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidAppUpdateDownloaderPolicyTest {
+    @Test
+    fun `tries the validated physical route before the VPN default route`() {
+        assertEquals(AppUpdateRouteKind.PHYSICAL, appUpdateRouteKind(0))
+        assertEquals(AppUpdateRouteKind.DEFAULT, appUpdateRouteKind(1))
+        assertEquals(AppUpdateRouteKind.PHYSICAL, appUpdateRouteKind(2))
+        assertEquals(AppUpdateRouteKind.DEFAULT, appUpdateRouteKind(3))
+    }
+
+    @Test
+    fun `retries transport and route specific HTTP failures on another route`() {
+        assertTrue(shouldRetryAppUpdateRouteFailure(IOException("network interrupted")))
+        assertTrue(shouldRetryAppUpdateRouteFailure(AppUpdateException("HTTP 451 on physical route")))
+        assertFalse(shouldRetryAppUpdateRouteFailure(IllegalStateException("invalid local state")))
+    }
+
+    @Test
+    fun `rejects an APK whose versionCode is not newer`() {
+        assertNull(
+            appUpdateVersionCodeError(
+                downloadedVersionCode = 2_005_008L,
+                installedVersionCode = 2_005_007L,
+            ),
+        )
+        assertEquals(
+            "Downloaded APK versionCode 2005007 is not newer than installed versionCode 2005007",
+            appUpdateVersionCodeError(
+                downloadedVersionCode = 2_005_007L,
+                installedVersionCode = 2_005_007L,
+            ),
+        )
+        assertEquals(
+            "Downloaded APK versionCode 2005006 is not newer than installed versionCode 2005007",
+            appUpdateVersionCodeError(
+                downloadedVersionCode = 2_005_006L,
+                installedVersionCode = 2_005_007L,
+            ),
+        )
+    }
+
+    @Test
+    fun `silently discards an installed or stale APK only while restoring state`() {
+        assertTrue(shouldDiscardRestoredAppUpdate(true, 2_005_007L, 2_005_007L))
+        assertTrue(shouldDiscardRestoredAppUpdate(true, 2_005_006L, 2_005_007L))
+        assertFalse(shouldDiscardRestoredAppUpdate(false, 2_005_007L, 2_005_007L))
+        assertFalse(shouldDiscardRestoredAppUpdate(true, 2_005_008L, 2_005_007L))
+    }
+
     @Test
     fun `accepts only the repository release path as an initial URL`() {
         assertTrue(

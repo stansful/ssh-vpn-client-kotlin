@@ -5,6 +5,38 @@ import org.junit.Test
 
 class GitHubAppUpdateRepositoryTest {
     @Test
+    fun `selects published abi split name without embedded version`() {
+        val selected = selectBestApkAssetName(
+            apkNames = listOf(
+                "app-armeabi-v7a-release.apk",
+                "app-arm64-v8a-release.apk",
+                "app-universal-release.apk",
+                "app-x86-release.apk",
+                "app-x86_64-release.apk",
+            ),
+            versionText = "2.5.7",
+            supportedAbis = listOf("arm64-v8a", "armeabi-v7a"),
+        )
+
+        assertEquals("app-arm64-v8a-release.apk", selected)
+    }
+
+    @Test
+    fun `falls back to published universal name for an unknown abi`() {
+        val selected = selectBestApkAssetName(
+            apkNames = listOf(
+                "app-arm64-v8a-release.apk",
+                "app-universal-release.apk",
+                "app-x86_64-release.apk",
+            ),
+            versionText = "2.5.7",
+            supportedAbis = listOf("riscv64"),
+        )
+
+        assertEquals("app-universal-release.apk", selected)
+    }
+
+    @Test
     fun `selects apk for the first supported device abi`() {
         val selected = selectBestApkAssetName(
             apkNames = listOf(

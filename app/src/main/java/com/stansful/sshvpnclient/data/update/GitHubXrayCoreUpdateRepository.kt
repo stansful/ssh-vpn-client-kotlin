@@ -3,9 +3,9 @@ package com.stansful.sshvpnclient.data.update
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
-import android.net.NetworkCapabilities
 import android.os.Build
 import androidx.core.net.toUri
+import com.stansful.sshvpnclient.data.network.ValidatedPhysicalNetworkSelector
 import com.stansful.sshvpnclient.domain.model.AndroidAbi
 import com.stansful.sshvpnclient.domain.model.XrayCoreAsset
 import com.stansful.sshvpnclient.domain.model.XrayCoreRelease
@@ -33,6 +33,7 @@ class GitHubXrayCoreUpdateRepository(
 ) : XrayCoreUpdateRepository {
     private val appContext = context.applicationContext
     private val connectivityManager = appContext.getSystemService(ConnectivityManager::class.java)
+    private val physicalNetworkSelector = ValidatedPhysicalNetworkSelector(appContext)
 
     override val runtimeAbi: String = AndroidAbi.runtimeAbi(supportedAbis)
 
@@ -68,45 +69,19 @@ class GitHubXrayCoreUpdateRepository(
             val tempFile = File(downloadDir, "${targetFile.name}.tmp")
             runCatching { tempFile.delete() }
 
-            val digest = MessageDigest.getInstance("SHA-256")
-            val connection = openConnection(URL(asset.downloadUrl))
-            try {
-                connection.requestMethod = "GET"
-                connection.connectTimeout = CONNECT_TIMEOUT_MS
-                connection.readTimeout = DOWNLOAD_READ_TIMEOUT_MS
-                connection.instanceFollowRedirects = true
-                connection.setRequestProperty("User-Agent", USER_AGENT)
-
-                val responseCode = connection.responseCode
-                if (responseCode != HttpURLConnection.HTTP_OK) {
-                    throw AppUpdateException("Xray core download failed with HTTP $responseCode")
-                }
-                tempFile.outputStream().use { output ->
-                    connection.inputStream.use { input ->
-                        val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
-                        var totalBytes = 0L
-                        while (true) {
-                            coroutineContext.ensureActive()
-                            val read = input.read(buffer)
-                            if (read < 0) break
-                            totalBytes += read
-                            if (totalBytes > MAX_CORE_DOWNLOAD_BYTES) {
-                                throw AppUpdateException("Xray core download is too large")
-                            }
-                            digest.update(buffer, 0, read)
-                            output.write(buffer, 0, read)
-                        }
-                    }
+            val actualDigest = try {
+                withPhysicalFirstRouteFallback(
+                    physicalRoute = physicalNetworkSelector.select(),
+                    defaultRoute = runCatching { connectivityManager.activeNetwork }.getOrNull(),
+                ) { network ->
+                    downloadAssetOnRoute(URL(asset.downloadUrl), tempFile, network)
                 }
             } catch (error: Throwable) {
                 tempFile.delete()
                 throw error
-            } finally {
-                connection.disconnect()
             }
 
             val expectedDigest = asset.sha256Digest
-            val actualDigest = digest.digest().joinToString("") { byte -> "%02x".format(byte) }
             if (!expectedDigest.isNullOrBlank() && actualDigest != expectedDigest.lowercase()) {
                 tempFile.delete()
                 throw AppUpdateException("Downloaded Xray core SHA-256 verification failed")
@@ -124,8 +99,59 @@ class GitHubXrayCoreUpdateRepository(
         }
     }
 
+    private suspend fun downloadAssetOnRoute(
+        url: URL,
+        tempFile: File,
+        network: Network?,
+    ): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val connection = openConnection(url, network)
+        try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = CONNECT_TIMEOUT_MS
+            connection.readTimeout = DOWNLOAD_READ_TIMEOUT_MS
+            connection.instanceFollowRedirects = true
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+
+            val responseCode = connection.responseCode
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                throw AppUpdateException("Xray core download failed with HTTP $responseCode")
+            }
+            tempFile.outputStream().use { output ->
+                connection.inputStream.use { input ->
+                    val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+                    var totalBytes = 0L
+                    while (true) {
+                        coroutineContext.ensureActive()
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        totalBytes += read
+                        if (totalBytes > MAX_CORE_DOWNLOAD_BYTES) {
+                            throw AppUpdateException("Xray core download is too large")
+                        }
+                        digest.update(buffer, 0, read)
+                        output.write(buffer, 0, read)
+                    }
+                }
+            }
+            return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun loadLatestReleaseBody(): String {
-        val connection = openConnection(URL(LATEST_RELEASE_API_URL))
+        val url = URL(LATEST_RELEASE_API_URL)
+        return withPhysicalFirstRouteFallback(
+            physicalRoute = physicalNetworkSelector.select(),
+            defaultRoute = runCatching { connectivityManager.activeNetwork }.getOrNull(),
+        ) { network ->
+            loadLatestReleaseBodyOnRoute(url, network)
+        }
+    }
+
+    private fun loadLatestReleaseBodyOnRoute(url: URL, network: Network?): String {
+        val connection = openConnection(url, network)
         try {
             connection.requestMethod = "GET"
             connection.connectTimeout = CONNECT_TIMEOUT_MS
@@ -248,24 +274,13 @@ class GitHubXrayCoreUpdateRepository(
         return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
     }
 
-    private fun openConnection(url: URL): HttpURLConnection {
-        val network = findValidatedNonVpnNetwork()
+    private fun openConnection(url: URL, network: Network?): HttpURLConnection {
         val connection = if (network != null) {
             network.openConnection(url)
         } else {
             url.openConnection()
         }
         return connection as HttpURLConnection
-    }
-
-    private fun findValidatedNonVpnNetwork(): Network? {
-        val network = connectivityManager.activeNetwork ?: return null
-        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return null
-        return network.takeIf {
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-        }
     }
 
     private fun readLimitedResponse(connection: HttpURLConnection): String {

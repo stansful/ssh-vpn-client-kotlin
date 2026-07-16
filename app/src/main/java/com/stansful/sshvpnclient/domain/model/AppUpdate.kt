@@ -11,6 +11,13 @@ data class AppUpdateInfo(
     val sha256Digest: String?,
 )
 
+data class AppUpdateState(
+    val isChecking: Boolean = false,
+    val availableUpdate: AppUpdateInfo? = null,
+    val statusMessage: String? = null,
+    val downloadState: AppUpdateDownloadState = AppUpdateDownloadState.Idle,
+)
+
 sealed interface AppUpdateCheckResult {
     data class Available(val update: AppUpdateInfo) : AppUpdateCheckResult
     data object UpToDate : AppUpdateCheckResult

@@ -249,6 +249,12 @@ private fun OpenSourceScreen(
     var searchVisible by remember { mutableStateOf(false) }
     var topMenuExpanded by remember { mutableStateOf(false) }
 
+    LaunchedEffect(state.updateState.availableUpdate) {
+        if (state.updateState.availableUpdate != null) {
+            settingsVisible = false
+        }
+    }
+
     AppScreen(
         title = if (state.selectionMode) "Selected: ${state.selectedIds.size}" else "Public Routes",
         actions = {
