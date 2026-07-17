@@ -668,29 +668,37 @@ class SmartConnectVpnService : android.net.VpnService() {
                     trafficBeforeProbe.transmittedBytes >= ACTIVE_VPN_TRAFFIC_THRESHOLD_BYTES
                 if (trafficIsPotentiallyActive && disruptionDeferralStartedAtMs == NO_TIMESTAMP) {
                     disruptionDeferralStartedAtMs = nowMs
-                } else if (!trafficIsPotentiallyActive) {
-                    disruptionDeferralStartedAtMs = NO_TIMESTAMP
                 }
                 val activeTransferElapsedMs = if (disruptionDeferralStartedAtMs == NO_TIMESTAMP) {
-                    maxOf(MAX_TX_ONLY_TRAFFIC_CHECK_DEFERRAL_MS, MAX_DEVICE_ONLY_RX_DEFERRAL_MS)
+                    SMART_MAX_ACTIVE_TRANSFER_HEALTH_DEFERRAL_MS
                 } else {
                     nowMs - disruptionDeferralStartedAtMs
                 }
-                if (shouldDeferVpnDisruption(trafficBeforeProbe, activeTransferElapsedMs)) {
-                    confirmedHealthFailureRounds = 0
-                    firstConfirmedHealthFailureAtMs = NO_TIMESTAMP
+                if (shouldDeferSmartHealthProbe(
+                        traffic = trafficBeforeProbe,
+                        elapsedSinceDeferralStartedMs = activeTransferElapsedMs,
+                        confirmedFailureRounds = confirmedHealthFailureRounds,
+                    )
+                ) {
+                    val forcedProbeAtMs = disruptionDeferralStartedAtMs +
+                        SMART_MAX_ACTIVE_TRANSFER_HEALTH_DEFERRAL_MS
                     if (!activeTransferDeferralLogged) {
                         activeTransferDeferralLogged = true
                         appContainer.vpnConnectionRepository.appendDiagnostic(
                             "Smart Connect health probe postponed for active transfer " +
                                 "(rx=${trafficBeforeProbe.receivedBytes / 1_024L} KiB, " +
-                                "uidRx=${trafficBeforeProbe.uidReceivedBytes / 1_024L} KiB)",
+                                "uidRx=${trafficBeforeProbe.uidReceivedBytes / 1_024L} KiB); " +
+                                "forced check within " +
+                                "${((forcedProbeAtMs - nowMs).coerceAtLeast(0L) + 999L) / 1_000L}s",
                         )
                     }
-                    nextProbeAtMs = nowMs + smartHealthCheckIntervalMs(
-                        connectedDurationMs = nowMs - connectedAtMs,
-                        isInteractive = deviceInteractive,
-                        isPowerSaveMode = powerManager.isPowerSaveMode,
+                    nextProbeAtMs = minOf(
+                        forcedProbeAtMs,
+                        nowMs + smartHealthCheckIntervalMs(
+                            connectedDurationMs = nowMs - connectedAtMs,
+                            isInteractive = deviceInteractive,
+                            isPowerSaveMode = powerManager.isPowerSaveMode,
+                        ),
                     )
                     continue
                 }
@@ -782,37 +790,11 @@ class SmartConnectVpnService : android.net.VpnService() {
                 generation = healthHandle.generation,
             )?.let { return it }
 
-            val traffic = trafficActivityMonitor.sampleSinceLast()
+            // Consume probe traffic so the next pre-probe sample starts from a clean baseline.
+            // Bytes produced by two failed auxiliary probes are not evidence that the user's
+            // tunnel recovered and must never erase an already confirmed failure streak.
+            trafficActivityMonitor.sampleSinceLast()
             val failureAtMs = SystemClock.elapsedRealtime()
-            val trafficIsPotentiallyActive = traffic.receivedRecently ||
-                traffic.receivedBytes >= ACTIVE_VPN_TRAFFIC_THRESHOLD_BYTES ||
-                traffic.transmittedBytes >= ACTIVE_VPN_TRAFFIC_THRESHOLD_BYTES
-            if (trafficIsPotentiallyActive && disruptionDeferralStartedAtMs == NO_TIMESTAMP) {
-                disruptionDeferralStartedAtMs = failureAtMs
-            } else if (!trafficIsPotentiallyActive) {
-                disruptionDeferralStartedAtMs = NO_TIMESTAMP
-            }
-            val deferralElapsedMs = if (disruptionDeferralStartedAtMs == NO_TIMESTAMP) {
-                maxOf(MAX_TX_ONLY_TRAFFIC_CHECK_DEFERRAL_MS, MAX_DEVICE_ONLY_RX_DEFERRAL_MS)
-            } else {
-                failureAtMs - disruptionDeferralStartedAtMs
-            }
-            if (healthPublished && shouldDeferVpnDisruption(traffic, deferralElapsedMs)) {
-                confirmedHealthFailureRounds = 0
-                firstConfirmedHealthFailureAtMs = NO_TIMESTAMP
-                appContainer.smartConnectStateStore.publish { state ->
-                    state.copy(
-                        phase = if (healthPublished) SmartConnectPhase.CONNECTED else SmartConnectPhase.VERIFYING,
-                        message = "Health retry deferred while VPN traffic is active",
-                    )
-                }
-                nextProbeAtMs = failureAtMs + smartHealthCheckIntervalMs(
-                    connectedDurationMs = failureAtMs - connectedAtMs,
-                    isInteractive = deviceInteractive,
-                    isPowerSaveMode = powerManager.isPowerSaveMode,
-                )
-                continue
-            }
 
             val message = confirmation.message ?: firstProbe.message ?: "YouTube health check failed"
             if (healthPublished) {
@@ -836,6 +818,10 @@ class SmartConnectVpnService : android.net.VpnService() {
                     nextProbeAtMs = failureAtMs + SMART_HEALTH_FAILURE_RETRY_INTERVAL_MS
                     continue
                 }
+                appContainer.vpnConnectionRepository.appendDiagnostic(
+                    "Smart Connect tunnel health failed for " +
+                        "$confirmedHealthFailureRounds consecutive rounds; failing over",
+                )
             }
             return ConnectionOutcome.ConfirmedHealthFailure(message)
         }

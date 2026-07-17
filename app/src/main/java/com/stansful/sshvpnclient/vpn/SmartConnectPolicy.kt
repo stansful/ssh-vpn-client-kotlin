@@ -60,6 +60,22 @@ internal fun shouldTriggerVerifiedTunnelFailover(
         elapsedSinceFirstConfirmedFailureMs >= SMART_HEALTH_MIN_FAILURE_DURATION_MS
 }
 
+/**
+ * Smart Connect may briefly postpone an auxiliary health probe while a transfer is active, but
+ * never after the tunnel has produced a confirmed health failure and never beyond a hard limit.
+ */
+internal fun shouldDeferSmartHealthProbe(
+    traffic: VpnTrafficDelta,
+    elapsedSinceDeferralStartedMs: Long,
+    confirmedFailureRounds: Int,
+): Boolean {
+    require(elapsedSinceDeferralStartedMs >= 0L)
+    require(confirmedFailureRounds >= 0)
+    return confirmedFailureRounds == 0 &&
+        elapsedSinceDeferralStartedMs < SMART_MAX_ACTIVE_TRANSFER_HEALTH_DEFERRAL_MS &&
+        shouldDeferVpnDisruption(traffic, elapsedSinceDeferralStartedMs)
+}
+
 /** Keeps recently failed public profiles out of both probes and selection until their cooldown. */
 internal class SmartProfileCooldowns(
     private val elapsedRealtimeMs: () -> Long,
@@ -109,6 +125,7 @@ internal const val SMART_HEALTH_SCREEN_OFF_INTERVAL_MS = 120_000L
 internal const val SMART_HEALTH_POWER_SAVE_INTERVAL_MS = 300_000L
 internal const val SMART_HEALTH_FAILURE_ROUNDS_BEFORE_FAILOVER = 3
 internal const val SMART_HEALTH_MIN_FAILURE_DURATION_MS = 30_000L
+internal const val SMART_MAX_ACTIVE_TRANSFER_HEALTH_DEFERRAL_MS = 5L * 60_000L
 internal const val SMART_HEALTH_FAILURE_COOLDOWN_MS = 15L * 60_000L
 internal const val SMART_RUNTIME_FAILURE_COOLDOWN_MS = 2L * 60_000L
 private val SMART_CATALOG_RETRY_DELAYS_MS = longArrayOf(

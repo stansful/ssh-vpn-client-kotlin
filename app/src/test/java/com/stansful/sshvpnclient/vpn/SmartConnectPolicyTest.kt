@@ -74,6 +74,50 @@ class SmartConnectPolicyTest {
     }
 
     @Test
+    fun `active receive may defer Smart health probe before a confirmed failure`() {
+        assertTrue(
+            shouldDeferSmartHealthProbe(
+                traffic = activeReceiveFromReportedStall(),
+                elapsedSinceDeferralStartedMs = SMART_MAX_ACTIVE_TRANSFER_HEALTH_DEFERRAL_MS - 1L,
+                confirmedFailureRounds = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun `confirmed failure prevents active receive from postponing its follow-up probe`() {
+        assertFalse(
+            shouldDeferSmartHealthProbe(
+                traffic = activeReceiveFromReportedStall(),
+                elapsedSinceDeferralStartedMs = 0L,
+                confirmedFailureRounds = 1,
+            ),
+        )
+    }
+
+    @Test
+    fun `active receive cannot defer Smart health probe beyond hard limit`() {
+        assertFalse(
+            shouldDeferSmartHealthProbe(
+                traffic = activeReceiveFromReportedStall(),
+                elapsedSinceDeferralStartedMs = SMART_MAX_ACTIVE_TRANSFER_HEALTH_DEFERRAL_MS,
+                confirmedFailureRounds = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun `quiet tunnel does not defer Smart health probe`() {
+        assertFalse(
+            shouldDeferSmartHealthProbe(
+                traffic = VpnTrafficDelta(receivedBytes = 0L, transmittedBytes = 0L),
+                elapsedSinceDeferralStartedMs = 0L,
+                confirmedFailureRounds = 0,
+            ),
+        )
+    }
+
+    @Test
     fun `failed profile remains excluded until monotonic cooldown expires`() {
         var nowMs = 1_000L
         val cooldowns = SmartProfileCooldowns { nowMs }
@@ -197,5 +241,14 @@ class SmartConnectPolicyTest {
         lastTestStatus = status,
         lastLatencyMs = latencyMs,
         updatedAt = 0L,
+    )
+
+    private fun activeReceiveFromReportedStall() = VpnTrafficDelta(
+        receivedBytes = 939L * 1_024L,
+        transmittedBytes = 0L,
+        uidReceivedBytes = 913L * 1_024L,
+        uidTransmittedBytes = 0L,
+        deviceReceivedBytes = 939L * 1_024L,
+        deviceTransmittedBytes = 0L,
     )
 }
