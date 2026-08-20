@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
+    id("io.gitlab.arturbosch.detekt")
 }
 
 val releaseStoreFilePath = providers.environmentVariable("SSH_VPN_RELEASE_STORE_FILE")
@@ -25,7 +26,7 @@ val releaseSigningConfigured = listOf(
 val bundleXrayCore = providers.gradleProperty("bundleXrayCore")
     .map(String::toBoolean)
     .orElse(false)
-val appVersionName = "2.7.0"
+val appVersionName = "3.0.0"
 val appVersionParts = appVersionName.split('.').map(String::toInt)
 require(appVersionParts.size == 3 && appVersionParts.drop(1).all { it in 0..999 }) {
     "versionName must be SemVer with minor/patch in 0..999"
@@ -46,6 +47,11 @@ android {
         versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    sourceSets {
+        // MigrationTestHelper reads the exported Room schemas from the test APK assets.
+        getByName("androidTest").assets.srcDir("$projectDir/schemas")
     }
 
     buildFeatures {
@@ -106,6 +112,88 @@ android {
     lint {
         // Gradle 9.6 triggers a deprecation inside AGP 9.2.1; stay on its compatible wrapper.
         disable += "AndroidGradlePluginVersion"
+
+        // Fail the build on lint errors instead of only reporting them.
+        abortOnError = true
+
+        // Existing debt is frozen in the baseline; new issues must be fixed.
+        // Bootstrap: `./gradlew :app:lintDebug -Plint.baseline.bootstrap=true`, commit the file,
+        // then delete and regenerate it after each cleanup pass.
+        //
+        // The reference is conditional on purpose: pointing lint at a missing baseline makes it
+        // generate the file and then fail the build, which would turn every fresh clone red.
+        val lintBaseline = file("lint-baseline.xml")
+        if (lintBaseline.isFile || providers.gradleProperty("lint.baseline.bootstrap").isPresent) {
+            baseline = lintBaseline
+        }
+
+        // TODO(IMPROVEMENT_PLAN 2.3): 54 hardcoded Compose strings remain. Once they are in
+        // strings.xml, promote this to `error += "HardcodedText"` and regenerate the baseline.
+        warning += "HardcodedText"
+
+        // TODO(IMPROVEMENT_PLAN 1.1): flip to true once the baseline is committed and green.
+        warningsAsErrors = false
+
+        htmlReport = true
+        xmlReport = true
+        sarifReport = true
+    }
+}
+
+// Exported Room schemas are the input for the migration tests. They must be committed.
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+    arg("room.incremental", "true")
+    arg("room.generateKotlin", "true")
+}
+
+detekt {
+    buildUponDefaultConfig = true
+    allRules = false
+    config.setFrom(rootProject.files("config/detekt/detekt.yml"))
+
+    // Bootstrap once with `./gradlew :app:detektBaseline` and commit the result, so the
+    // existing backlog does not block CI while new violations still fail the build.
+    baseline = rootProject.file("config/detekt/baseline.xml")
+    source.setFrom(
+        files(
+            "src/main/java",
+            "src/test/java",
+            "src/androidTest/java",
+        ),
+    )
+    parallel = true
+}
+
+tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
+    jvmTarget = JavaVersion.VERSION_17.toString()
+    reports {
+        html.required.set(true)
+        xml.required.set(true)
+        sarif.required.set(true)
+        txt.required.set(false)
+        md.required.set(false)
+    }
+}
+
+tasks.withType<io.gitlab.arturbosch.detekt.DetektCreateBaselineTask>().configureEach {
+    jvmTarget = JavaVersion.VERSION_17.toString()
+}
+
+/** Fails when a broad `catch (e: Exception)` in coroutine code can swallow cancellation. */
+val cancellationGuardScript = rootProject.file("scripts/check-cancellation.sh")
+val isWindowsHost = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+
+if (cancellationGuardScript.isFile && !isWindowsHost) {
+    val checkCancellationHandling by tasks.registering(Exec::class) {
+        group = "verification"
+        description = "Verifies coroutine code rethrows CancellationException before broad catches."
+        workingDir = rootProject.projectDir
+        commandLine("bash", cancellationGuardScript.absolutePath)
+    }
+
+    tasks.named("check").configure {
+        dependsOn(checkCancellationHandling)
     }
 }
 
@@ -150,4 +238,5 @@ dependencies {
     testImplementation("org.json:json:20260522")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
+    androidTestImplementation("androidx.room:room-testing:2.8.4")
 }
