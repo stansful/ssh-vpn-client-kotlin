@@ -352,11 +352,44 @@ Fingerprint behavior:
 - UDP DNS на port `53`.
 - DNS-over-TCP через SSH.
 - DNS-over-HTTPS fallback на Cloudflare `cloudflare-dns.com` / `1.1.1.1:443`, если DNS-over-TCP деградирует.
+- VoIP UDP на Telegram-рефлекторы - relay поверх TCP (см. ниже).
+
+### 15.1 VoIP UDP relay
+
+SSH не умеет форвардить UDP: `direct-tcpip` - это только TCP. Из-за этого звонки Telegram
+раньше не работали, а обычные приложения (HTTP/HTTPS) проблем не замечали.
+
+Рефлекторы Telegram принимают тот же самый набор датаграмм по TCP на том же `IP:port`, что и по
+UDP, в MTProto-транспорте `intermediate`. Forwarder этим и пользуется:
+
+- destination-IP проверяется по анонсированным Telegram префиксам (`TelegramNetworks`,
+  источник - `core.telegram.org/resources/cidr.txt`);
+- на каждый UDP flow (`client ip:port` -> `reflector ip:port`) открывается один SSH `direct-tcpip`
+  канал;
+- в канал один раз пишется пролог `0xEEEEEEEE`, дальше каждая датаграмма уходит как
+  `uint32 little-endian длина + payload` без изменений;
+- первая датаграмма клиента - 40-байтный UDP-ping рефлектора; TCP-транспорт вместо него ожидает
+  20-байтный hello (`peer_tag(16) | 00 00 00 00`), поэтому relay отправляет hello и следом сам
+  ping, чтобы клиентский UDP state machine получил ответ;
+- входящий поток разбирается обратно на кадры и отдаётся в TUN как UDP-датаграммы от
+  `reflector ip:port`;
+- лимиты: `24` одновременных flow, uplink-очередь на flow `64 KiB` и `256` датаграмм, `16`
+  датаграмм за один проход control-воркера, connect timeout `5 s`, idle-таймаут `45 s` с
+  проверкой каждые `15 s`;
+- downlink пишется в TUN с ограниченным ожиданием `25 ms` и дропается вместо блокировки writer.
 
 Ограничения:
 
-- Произвольный non-DNS UDP не проксируется.
-- Legacy-поле `enableUdpForwarding` осталось только для совместимости схемы; no-op переключатель удалён из UI.
+- Произвольный non-DNS UDP (QUIC, STUN, игры, WireGuard) по-прежнему не проксируется и отбивается
+  ICMP `port unreachable`; ICMP теперь rate-limited (token bucket `8` пакетов, refill `250 ms`) и
+  пишется в TUN best-effort, поэтому UDP-флуд больше не может засадить writer queue и уронить
+  туннель.
+- Relay работает только для рефлекторов Telegram: у других протоколов нет TCP-транспорта с той же
+  семантикой датаграмм.
+- Если Telegram договорился о версии стека без reflector-поддержки, звонок всё равно может не
+  подняться - это решается на стороне Telegram, не в приложении.
+- Legacy-поле `enableUdpForwarding` осталось только для совместимости схемы; no-op переключатель
+  удалён из UI, relay включён всегда.
 
 Оптимизации forwarder:
 
@@ -959,7 +992,8 @@ Backup:
 
 ## 33. Основные известные ограничения
 
-- SSH режим полноценно проксирует TCP и DNS. Произвольный UDP не поддержан.
+- SSH режим полноценно проксирует TCP и DNS, плюс VoIP UDP на Telegram-рефлекторы поверх TCP.
+  Произвольный UDP (QUIC, STUN, игры) не поддержан и отбивается rate-limited ICMP.
 - Legacy `enableUdpForwarding` не показывается в UI и не означает full UDP forwarding.
 - OpenSource зависит от скачанного Xray runtime core. Без core подключение заблокировано.
 - Smart Connect также зависит от Xray core, но установить/обновить его можно прямо из Smart settings без перехода в OpenSource.

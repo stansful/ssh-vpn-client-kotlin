@@ -15,6 +15,7 @@ import com.stansful.sshvpnclient.domain.repository.ProxyProfileRepository
 import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyParseResult
 import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyShareLinkParser
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -261,6 +262,8 @@ class RoomProxyProfileRepository(
     private suspend fun deleteSecretsBestEffort(ids: Collection<String>) {
         try {
             secretStorage.deleteSecrets(ids)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (_: Exception) {
             // The Room row already points at the new revision; an orphan is safer than rollback.
         }

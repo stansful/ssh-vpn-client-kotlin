@@ -79,7 +79,10 @@ class Tun2SocksManager {
                 check(sshSession.isConnected) { "SSH session is not connected" }
 
                 if (enableUdpForwarding) {
-                    log("UDP forwarding requested; custom Kotlin forwarder supports TCP and DNS UDP/53 only")
+                    log(
+                        "UDP forwarding requested; SSH carries TCP, DNS UDP/53 and VoIP reflector " +
+                            "UDP relayed over the reflector TCP transport",
+                    )
                 }
 
                 val runToken = Any()

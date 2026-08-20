@@ -46,6 +46,7 @@ private const val DEFAULT_TUN_WRITE_QUEUE_CAPACITY = 256
 private const val DEFAULT_OUTBOUND_PACKET_POOL_CAPACITY = 64
 private const val COALESCED_UPLOAD_CHUNK_BYTES = 64 * 1024
 private const val HARD_MAX_ACTIVE_TCP_SESSIONS = 128
+private const val HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS = 24
 private const val DEFAULT_MAX_ACTIVE_TCP_SESSIONS = HARD_MAX_ACTIVE_TCP_SESSIONS
 private const val DEFAULT_SESSION_PRESSURE_THRESHOLD = 96
 private const val DEFAULT_SESSION_PRESSURE_TARGET = 72
@@ -487,6 +488,29 @@ internal class TunPacketWriter(
         }
     }
 
+    /** Enqueues with a bounded wait; the packet is dropped instead of stalling the caller. */
+    fun offerWithin(packet: TunWritePacket, waitMs: Long): Boolean {
+        if (packet.length !in 1..packet.buffer.size || !writerRunning.get()) {
+            packet.recycle()
+            return false
+        }
+        val accepted = try {
+            queue.offer(packet) || (waitMs > 0L && queue.offer(packet, waitMs, TimeUnit.MILLISECONDS))
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+        if (!accepted) {
+            packet.recycle()
+            return false
+        }
+        if (!writerRunning.get() && queue.remove(packet)) {
+            packet.recycle()
+            return false
+        }
+        return true
+    }
+
     fun stop() {
         writerRunning.set(false)
         thread?.interrupt()
@@ -517,6 +541,7 @@ internal class KotlinTunForwarder(
     private val stoppedLatch = CountDownLatch(1)
     private val sessions = ConcurrentHashMap<TcpKey, TcpProxySession>()
     private val activeDnsChannels = ConcurrentHashMap.newKeySet<ChannelDirectTCPIP>()
+    private val udpSessions = ConcurrentHashMap<UdpKey, UdpProxySession>()
     private val sshSessionReference = AtomicReference<Session?>(sshSession)
     private val transportLock = Any()
     private var transportGeneration = 0L
@@ -555,6 +580,24 @@ internal class KotlinTunForwarder(
             )
         }
     }
+    private val udpDatagramSender = object : UdpDatagramSender {
+        override fun send(
+            sourceAddress: Int,
+            destinationAddress: Int,
+            sourcePort: Int,
+            destinationPort: Int,
+            payload: ByteArray,
+        ) {
+            sendUdpPacket(
+                sourceAddress = sourceAddress,
+                destinationAddress = destinationAddress,
+                sourcePort = sourcePort,
+                destinationPort = destinationPort,
+                payload = payload,
+                bestEffort = true,
+            )
+        }
+    }
     private val packetId = AtomicInteger(1)
     private val dnsFailureStreak = AtomicInteger(0)
     private var dnsTcpRetryAfterMs = 0L
@@ -567,8 +610,10 @@ internal class KotlinTunForwarder(
     @Volatile
     private var readThread: Thread? = null
 
-    @Volatile
-    private var unsupportedUdpLogged = false
+    private val udpRejectLimiter = TokenBucketRateLimiter(
+        capacity = UDP_REJECT_BURST,
+        refillIntervalMs = UDP_REJECT_REFILL_INTERVAL_MS,
+    )
 
     fun start(onStopped: (String) -> Unit) {
         if (!running.compareAndSet(false, true)) return
@@ -588,7 +633,8 @@ internal class KotlinTunForwarder(
                 "sshWindow=${config.sshChannelWindowBytes}B, " +
                 "uploadQueue=${config.maxPendingUploadBytesPerFlow}B/flow, " +
                 "sessions=${config.maxActiveTcpSessions}, tunWriter=${config.tunWriteQueueCapacity} packets, " +
-                "dnsTimeout=${config.dnsQueryTimeoutMs}ms",
+                "dnsTimeout=${config.dnsQueryTimeoutMs}ms, " +
+                "voipUdpRelay=$HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS flows",
         )
         readThread = Thread(
             {
@@ -605,6 +651,7 @@ internal class KotlinTunForwarder(
                     running.set(false)
                     closeSessions()
                     closeActiveDnsChannels()
+                    closeUdpSessions()
                     executors.shutdownNow()
                     runCatching { input.close() }
                     tunWriterReference.getAndSet(null)?.stop()
@@ -624,6 +671,7 @@ internal class KotlinTunForwarder(
         if (!running.getAndSet(false)) return
         closeSessions()
         closeActiveDnsChannels()
+        closeUdpSessions()
         tunWriterReference.getAndSet(null)?.stop()
         runCatching { vpnInterface.close() }
         executors.shutdownNow()
@@ -640,6 +688,7 @@ internal class KotlinTunForwarder(
             resetDnsFailureStateLocked()
             closeSessions(resetClients = true)
             closeActiveDnsChannels()
+            closeUdpSessions()
         }
     }
 
@@ -650,6 +699,7 @@ internal class KotlinTunForwarder(
             resetDnsFailureStateLocked()
             closeSessions()
             closeActiveDnsChannels()
+            closeUdpSessions()
             sshSessionReference.set(sshSession)
         }
     }
@@ -809,14 +859,9 @@ internal class KotlinTunForwarder(
     private fun handleUdpPacket(buffer: ByteArray, packet: Ipv4Packet) {
         val udp = PacketCodec.parseUdp(buffer, packet) ?: return
         if (udp.destinationPort != DNS_PORT) {
-            if (!unsupportedUdpLogged) {
-                unsupportedUdpLogged = true
-                log(
-                    "Custom Kotlin forwarder rejects non-DNS UDP with ICMP unreachable; " +
-                        "only TCP and DNS UDP/53 are supported",
-                )
+            if (forwardVoipDatagram(buffer, packet, udp) == UdpRelayDecision.NOT_RELAYABLE) {
+                rejectUnsupportedUdp(buffer, packet)
             }
-            sendIcmpPortUnreachable(buffer, packet)
             return
         }
         val payload = buffer.copyOfRange(udp.payloadOffset, udp.payloadOffset + udp.payloadLength)
@@ -840,6 +885,74 @@ internal class KotlinTunForwarder(
         }
     }
 
+    /**
+     * SSH `direct-tcpip` cannot carry UDP, so VoIP reflector flows are relayed over the reflector's
+     * own MTProto TCP transport. Everything else stays unsupported and is rejected below.
+     */
+    private fun forwardVoipDatagram(
+        buffer: ByteArray,
+        packet: Ipv4Packet,
+        udp: UdpPacket,
+    ): UdpRelayDecision {
+        if (udp.payloadLength <= 0) return UdpRelayDecision.NOT_RELAYABLE
+        if (!TelegramNetworks.containsIpv4(packet.destination)) return UdpRelayDecision.NOT_RELAYABLE
+        val key = UdpKey(
+            clientAddress = packet.source,
+            clientPort = udp.sourcePort,
+            remoteAddress = packet.destination,
+            remotePort = udp.destinationPort,
+        )
+        // A missing session means the SSH transport is down or the flow cap is reached. The packet is
+        // dropped like the TCP path drops SYNs while reconnecting: answering ICMP would make the
+        // client mark a perfectly good reflector as dead.
+        val session = udpSessions[key] ?: createUdpSession(key) ?: return UdpRelayDecision.DEFERRED
+        val payload = buffer.copyOfRange(udp.payloadOffset, udp.payloadOffset + udp.payloadLength)
+        return if (session.onClientDatagram(payload)) {
+            UdpRelayDecision.ACCEPTED
+        } else {
+            UdpRelayDecision.DEFERRED
+        }
+    }
+
+    private fun createUdpSession(key: UdpKey): UdpProxySession? {
+        // scheduleIdleCleanup() can close the session, and closing removes it from udpSessions,
+        // so it must never run inside the computeIfAbsent mapping function.
+        var createdSession: UdpProxySession? = null
+        val session = synchronized(transportLock) {
+            val activeSshSession = sshSessionReference.get()?.takeIf { it.isConnected } ?: return null
+            if (!udpSessions.containsKey(key) && udpSessions.size >= HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS) {
+                diagnostics.logUdpRelayLimit(HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS)
+                return null
+            }
+            udpSessions.computeIfAbsent(key) {
+                UdpProxySession(
+                    key = key,
+                    sshSession = activeSshSession,
+                    executors = executors,
+                    diagnostics = diagnostics,
+                    datagramSender = udpDatagramSender,
+                    maxDatagramBytes = config.tunMtu - IPV4_MIN_HEADER_SIZE - UDP_HEADER_SIZE,
+                    sshChannelWindowBytes = config.sshChannelWindowBytes,
+                    isForwarderRunning = running::get,
+                    onClosed = { closedKey, closedSession ->
+                        removeExpectedConcurrentEntry(udpSessions, closedKey, closedSession)
+                    },
+                ).also { created -> createdSession = created }
+            }
+        }
+        createdSession?.scheduleIdleCleanup()
+        return session
+    }
+
+    private fun rejectUnsupportedUdp(
+        buffer: ByteArray,
+        packet: Ipv4Packet,
+    ) {
+        if (!udpRejectLimiter.tryAcquire(elapsedRealtimeMs())) return
+        diagnostics.logUnsupportedUdp(addressToString(packet.destination))
+        sendIcmpPortUnreachable(buffer, packet)
+    }
+
     private fun sendIcmpPortUnreachable(
         originalBuffer: ByteArray,
         originalPacket: Ipv4Packet,
@@ -853,7 +966,7 @@ internal class KotlinTunForwarder(
             code = ICMP_CODE_PORT_UNREACHABLE,
             returnedPacket = returnedPacket,
         )
-        writePacket(
+        writeControlPacket(
             PacketCodec.buildIpv4Packet(
                 id = packetId.getAndIncrement(),
                 protocol = PROTOCOL_ICMP,
@@ -1297,6 +1410,7 @@ internal class KotlinTunForwarder(
         sourcePort: Int,
         destinationPort: Int,
         payload: ByteArray,
+        bestEffort: Boolean = false,
     ) {
         val udpDatagram = PacketCodec.buildUdpDatagram(
             sourceAddress = sourceAddress,
@@ -1305,19 +1419,34 @@ internal class KotlinTunForwarder(
             destinationPort = destinationPort,
             payload = payload,
         )
-        writePacket(
-            PacketCodec.buildIpv4Packet(
-                id = packetId.getAndIncrement(),
-                protocol = PROTOCOL_UDP,
-                sourceAddress = sourceAddress,
-                destinationAddress = destinationAddress,
-                payload = udpDatagram,
-            ),
+        val ipPacket = PacketCodec.buildIpv4Packet(
+            id = packetId.getAndIncrement(),
+            protocol = PROTOCOL_UDP,
+            sourceAddress = sourceAddress,
+            destinationAddress = destinationAddress,
+            payload = udpDatagram,
         )
+        if (bestEffort) {
+            writeControlPacket(ipPacket, TUN_RELAY_ENQUEUE_WAIT_MS)
+        } else {
+            writePacket(ipPacket)
+        }
     }
 
     private fun writePacket(packet: ByteArray) {
         writePacket(TunWritePacket(packet))
+    }
+
+    /**
+     * Best-effort write used by rejections and relayed VoIP datagrams: a media burst must never be
+     * able to saturate the TUN writer long enough to tear the whole tunnel down.
+     */
+    private fun writeControlPacket(packet: ByteArray, waitMs: Long = 0L) {
+        if (!running.get()) return
+        val writer = tunWriterReference.get() ?: return
+        if (!writer.offerWithin(TunWritePacket(packet), waitMs)) {
+            diagnostics.logTunWriteDropped()
+        }
     }
 
     private fun writePacket(packet: TunWritePacket) {
@@ -1414,6 +1543,11 @@ internal class KotlinTunForwarder(
         sessions.clear()
     }
 
+    private fun closeUdpSessions() {
+        udpSessions.values.forEach { session -> runCatching { session.close("forwarder shutdown") } }
+        udpSessions.clear()
+    }
+
     private fun closeActiveDnsChannels() {
         activeDnsChannels.forEach { channel -> runCatching { channel.disconnect() } }
         activeDnsChannels.clear()
@@ -1424,6 +1558,7 @@ internal class KotlinTunForwarder(
         running.set(false)
         closeSessions()
         closeActiveDnsChannels()
+        closeUdpSessions()
         executors.shutdownNow()
         runCatching { vpnInterface.close() }
         tunWriterReference.getAndSet(null)?.stop()
@@ -2316,6 +2451,258 @@ internal class KotlinTunForwarder(
         }
     }
 
+    /**
+     * Relays a single UDP flow over one SSH `direct-tcpip` channel using the reflector's MTProto
+     * `intermediate` framing (`0xEEEEEEEE` prologue, then `uint32` little-endian length per
+     * datagram). SSH cannot forward UDP, so this is what keeps VoIP media inside the tunnel instead
+     * of dropping it or leaking it around the VPN.
+     */
+    private class UdpProxySession(
+        private val key: UdpKey,
+        private val sshSession: Session,
+        private val executors: ForwarderExecutors,
+        private val diagnostics: ForwarderDiagnostics,
+        private val datagramSender: UdpDatagramSender,
+        private val maxDatagramBytes: Int,
+        private val sshChannelWindowBytes: Int,
+        private val isForwarderRunning: () -> Boolean,
+        private val onClosed: (UdpKey, UdpProxySession) -> Unit,
+    ) {
+        private val lock = ReentrantLock()
+        private val pending = ArrayDeque<ByteArray>()
+        private val closed = AtomicBoolean(false)
+        private val lastActivityAtMs = AtomicLong(elapsedRealtimeMs())
+        private val decoder = MtProtoIntermediateDecoder(maxChunkBytes = REMOTE_READ_BUFFER_SIZE)
+        private var pendingBytes = 0
+        private var uplinkScheduled = false
+        private var prologueSent = false
+        private var idleCleanupFuture: ScheduledFuture<*>? = null
+
+        @Volatile
+        private var channel: ChannelDirectTCPIP? = null
+
+        @Volatile
+        private var remoteOutput: OutputStream? = null
+
+        /** Returns true when the flow is owned by this relay, even if the datagram had to be dropped. */
+        fun onClientDatagram(payload: ByteArray): Boolean {
+            if (closed.get()) return false
+            if (payload.size > MtProtoIntermediateTransport.MAX_FRAME_BYTES) return true
+            val accepted = lock.withLock {
+                if (
+                    pending.size >= MAX_PENDING_UDP_UPLINK_DATAGRAMS ||
+                    pendingBytes + payload.size > MAX_PENDING_UDP_UPLINK_BYTES
+                ) {
+                    false
+                } else {
+                    pending.addLast(payload)
+                    pendingBytes += payload.size
+                    true
+                }
+            }
+            if (!accepted) {
+                diagnostics.logUdpRelayDropped(addressToString(key.remoteAddress))
+                return true
+            }
+            lastActivityAtMs.set(elapsedRealtimeMs())
+            requestUplink()
+            return true
+        }
+
+        fun scheduleIdleCleanup() {
+            if (closed.get()) return
+            val future = executors.scheduleCleanup(UDP_RELAY_IDLE_CHECK_MS) { runIdleCleanup() }
+            if (future == null) {
+                close("cleanup worker pool is saturated")
+                return
+            }
+            lock.withLock { idleCleanupFuture = future }
+            if (closed.get()) {
+                future.cancel(false)
+            }
+        }
+
+        fun close(reason: String) {
+            if (!closed.compareAndSet(false, true)) return
+            var activeChannel: ChannelDirectTCPIP? = null
+            var activeFuture: ScheduledFuture<*>? = null
+            lock.withLock {
+                activeChannel = channel
+                activeFuture = idleCleanupFuture
+                channel = null
+                remoteOutput = null
+                idleCleanupFuture = null
+                pending.clear()
+                pendingBytes = 0
+            }
+            activeFuture?.cancel(false)
+            runCatching { activeChannel?.disconnect() }
+            diagnostics.logUdpRelayClosed(addressToString(key.remoteAddress), key.remotePort, reason)
+            onClosed(key, this)
+        }
+
+        private fun runIdleCleanup() {
+            if (closed.get()) return
+            val idleForMs = elapsedRealtimeMs() - lastActivityAtMs.get()
+            if (!isForwarderRunning() || idleForMs >= UDP_RELAY_IDLE_TTL_MS) {
+                close("idle for ${idleForMs / 1_000}s")
+            } else {
+                scheduleIdleCleanup()
+            }
+        }
+
+        private fun requestUplink() {
+            val shouldSchedule = lock.withLock {
+                if (uplinkScheduled) {
+                    false
+                } else {
+                    uplinkScheduled = true
+                    true
+                }
+            }
+            if (!shouldSchedule) return
+            val scheduled = executors.executeControl { runUplink() }
+            if (!scheduled) {
+                lock.withLock { uplinkScheduled = false }
+                close("control worker pool is saturated")
+            }
+        }
+
+        private fun runUplink() {
+            var reschedule = false
+            try {
+                if (closed.get() || !isForwarderRunning()) return
+                if (remoteOutput == null) {
+                    connectRemote()
+                }
+                drainUplink()
+            } catch (error: Exception) {
+                close(error.message ?: error::class.java.simpleName)
+                return
+            } finally {
+                lock.withLock {
+                    uplinkScheduled = false
+                    reschedule = pending.isNotEmpty()
+                }
+            }
+            if (reschedule && !closed.get() && isForwarderRunning()) {
+                requestUplink()
+            }
+        }
+
+        private fun connectRemote() {
+            val host = addressToString(key.remoteAddress)
+            var nextChannel: ChannelDirectTCPIP? = null
+            try {
+                diagnostics.logUdpRelayOpen(host, key.remotePort)
+                nextChannel = sshSession.openChannel("direct-tcpip") as ChannelDirectTCPIP
+                nextChannel.setHost(host)
+                nextChannel.setPort(key.remotePort)
+                nextChannel.setOrgIPAddress(addressToString(key.clientAddress))
+                nextChannel.setOrgPort(key.clientPort)
+                DirectTcpipChannelTuning.setLocalWindowSize(nextChannel, sshChannelWindowBytes)
+                val input = nextChannel.inputStream
+                val output = nextChannel.outputStream
+                nextChannel.connect(UDP_RELAY_CONNECT_TIMEOUT_MS)
+                val readChannel = nextChannel
+                lock.withLock {
+                    channel = readChannel
+                    remoteOutput = output
+                }
+                val readScheduled = executors.executeRemoteRead { readRemote(readChannel, input) }
+                if (!readScheduled) {
+                    throw VpnConnectionException("remote read worker pool is saturated")
+                }
+            } catch (error: Exception) {
+                lock.withLock {
+                    channel = null
+                    remoteOutput = null
+                }
+                runCatching { nextChannel?.disconnect() }
+                diagnostics.logUdpRelayFailure(
+                    host = host,
+                    port = key.remotePort,
+                    message = error.message ?: error::class.java.simpleName,
+                )
+                throw error
+            }
+        }
+
+        /** Bounded so one busy flow cannot monopolize a control worker, mirroring the TCP uploader. */
+        private fun drainUplink() {
+            var written = 0
+            while (written < MAX_UDP_DATAGRAMS_PER_UPLINK_RUN) {
+                val payload = nextPendingDatagram() ?: return
+                writeDatagram(payload)
+                written += 1
+            }
+        }
+
+        private fun nextPendingDatagram(): ByteArray? = lock.withLock {
+            val next = pending.pollFirst() ?: return@withLock null
+            pendingBytes -= next.size
+            next
+        }
+
+        /**
+         * The client believes it speaks UDP, so its first datagram is the 40-byte reflector ping.
+         * The TCP transport instead expects a 20-byte hello that registers the connection, so both
+         * are sent: the hello registers us, the verbatim ping still gets its answer back.
+         */
+        private fun writeDatagram(payload: ByteArray) {
+            val output = remoteOutput ?: throw VpnConnectionException("UDP relay channel is not connected")
+            if (!prologueSent) {
+                output.write(MtProtoIntermediateTransport.prologue())
+                if (ReflectorHandshake.isUdpHello(payload)) {
+                    val hello = ReflectorHandshake.tcpHello(payload)
+                    output.write(MtProtoIntermediateTransport.encodeFrame(hello))
+                }
+                prologueSent = true
+            }
+            output.write(MtProtoIntermediateTransport.encodeFrame(payload))
+            output.flush()
+        }
+
+        private fun readRemote(activeChannel: ChannelDirectTCPIP, input: InputStream) {
+            val buffer = ByteArray(REMOTE_READ_BUFFER_SIZE)
+            try {
+                while (!closed.get() && isForwarderRunning()) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    if (read == 0) continue
+                    lastActivityAtMs.set(elapsedRealtimeMs())
+                    decoder.offer(buffer, read, ::deliverDatagram)
+                }
+                close("reflector closed the relay stream")
+            } catch (error: Exception) {
+                if (!closed.get() && isForwarderRunning()) {
+                    diagnostics.logUdpRelayFailure(
+                        host = addressToString(key.remoteAddress),
+                        port = key.remotePort,
+                        message = error.message ?: error::class.java.simpleName,
+                    )
+                }
+                close(error.message ?: error::class.java.simpleName)
+            } finally {
+                runCatching { activeChannel.disconnect() }
+            }
+        }
+
+        private fun deliverDatagram(frame: ByteArray) {
+            if (frame.size > maxDatagramBytes) {
+                diagnostics.logUdpRelayDropped(addressToString(key.remoteAddress))
+                return
+            }
+            datagramSender.send(
+                sourceAddress = key.remoteAddress,
+                destinationAddress = key.clientAddress,
+                sourcePort = key.remotePort,
+                destinationPort = key.clientPort,
+                payload = frame,
+            )
+        }
+    }
+
     private class ForwarderDiagnostics(
         private val log: (String) -> Unit,
     ) {
@@ -2329,6 +2716,13 @@ internal class KotlinTunForwarder(
         private val dnsFallbackCount = AtomicInteger(0)
         private val workerRejectedCount = AtomicInteger(0)
         private val sessionLimitCount = AtomicInteger(0)
+        private val udpRelayOpenCount = AtomicInteger(0)
+        private val udpRelayFailureCount = AtomicInteger(0)
+        private val udpRelayClosedCount = AtomicInteger(0)
+        private val udpRelayDroppedCount = AtomicInteger(0)
+        private val udpRelayLimitCount = AtomicInteger(0)
+        private val unsupportedUdpCount = AtomicInteger(0)
+        private val tunWriteDroppedCount = AtomicInteger(0)
 
         fun logTcpOpen(host: String, port: Int) {
             logLimited(
@@ -2410,6 +2804,63 @@ internal class KotlinTunForwarder(
             )
         }
 
+        fun logUdpRelayOpen(host: String, port: Int) {
+            logLimited(
+                counter = udpRelayOpenCount,
+                message = "TUN UDP relay: opening reflector stream over SSH to $host:$port",
+                suppressedMessage = "TUN UDP relay: further per-flow open logs suppressed",
+            )
+        }
+
+        fun logUdpRelayFailure(host: String, port: Int, message: String) {
+            logLimited(
+                counter = udpRelayFailureCount,
+                message = "TUN UDP relay failed: $host:$port: $message",
+                suppressedMessage = "TUN UDP relay: further failure logs suppressed",
+            )
+        }
+
+        fun logUdpRelayClosed(host: String, port: Int, reason: String) {
+            logLimited(
+                counter = udpRelayClosedCount,
+                message = "TUN UDP relay closed $host:$port: $reason",
+                suppressedMessage = "TUN UDP relay: further close logs suppressed",
+            )
+        }
+
+        fun logUdpRelayDropped(host: String) {
+            logLimited(
+                counter = udpRelayDroppedCount,
+                message = "TUN UDP relay dropped a datagram for $host: relay queue is full",
+                suppressedMessage = "TUN UDP relay: further datagram drop logs suppressed",
+            )
+        }
+
+        fun logUdpRelayLimit(limit: Int) {
+            logLimited(
+                counter = udpRelayLimitCount,
+                message = "TUN UDP relay flow limit reached ($limit); rejecting new flow",
+                suppressedMessage = "TUN UDP relay: further flow-limit logs suppressed",
+            )
+        }
+
+        fun logUnsupportedUdp(host: String) {
+            logLimited(
+                counter = unsupportedUdpCount,
+                message = "TUN UDP: $host is not a relayable destination; " +
+                    "SSH carries TCP, DNS UDP/53 and VoIP reflector UDP only",
+                suppressedMessage = "TUN UDP: further unsupported-destination logs suppressed",
+            )
+        }
+
+        fun logTunWriteDropped() {
+            logLimited(
+                counter = tunWriteDroppedCount,
+                message = "TUN writer queue is full; dropping a best-effort packet",
+                suppressedMessage = "TUN writer: further best-effort drop logs suppressed",
+            )
+        }
+
         private fun logLimited(
             counter: AtomicInteger,
             message: String,
@@ -2423,6 +2874,19 @@ internal class KotlinTunForwarder(
     }
 
     private data class TcpKey(
+        val clientAddress: Int,
+        val clientPort: Int,
+        val remoteAddress: Int,
+        val remotePort: Int,
+    )
+
+    private enum class UdpRelayDecision {
+        NOT_RELAYABLE,
+        ACCEPTED,
+        DEFERRED,
+    }
+
+    private data class UdpKey(
         val clientAddress: Int,
         val clientPort: Int,
         val remoteAddress: Int,
@@ -2830,7 +3294,9 @@ internal class KotlinTunForwarder(
         const val MAX_DNS_QUEUE_SIZE = 256
         const val DNS_TIMEOUT_WORKER_THREADS = 4
         const val MIN_REMOTE_READ_THREADS = 0
-        const val MAX_REMOTE_READ_THREADS = HARD_MAX_ACTIVE_TCP_SESSIONS
+        const val REMOTE_READ_THREAD_SLACK = 16
+        const val MAX_REMOTE_READ_THREADS =
+            HARD_MAX_ACTIVE_TCP_SESSIONS + HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS + REMOTE_READ_THREAD_SLACK
         const val CLEANUP_WORKER_THREADS = 1
         const val WORKER_KEEP_ALIVE_MS = 15_000L
         const val CLEANUP_WORKER_KEEP_ALIVE_MS = 60_000L
@@ -2853,6 +3319,15 @@ internal class KotlinTunForwarder(
         const val REMOTE_FIN_SESSION_TTL_MS = 30_000L
         const val CLIENT_FIN_SESSION_TTL_MS = 60_000L
         const val PRESSURE_IDLE_SESSION_TTL_MS = 35_000L
+        const val UDP_REJECT_BURST = 8
+        const val UDP_REJECT_REFILL_INTERVAL_MS = 250L
+        const val UDP_RELAY_IDLE_CHECK_MS = 15_000L
+        const val UDP_RELAY_IDLE_TTL_MS = 45_000L
+        const val MAX_PENDING_UDP_UPLINK_BYTES = 64 * 1024
+        const val MAX_PENDING_UDP_UPLINK_DATAGRAMS = 256
+        const val MAX_UDP_DATAGRAMS_PER_UPLINK_RUN = 16
+        const val UDP_RELAY_CONNECT_TIMEOUT_MS = 5_000
+        const val TUN_RELAY_ENQUEUE_WAIT_MS = 25L
         const val PRESSURE_CLEANUP_INITIAL_DELAY_MS = 1_000L
         const val PRESSURE_CLEANUP_RECHECK_MS = 20_000L
         const val ACTIVITY_TIMESTAMP_UPDATE_INTERVAL_MS = 1_000L
@@ -2901,6 +3376,16 @@ internal fun <K : Any, V : Any> removeExpectedConcurrentEntry(
     key: K,
     expectedValue: V,
 ): Boolean = entries.remove(key, expectedValue)
+
+private fun interface UdpDatagramSender {
+    fun send(
+        sourceAddress: Int,
+        destinationAddress: Int,
+        sourcePort: Int,
+        destinationPort: Int,
+        payload: ByteArray,
+    )
+}
 
 private fun interface TcpPacketSender {
     fun send(

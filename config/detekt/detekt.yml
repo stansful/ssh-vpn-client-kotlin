@@ -1,0 +1,187 @@
+# Detekt configuration for shadow-ssh.
+#
+# Philosophy: this codebase is already clean (0 TODO, 1 `!!`, no logging of secrets).
+# The rules below are tuned to *hold that line* and to catch the bug classes that actually
+# bit this project, rather than to produce a wall of style noise on day one.
+#
+# Anything currently violated at scale is set to `active: false` with a TODO so it can be
+# switched on file-by-file during the refactoring described in docs/IMPROVEMENT_PLAN.md.
+
+build:
+  maxIssues: 0
+  excludeCorrectable: false
+
+config:
+  validation: true
+  warningsAsErrors: false
+
+processors:
+  active: true
+
+console-reports:
+  active: true
+
+comments:
+  active: true
+  UndocumentedPublicClass:
+    active: false
+  UndocumentedPublicFunction:
+    active: false
+  UndocumentedPublicProperty:
+    active: false
+
+complexity:
+  active: true
+  ComplexCondition:
+    active: true
+    threshold: 5
+  CyclomaticComplexMethod:
+    active: true
+    threshold: 20
+  LargeClass:
+    active: true
+    threshold: 600
+    # TODO(IMPROVEMENT_PLAN 1.4): remove exclusions as god-files are split up.
+    excludes: &godFiles
+      - '**/vpn/KotlinTunForwarder.kt'
+      - '**/vpn/SshVpnService.kt'
+      - '**/vpn/SmartConnectVpnService.kt'
+      - '**/vpn/OpenSourceVpnService.kt'
+      - '**/xray/XrayCoreBridge.kt'
+      - '**/ui/opensource/OpenSourceViewModel.kt'
+      - '**/ui/opensource/OpenSourceScreen.kt'
+      - '**/ui/smartconnect/SmartConnectScreen.kt'
+  LongMethod:
+    active: true
+    threshold: 80
+    excludes: *godFiles
+  LongParameterList:
+    active: true
+    functionThreshold: 8
+    constructorThreshold: 12
+    ignoreDefaultParameters: true
+    ignoreAnnotated: [ 'Composable' ]
+  NestedBlockDepth:
+    active: true
+    threshold: 6
+  TooManyFunctions:
+    active: true
+    thresholdInFiles: 40
+    thresholdInClasses: 30
+    thresholdInObjects: 30
+    ignorePrivate: false
+    excludes: *godFiles
+
+coroutines:
+  active: true
+  GlobalCoroutineUsage:
+    active: true
+  RedundantSuspendModifier:
+    active: true
+  SleepInsteadOfDelay:
+    active: true
+  SuspendFunWithFlowReturnType:
+    active: true
+
+empty-blocks:
+  active: true
+  EmptyFunctionBlock:
+    active: true
+    ignoreOverridden: true
+
+exceptions:
+  active: true
+  # The rule this project actually needs: a broad catch must not eat coroutine cancellation.
+  SwallowedException:
+    active: true
+    ignoredExceptionTypes:
+      - 'InterruptedException'
+      - 'MalformedURLException'
+      - 'NumberFormatException'
+      - 'ParseException'
+      - 'RejectedExecutionException'
+    allowedExceptionNameRegex: '_|(ignore|expected).*'
+  TooGenericExceptionCaught:
+    active: true
+    exceptionNames:
+      - 'Error'
+      - 'Throwable'
+    # `Exception` is intentionally absent: network/tunnel loops legitimately catch it.
+    # The guard against swallowed cancellation is SwallowedException above plus the
+    # CancellationExceptionRethrow lint in scripts/check-cancellation.sh.
+    allowedExceptionNameRegex: '_|(ignore|expected).*'
+  TooGenericExceptionThrown:
+    active: true
+  ThrowingExceptionsWithoutMessageOrCause:
+    active: false
+  PrintStackTrace:
+    active: true
+  RethrowCaughtException:
+    active: false
+
+naming:
+  active: true
+  FunctionNaming:
+    active: true
+    functionPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ignoreAnnotated: [ 'Composable' ]
+  TopLevelPropertyNaming:
+    active: true
+    constantPattern: '[A-Z][_A-Z0-9]*'
+  MatchingDeclarationName:
+    active: false
+
+performance:
+  active: true
+  SpreadOperator:
+    active: false
+
+potential-bugs:
+  active: true
+  UnsafeCallOnNullableType:
+    active: true
+  UnsafeCast:
+    active: true
+  ImplicitDefaultLocale:
+    active: true
+  LateinitUsage:
+    active: false
+  IgnoredReturnValue:
+    active: true
+
+style:
+  active: true
+  ForbiddenComment:
+    active: true
+    comments:
+      - reason: 'Track work in the issue tracker, not in the source.'
+        value: 'FIXME:'
+      - reason: 'Track work in the issue tracker, not in the source.'
+        value: 'STOPSHIP:'
+  MagicNumber:
+    active: false
+  MaxLineLength:
+    active: true
+    maxLineLength: 120
+    excludeCommentStatements: true
+  ReturnCount:
+    active: true
+    max: 6
+  ThrowsCount:
+    active: true
+    max: 4
+  UnusedImports:
+    active: true
+  UnusedPrivateMember:
+    active: true
+    ignoreAnnotated: [ 'Composable', 'Preview' ]
+  WildcardImport:
+    active: true
+    excludeImports:
+      - 'java.util.*'
+  UseCheckOrError:
+    active: true
+  UseRequire:
+    active: true
+  SerialVersionUIDInSerializableClass:
+    active: false

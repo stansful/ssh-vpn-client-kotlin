@@ -6,6 +6,7 @@ import com.stansful.sshvpnclient.domain.model.KeyInUseException
 import com.stansful.sshvpnclient.domain.model.SshPrivateKeySummary
 import com.stansful.sshvpnclient.domain.usecase.key.DeleteSshPrivateKeyUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyListUseCase
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
@@ -55,6 +56,8 @@ class KeyListViewModel(
                 message.value = "SSH key deleted"
             } catch (error: KeyInUseException) {
                 message.value = error.message
+            } catch (cancellation: CancellationException) {
+                throw cancellation
             } catch (error: Exception) {
                 message.value = error.message ?: "Unable to delete SSH key"
             }

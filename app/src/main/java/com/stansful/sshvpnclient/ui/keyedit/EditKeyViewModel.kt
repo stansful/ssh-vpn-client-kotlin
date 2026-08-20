@@ -7,6 +7,7 @@ import com.stansful.sshvpnclient.domain.model.ValidationException
 import com.stansful.sshvpnclient.domain.usecase.key.AddSshPrivateKeyUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyByIdUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.UpdateSshPrivateKeyUseCase
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -71,6 +72,8 @@ class EditKeyViewModel(
                 mutableState.update {
                     it.copy(errors = error.errors.associate { item -> item.field to item.message })
                 }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
             } catch (error: Exception) {
                 mutableState.update { it.copy(message = error.message ?: "Unable to save SSH key") }
             }

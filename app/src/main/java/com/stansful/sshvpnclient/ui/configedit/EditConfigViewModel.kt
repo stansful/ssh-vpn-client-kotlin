@@ -10,6 +10,7 @@ import com.stansful.sshvpnclient.domain.usecase.config.AddSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.GetSshConfigByIdUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.UpdateSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyListUseCase
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -118,6 +119,8 @@ class EditConfigViewModel(
                 mutableState.update {
                     it.copy(errors = error.errors.associate { item -> item.field to item.message })
                 }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
             } catch (error: Exception) {
                 mutableState.update { it.copy(message = error.message ?: "Unable to save configuration") }
             }

@@ -6,6 +6,7 @@ import java.io.Closeable
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -82,6 +83,9 @@ class SshTerminalSession internal constructor(
             if (isOpen.get()) {
                 onClosed("remote shell closed")
             }
+        } catch (cancellation: CancellationException) {
+            // Scope cancellation is a normal shutdown path, not a remote terminal failure.
+            throw cancellation
         } catch (error: Exception) {
             if (isOpen.get()) {
                 onClosed(error.message ?: error::class.java.simpleName)

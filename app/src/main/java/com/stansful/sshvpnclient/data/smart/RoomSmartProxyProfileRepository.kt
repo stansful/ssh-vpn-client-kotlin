@@ -19,6 +19,7 @@ import com.stansful.sshvpnclient.domain.repository.SmartProxyBatchFinalization
 import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyParseResult
 import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyShareLinkParser
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -338,6 +339,8 @@ class RoomSmartProxyProfileRepository(
     private suspend fun deleteSecretsBestEffort(ids: Collection<String>) {
         try {
             secretStorage.deleteSecrets(ids)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (_: Exception) {
             // The Room row is already gone or points at a new revision; retain an orphan safely.
         }

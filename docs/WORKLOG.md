@@ -33,11 +33,38 @@ After each block it is updated with the actual result, verification status, and 
 ## Known Limits For This Pass
 
 - SSH-over-TUN forwarding now has an in-project Kotlin forwarding engine, but still requires platform/device testing for production confidence.
-- TCP and DNS are routed through SSH; arbitrary non-DNS UDP is still not proxied.
+- TCP, DNS and VoIP reflector UDP are routed through SSH; arbitrary non-DNS UDP is still not proxied.
 - UDP forwarding is still represented as an experimental configuration flag.
 - Secrets must not be logged or stored in plain config/key records.
 
 ## Change Log
+
+### 2026-08-20 - VoIP UDP relay over the reflector TCP transport
+
+Result:
+
+- Telegram calls used to fail on SSH VPN (including `Selected apps`) because SSH `direct-tcpip`
+  carries TCP only, so every non-DNS UDP datagram was answered with ICMP `port unreachable`.
+- Added `vpn/VoipUdpTransport.kt`: Telegram IPv4 prefixes, MTProto `intermediate` framing
+  (`0xEEEEEEEE` prologue plus `uint32` little-endian length), reflector hello helpers and a token
+  bucket rate limiter.
+- `KotlinTunForwarder` now relays UDP flows whose destination is a Telegram reflector over a
+  dedicated SSH `direct-tcpip` channel per flow, translating datagrams to and from the reflector TCP
+  transport; call media stays inside the tunnel and no server-side component is required.
+- The relay sends the 20-byte TCP hello once after the prologue and forwards the client's 40-byte
+  UDP ping verbatim, so the client's UDP state machine still receives its answer.
+- Unsupported UDP rejection is now rate limited and written best effort, so a media burst can no
+  longer saturate the bounded TUN writer queue and tear the whole tunnel down.
+- Relay limits: 24 concurrent flows, 64 KiB uplink queue per flow, 16 datagrams per control worker
+  run, 45 s idle TTL. Relay flows are closed on stop, transport pause/resume and forwarder failure.
+- Added `VoipUdpTransportTest` covering prefix matching, framing, stream reassembly, malformed
+  frame lengths, hello detection and rate limiting.
+
+Verification:
+
+- `scripts/test.sh` and on-device call testing are still required; this pass was written without a
+  local Android SDK.
+
 
 ### 2026-07-16 - Dark system surfaces and Public Routes action hierarchy
 

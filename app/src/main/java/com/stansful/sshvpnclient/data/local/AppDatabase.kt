@@ -19,7 +19,10 @@ import com.stansful.sshvpnclient.data.smart.SmartProxyProfileEntity
         SmartProxyProfileEntity::class,
     ],
     version = 4,
-    exportSchema = false,
+    // Schemas are exported to app/schemas and committed so that MigrationTestHelper can
+    // replay every historical version. Never disable this: without exported schemas a broken
+    // migration is only discovered by users losing their SSH keys.
+    exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun sshConfigDao(): SshConfigDao

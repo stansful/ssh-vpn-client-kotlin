@@ -34,6 +34,10 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
 - Split tunneling:
   - `Proxy` - через туннель идут все приложения;
   - `Selected apps` - через туннель идут только выбранные приложения.
+- Звонки Telegram работают через SSH-туннель: SSH не умеет UDP, поэтому VoIP-датаграммы на
+  рефлекторы Telegram заворачиваются в их же MTProto TCP-транспорт поверх `direct-tcpip`.
+  Сервер настраивать не нужно, медиатрафик остаётся внутри туннеля. Остальной non-DNS UDP
+  (QUIC, STUN, игры) по-прежнему не проксируется и отбивается rate-limited ICMP.
 - Выбор приложений с поиском, чекбоксами и системными приложениями.
 - Quick Settings tile `shadow-ssh` для Connect / Disconnect из шторки Android.
 - Кнопка `Check tunnel`, которая проверяет доступность `youtube.com:443` через SSH-туннель.

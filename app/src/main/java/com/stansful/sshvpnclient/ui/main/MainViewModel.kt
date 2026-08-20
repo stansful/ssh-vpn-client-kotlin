@@ -21,6 +21,7 @@ import com.stansful.sshvpnclient.ui.common.AppUpdateUiState
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
 import com.stansful.sshvpnclient.vpn.SshTerminalSession
 import java.util.ArrayDeque
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -203,6 +204,10 @@ class MainViewModel(
         viewModelScope.launch {
             try {
                 connectVpnUseCase()
+            } catch (cancellation: CancellationException) {
+                // The repository outlives this ViewModel; a cancelled scope must not publish
+                // a connection error into app-wide VPN state.
+                throw cancellation
             } catch (error: Exception) {
                 vpnConnectionRepository.setError(
                     uiState.value.selectedConfig?.id,
@@ -229,6 +234,8 @@ class MainViewModel(
                 if (vpnState.value.isConnectedSsh()) {
                     tunnelCheckResult.value = TunnelCheckResult.SUCCESS
                 }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
             } catch (_: Exception) {
                 // Detailed failure is already written to diagnostics by SshConnectionManager.
                 if (vpnState.value.isConnectedSsh()) {
