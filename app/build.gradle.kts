@@ -140,6 +140,17 @@ android {
     }
 }
 
+// APK file names carry the app version so a downloaded build stays identifiable:
+// app-universal-release-3.0.0.apk, app-arm64-v8a-release-3.0.0.apk, app-debug-3.0.0.apk.
+androidComponents {
+    onVariants { variant ->
+        variant.outputs.forEach { output ->
+            val defaultFileName = output.outputFileName.orNull ?: return@forEach
+            output.outputFileName.set(defaultFileName.removeSuffix(".apk") + "-$appVersionName.apk")
+        }
+    }
+}
+
 // Exported Room schemas are the input for the migration tests. They must be committed.
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")

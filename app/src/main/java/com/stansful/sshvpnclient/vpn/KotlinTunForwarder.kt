@@ -54,6 +54,15 @@ internal const val DEFAULT_TUN_WRITE_ENQUEUE_TIMEOUT_MS = 5_000L
 private const val DEFAULT_DNS_QUERY_TIMEOUT_MS = 10_000L
 private const val TUN_WRITER_THREAD_NAME = "kotlin-tun-writer"
 
+// Well-known UDP ports worth naming in the diagnostics: these are the flows a user is most likely
+// to notice failing.
+private const val HTTP_PORT = 80
+private const val HTTPS_PORT = 443
+private const val NTP_PORT = 123
+private const val STUN_PORT = 3478
+private const val STUN_ALT_PORT = 3479
+private const val TURN_TLS_PORT = 5349
+
 internal fun shouldSendRemoteFin(
     streamReachedEof: Boolean,
     channelStillConnected: Boolean,
@@ -542,6 +551,11 @@ internal class KotlinTunForwarder(
     private val sessions = ConcurrentHashMap<TcpKey, TcpProxySession>()
     private val activeDnsChannels = ConcurrentHashMap.newKeySet<ChannelDirectTCPIP>()
     private val udpSessions = ConcurrentHashMap<UdpKey, UdpProxySession>()
+    private val udpRelayCooldowns = ConcurrentHashMap<UdpRelayTarget, Long>()
+    private val udpRelayTcpPorts = ConcurrentHashMap<Int, Int>()
+    private val udpRejectedFlows = ConcurrentHashMap<UdpRejectKey, Long>()
+    private val udpRejectionSummary = UdpRejectionSummary()
+    private val reflectorVerdictLogged = AtomicBoolean(false)
     private val sshSessionReference = AtomicReference<Session?>(sshSession)
     private val transportLock = Any()
     private var transportGeneration = 0L
@@ -610,6 +624,8 @@ internal class KotlinTunForwarder(
     @Volatile
     private var readThread: Thread? = null
 
+    // Only a ceiling against a UDP flood filling the TUN writer queue; per-flow pacing below is
+    // what decides who gets an answer.
     private val udpRejectLimiter = TokenBucketRateLimiter(
         capacity = UDP_REJECT_BURST,
         refillIntervalMs = UDP_REJECT_REFILL_INTERVAL_MS,
@@ -634,7 +650,7 @@ internal class KotlinTunForwarder(
                 "uploadQueue=${config.maxPendingUploadBytesPerFlow}B/flow, " +
                 "sessions=${config.maxActiveTcpSessions}, tunWriter=${config.tunWriteQueueCapacity} packets, " +
                 "dnsTimeout=${config.dnsQueryTimeoutMs}ms, " +
-                "voipUdpRelay=$HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS flows",
+                "voipUdpRelay=$HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS flows over reflector TCP $REFLECTOR_TCP_PORT",
         )
         readThread = Thread(
             {
@@ -860,7 +876,7 @@ internal class KotlinTunForwarder(
         val udp = PacketCodec.parseUdp(buffer, packet) ?: return
         if (udp.destinationPort != DNS_PORT) {
             if (forwardVoipDatagram(buffer, packet, udp) == UdpRelayDecision.NOT_RELAYABLE) {
-                rejectUnsupportedUdp(buffer, packet)
+                rejectUnsupportedUdp(buffer, packet, udp)
             }
             return
         }
@@ -905,7 +921,12 @@ internal class KotlinTunForwarder(
         // A missing session means the SSH transport is down or the flow cap is reached. The packet is
         // dropped like the TCP path drops SYNs while reconnecting: answering ICMP would make the
         // client mark a perfectly good reflector as dead.
-        val session = udpSessions[key] ?: createUdpSession(key) ?: return UdpRelayDecision.DEFERRED
+        val session = udpSessions[key] ?: run {
+            if (isUdpRelayCoolingDown(packet.destination, udp.destinationPort)) {
+                return UdpRelayDecision.NOT_RELAYABLE
+            }
+            createUdpSession(key)
+        } ?: return UdpRelayDecision.DEFERRED
         val payload = buffer.copyOfRange(udp.payloadOffset, udp.payloadOffset + udp.payloadLength)
         return if (session.onClientDatagram(payload)) {
             UdpRelayDecision.ACCEPTED
@@ -933,7 +954,9 @@ internal class KotlinTunForwarder(
                     datagramSender = udpDatagramSender,
                     maxDatagramBytes = config.tunMtu - IPV4_MIN_HEADER_SIZE - UDP_HEADER_SIZE,
                     sshChannelWindowBytes = config.sshChannelWindowBytes,
+                    relayPorts = relayTcpPortPolicy(key),
                     isForwarderRunning = running::get,
+                    onConnectFailed = ::onUdpRelayConnectFailed,
                     onClosed = { closedKey, closedSession ->
                         removeExpectedConcurrentEntry(udpSessions, closedKey, closedSession)
                     },
@@ -944,13 +967,97 @@ internal class KotlinTunForwarder(
         return session
     }
 
+    private fun isUdpRelayCoolingDown(address: Int, port: Int): Boolean {
+        val target = UdpRelayTarget(address, port)
+        val retryAfterMs = udpRelayCooldowns[target] ?: return false
+        if (elapsedRealtimeMs() < retryAfterMs) return true
+        udpRelayCooldowns.remove(target, retryAfterMs)
+        return false
+    }
+
+    /**
+     * Reflectors answer the TCP transport on 443 only. A SYN to the UDP media port is dropped by
+     * Telegram itself - it behaves the same from the SSH server and from unrelated networks - so
+     * 443 is tried first and the media port stays as a second candidate for servers that do
+     * forward it. The port that answered is remembered for the rest of the transport, so later
+     * flows to the same reflector do not pay for the dead candidate again.
+     */
+    private fun relayTcpPortPolicy(key: UdpKey): RelayTcpPortPolicy {
+        val candidates = linkedSetOf<Int>()
+        udpRelayTcpPorts[key.remoteAddress]?.let { confirmed -> candidates.add(confirmed) }
+        candidates.add(REFLECTOR_TCP_PORT)
+        candidates.add(key.remotePort)
+        return RelayTcpPortPolicy(candidates.toList()) { confirmed ->
+            udpRelayTcpPorts[key.remoteAddress] = confirmed
+        }
+    }
+
+    /**
+     * A reflector that answered on none of its TCP ports is not going to answer on the next
+     * datagram either, and every retry costs a channel timeout per candidate. Park the destination
+     * and let the client fall back to whatever transport it has left.
+     */
+    private fun onUdpRelayConnectFailed(key: UdpKey) {
+        val target = UdpRelayTarget(key.remoteAddress, key.remotePort)
+        udpRelayCooldowns[target] = elapsedRealtimeMs() + UDP_RELAY_FAILURE_COOLDOWN_MS
+        diagnostics.logUdpRelayDisabled(
+            host = addressToString(key.remoteAddress),
+            port = key.remotePort,
+            cooldownMs = UDP_RELAY_FAILURE_COOLDOWN_MS,
+        )
+        // Every reflector port refused or dropped the connection, so the verdict is about the SSH
+        // server's route to Telegram's VoIP range, not about this one flow. Said once per transport.
+        if (reflectorVerdictLogged.compareAndSet(false, true)) {
+            diagnostics.logReflectorUnreachable()
+        }
+    }
+
+    /**
+     * SSH cannot carry this datagram, and the client only learns that from the ICMP answer: a
+     * connected UDP socket - QUIC, most game clients - surfaces it as `ECONNREFUSED` and gives up
+     * on UDP at once, while silence costs it a full handshake timeout before it tries TCP. So the
+     * first datagram of every flow is answered, repeats are answered once a second, and the global
+     * bucket is only there to keep a flood from filling the TUN writer queue.
+     */
     private fun rejectUnsupportedUdp(
         buffer: ByteArray,
         packet: Ipv4Packet,
+        udp: UdpPacket,
     ) {
-        if (!udpRejectLimiter.tryAcquire(elapsedRealtimeMs())) return
-        diagnostics.logUnsupportedUdp(addressToString(packet.destination))
+        val nowMs = elapsedRealtimeMs()
+        val key = UdpRejectKey(
+            clientAddress = packet.source,
+            clientPort = udp.sourcePort,
+            remoteAddress = packet.destination,
+            remotePort = udp.destinationPort,
+        )
+        val lastRejectedAtMs = udpRejectedFlows[key]
+        if (lastRejectedAtMs != null && nowMs - lastRejectedAtMs < UDP_REJECT_FLOW_INTERVAL_MS) return
+        if (!udpRejectLimiter.tryAcquire(nowMs)) return
+        rememberRejectedFlow(key, nowMs)
+        if (lastRejectedAtMs == null) {
+            diagnostics.logUnsupportedUdp(
+                host = addressToString(packet.destination),
+                port = udp.destinationPort,
+            )
+            udpRejectionSummary.recordFlow(udp.destinationPort)
+        }
+        udpRejectionSummary.takeDueSummary(nowMs)?.let(diagnostics::logUdpRejectionSummary)
         sendIcmpPortUnreachable(buffer, packet)
+    }
+
+    /**
+     * The table is rate-limiter memory, not state anything depends on, so it is bounded by dropping
+     * stale entries first and by starting over if a flood outruns even that.
+     */
+    private fun rememberRejectedFlow(key: UdpRejectKey, nowMs: Long) {
+        if (udpRejectedFlows.size >= MAX_TRACKED_REJECTED_UDP_FLOWS) {
+            udpRejectedFlows.entries.removeAll { entry -> nowMs - entry.value >= UDP_REJECT_FLOW_TTL_MS }
+            if (udpRejectedFlows.size >= MAX_TRACKED_REJECTED_UDP_FLOWS) {
+                udpRejectedFlows.clear()
+            }
+        }
+        udpRejectedFlows[key] = nowMs
     }
 
     private fun sendIcmpPortUnreachable(
@@ -1546,6 +1653,11 @@ internal class KotlinTunForwarder(
     private fun closeUdpSessions() {
         udpSessions.values.forEach { session -> runCatching { session.close("forwarder shutdown") } }
         udpSessions.clear()
+        // Reachability verdicts belong to the SSH transport that produced them.
+        udpRelayCooldowns.clear()
+        udpRelayTcpPorts.clear()
+        udpRejectedFlows.clear()
+        reflectorVerdictLogged.set(false)
     }
 
     private fun closeActiveDnsChannels() {
@@ -1598,6 +1710,17 @@ internal class KotlinTunForwarder(
             NamedThreadFactory(REMOTE_READ_THREAD_PREFIX),
             ThreadPoolExecutor.AbortPolicy(),
         )
+        private val udpRelayExecutor = ThreadPoolExecutor(
+            UDP_RELAY_WORKER_THREADS,
+            UDP_RELAY_WORKER_THREADS,
+            WORKER_KEEP_ALIVE_MS,
+            TimeUnit.MILLISECONDS,
+            LinkedBlockingQueue(MAX_UDP_RELAY_QUEUE_SIZE),
+            NamedThreadFactory(UDP_RELAY_THREAD_PREFIX),
+            ThreadPoolExecutor.AbortPolicy(),
+        ).apply {
+            allowCoreThreadTimeOut(true)
+        }
         private val cleanupExecutor = ScheduledThreadPoolExecutor(
             CLEANUP_WORKER_THREADS,
             NamedThreadFactory(CLEANUP_THREAD_PREFIX),
@@ -1621,6 +1744,10 @@ internal class KotlinTunForwarder(
 
         fun executeDns(task: () -> Unit): Boolean {
             return execute(DNS_POOL_NAME, dnsExecutor, task)
+        }
+
+        fun executeUdpRelay(task: () -> Unit): Boolean {
+            return execute(UDP_RELAY_POOL_NAME, udpRelayExecutor, task)
         }
 
         fun executeRemoteRead(task: () -> Unit): Boolean {
@@ -1653,6 +1780,7 @@ internal class KotlinTunForwarder(
 
         fun shutdownNow() {
             controlExecutor.shutdownNow()
+            udpRelayExecutor.shutdownNow()
             dnsExecutor.shutdownNow()
             remoteReadExecutor.shutdownNow()
             cleanupExecutor.shutdownNow()
@@ -1849,8 +1977,16 @@ internal class KotlinTunForwarder(
         private fun connectRemote() {
             var nextChannel: ChannelDirectTCPIP? = null
             val host = addressToString(key.remoteAddress)
+            // Telegram flows get their own log budget: this is how we see whether the call is trying
+            // its own TCP relay through the tunnel at all.
+            val isTelegram = TelegramNetworks.containsIpv4(key.remoteAddress)
+            val startedAtMs = elapsedRealtimeMs()
             try {
-                diagnostics.logTcpOpen(host, key.remotePort)
+                if (isTelegram) {
+                    diagnostics.logTelegramTcpOpen(host, key.remotePort)
+                } else {
+                    diagnostics.logTcpOpen(host, key.remotePort)
+                }
                 nextChannel = sshSession.openChannel("direct-tcpip") as ChannelDirectTCPIP
                 nextChannel.setHost(host)
                 nextChannel.setPort(key.remotePort)
@@ -1860,6 +1996,13 @@ internal class KotlinTunForwarder(
                 val input = nextChannel.inputStream
                 val output = nextChannel.outputStream
                 nextChannel.connect(SSH_CHANNEL_CONNECT_TIMEOUT_MS)
+                if (isTelegram) {
+                    diagnostics.logTelegramTcpEstablished(
+                        host = host,
+                        port = key.remotePort,
+                        elapsedMs = elapsedRealtimeMs() - startedAtMs,
+                    )
+                }
                 markActivity()
                 lock.withLock {
                     if (state == TcpState.CLOSED) {
@@ -1887,11 +2030,13 @@ internal class KotlinTunForwarder(
                     connecting = false
                 }
                 nextChannel?.disconnect()
-                diagnostics.logTcpFailure(
-                    host = host,
-                    port = key.remotePort,
-                    message = error.message ?: error::class.java.simpleName,
-                )
+                val failure = "${error.message ?: error::class.java.simpleName} " +
+                    "after ${elapsedRealtimeMs() - startedAtMs}ms"
+                if (isTelegram) {
+                    diagnostics.logTelegramTcpFailure(host, key.remotePort, failure)
+                } else {
+                    diagnostics.logTcpFailure(host, key.remotePort, failure)
+                }
                 sendResetAndClose()
             }
         }
@@ -2452,10 +2597,71 @@ internal class KotlinTunForwarder(
     }
 
     /**
-     * Relays a single UDP flow over one SSH `direct-tcpip` channel using the reflector's MTProto
-     * `intermediate` framing (`0xEEEEEEEE` prologue, then `uint32` little-endian length per
-     * datagram). SSH cannot forward UDP, so this is what keeps VoIP media inside the tunnel instead
-     * of dropping it or leaking it around the VPN.
+     * The per-flow log budget runs out long before a busy device does, so rejections keep being
+     * counted after it and a compact summary goes out once a minute. Without it, "which app is
+     * failing" stops being visible right after the first few lines.
+     */
+    private class UdpRejectionSummary {
+        private val lock = Any()
+        private val flowsByPort = HashMap<Int, Int>()
+        private var flows = 0
+        private var lastSummaryAtMs = Long.MIN_VALUE
+
+        fun recordFlow(port: Int) {
+            synchronized(lock) {
+                flows += 1
+                if (flowsByPort.size < MAX_SUMMARISED_UDP_PORTS || flowsByPort.containsKey(port)) {
+                    flowsByPort[port] = (flowsByPort[port] ?: 0) + 1
+                }
+            }
+        }
+
+        fun takeDueSummary(nowMs: Long): String? = synchronized(lock) {
+            if (lastSummaryAtMs == Long.MIN_VALUE) {
+                lastSummaryAtMs = nowMs
+                return@synchronized null
+            }
+            val elapsedMs = nowMs - lastSummaryAtMs
+            if (flows == 0 || elapsedMs < UDP_REJECT_SUMMARY_INTERVAL_MS) return@synchronized null
+            val topPorts = flowsByPort.entries
+                .sortedByDescending { entry -> entry.value }
+                .take(TOP_SUMMARISED_UDP_PORTS)
+                .joinToString { entry -> "${entry.key}${describeUdpPort(entry.key)} x${entry.value}" }
+            val summary = "$flows unsupported flow(s) rejected in the last ${elapsedMs / 1_000}s" +
+                if (topPorts.isEmpty()) "" else "; top ports: $topPorts"
+            flows = 0
+            flowsByPort.clear()
+            lastSummaryAtMs = nowMs
+            summary
+        }
+    }
+
+    /**
+     * The reflector TCP ports one flow may use, and where to record the one that answered so the
+     * next flow to the same reflector starts with a port that is known to work.
+     */
+    private class RelayTcpPortPolicy(
+        val candidates: List<Int>,
+        private val onPortConfirmed: (Int) -> Unit,
+    ) {
+        init {
+            require(candidates.isNotEmpty()) { "A relay needs at least one candidate TCP port" }
+        }
+
+        fun confirm(port: Int) {
+            onPortConfirmed(port)
+        }
+    }
+
+    /**
+     * Relays a single UDP flow over one SSH `direct-tcpip` channel using the reflector's own TCP
+     * transport: the `0xEEEEEEEE` prologue and the `uint32` little-endian length prefix per packet
+     * that tgcalls' `RawTcpSocket` writes, carrying datagrams that are already self-describing
+     * (`peer_tag | sender_tag | big-endian size | payload`). SSH cannot forward UDP, so this is what
+     * keeps VoIP media inside the tunnel instead of dropping it or leaking it around the VPN.
+     *
+     * The stream goes to [REFLECTOR_TCP_PORT], not to the UDP media port the client is addressing:
+     * reflectors serve TCP on 443 alone.
      */
     private class UdpProxySession(
         private val key: UdpKey,
@@ -2465,7 +2671,9 @@ internal class KotlinTunForwarder(
         private val datagramSender: UdpDatagramSender,
         private val maxDatagramBytes: Int,
         private val sshChannelWindowBytes: Int,
+        private val relayPorts: RelayTcpPortPolicy,
         private val isForwarderRunning: () -> Boolean,
+        private val onConnectFailed: (UdpKey) -> Unit,
         private val onClosed: (UdpKey, UdpProxySession) -> Unit,
     ) {
         private val lock = ReentrantLock()
@@ -2476,6 +2684,7 @@ internal class KotlinTunForwarder(
         private var pendingBytes = 0
         private var uplinkScheduled = false
         private var prologueSent = false
+        private var readySignalled = false
         private var idleCleanupFuture: ScheduledFuture<*>? = null
 
         @Volatile
@@ -2561,10 +2770,10 @@ internal class KotlinTunForwarder(
                 }
             }
             if (!shouldSchedule) return
-            val scheduled = executors.executeControl { runUplink() }
+            val scheduled = executors.executeUdpRelay { runUplink() }
             if (!scheduled) {
                 lock.withLock { uplinkScheduled = false }
-                close("control worker pool is saturated")
+                close("UDP relay worker pool is saturated")
             }
         }
 
@@ -2590,14 +2799,52 @@ internal class KotlinTunForwarder(
             }
         }
 
+        /**
+         * Reflector TCP ports are tried in order, so a server that does forward the media port is
+         * still used while the common case - 443 - costs one attempt. Only a failure of every
+         * candidate parks the destination; a saturated read pool is a local problem and must not.
+         */
         private fun connectRemote() {
             val host = addressToString(key.remoteAddress)
+            var lastError: Exception? = null
+            for (tcpPort in relayPorts.candidates) {
+                if (closed.get() || !isForwarderRunning()) return
+                val startedAtMs = elapsedRealtimeMs()
+                try {
+                    openRelayChannel(host, tcpPort)
+                    relayPorts.confirm(tcpPort)
+                    diagnostics.logUdpRelayReady(
+                        host = host,
+                        udpPort = key.remotePort,
+                        tcpPort = tcpPort,
+                        elapsedMs = elapsedRealtimeMs() - startedAtMs,
+                    )
+                    return
+                } catch (error: Exception) {
+                    lastError = error
+                    diagnostics.logUdpRelayFailure(
+                        host = host,
+                        port = tcpPort,
+                        message = "${describeConnectFailure(elapsedRealtimeMs() - startedAtMs)}: " +
+                            "${error.message ?: error::class.java.simpleName}",
+                    )
+                    // A local shortage or a dead transport says nothing about the reflector.
+                    if (error is VpnConnectionException || closed.get() || !sshSession.isConnected) {
+                        throw error
+                    }
+                }
+            }
+            onConnectFailed(key)
+            throw lastError ?: VpnConnectionException("no reflector TCP port answered")
+        }
+
+        private fun openRelayChannel(host: String, tcpPort: Int) {
             var nextChannel: ChannelDirectTCPIP? = null
             try {
-                diagnostics.logUdpRelayOpen(host, key.remotePort)
+                diagnostics.logUdpRelayOpen(host = host, udpPort = key.remotePort, tcpPort = tcpPort)
                 nextChannel = sshSession.openChannel("direct-tcpip") as ChannelDirectTCPIP
                 nextChannel.setHost(host)
-                nextChannel.setPort(key.remotePort)
+                nextChannel.setPort(tcpPort)
                 nextChannel.setOrgIPAddress(addressToString(key.clientAddress))
                 nextChannel.setOrgPort(key.clientPort)
                 DirectTcpipChannelTuning.setLocalWindowSize(nextChannel, sshChannelWindowBytes)
@@ -2619,12 +2866,19 @@ internal class KotlinTunForwarder(
                     remoteOutput = null
                 }
                 runCatching { nextChannel?.disconnect() }
-                diagnostics.logUdpRelayFailure(
-                    host = host,
-                    port = key.remotePort,
-                    message = error.message ?: error::class.java.simpleName,
-                )
                 throw error
+            }
+        }
+
+        /**
+         * JSch collapses "the server refused the channel" and "the channel open timed out" into the
+         * same message, so the elapsed time is what tells a filtered port from a refused one.
+         */
+        private fun describeConnectFailure(elapsedMs: Long): String {
+            return if (elapsedMs >= UDP_RELAY_CONNECT_TIMEOUT_MS - CONNECT_VERDICT_SLACK_MS) {
+                "no answer in ${elapsedMs}ms, the SSH server saw no SYN-ACK (port filtered or dropped)"
+            } else {
+                "rejected in ${elapsedMs}ms by the SSH server or the destination"
             }
         }
 
@@ -2645,22 +2899,44 @@ internal class KotlinTunForwarder(
         }
 
         /**
-         * The client believes it speaks UDP, so its first datagram is the 40-byte reflector ping.
-         * The TCP transport instead expects a 20-byte hello that registers the connection, so both
-         * are sent: the hello registers us, the verbatim ping still gets its answer back.
+         * The client believes it speaks UDP, so its hello is the 40-byte reflector ping while the
+         * TCP transport registers a connection with a 20-byte hello. Every ping is translated, not
+         * only the first: the client keeps pinging as a keepalive, and a verbatim ping on the TCP
+         * stream would be read as a data packet with a `0xFFFFFFFF` size tag.
          */
         private fun writeDatagram(payload: ByteArray) {
             val output = remoteOutput ?: throw VpnConnectionException("UDP relay channel is not connected")
             if (!prologueSent) {
                 output.write(MtProtoIntermediateTransport.prologue())
-                if (ReflectorHandshake.isUdpHello(payload)) {
-                    val hello = ReflectorHandshake.tcpHello(payload)
-                    output.write(MtProtoIntermediateTransport.encodeFrame(hello))
-                }
                 prologueSent = true
+            }
+            if (ReflectorHandshake.isUdpHello(payload)) {
+                output.write(MtProtoIntermediateTransport.encodeFrame(ReflectorHandshake.tcpHello(payload)))
+                output.flush()
+                signalRelayReady(payload)
+                return
             }
             output.write(MtProtoIntermediateTransport.encodeFrame(payload))
             output.flush()
+        }
+
+        /**
+         * tgcalls marks a TCP reflector port ready as soon as the socket connects, but this client
+         * runs the UDP path, where readiness only arrives with an inbound packet carrying the peer
+         * tag. Without that answer the reflector candidate is never used even though the stream is
+         * up, so the relay produces the same signal once the TCP hello is on the wire.
+         */
+        private fun signalRelayReady(udpHello: ByteArray) {
+            val shouldSignal = lock.withLock {
+                if (readySignalled) {
+                    false
+                } else {
+                    readySignalled = true
+                    true
+                }
+            }
+            if (!shouldSignal) return
+            deliverDatagram(ReflectorHandshake.readyPong(udpHello))
         }
 
         private fun readRemote(activeChannel: ChannelDirectTCPIP, input: InputStream) {
@@ -2723,6 +2999,13 @@ internal class KotlinTunForwarder(
         private val udpRelayLimitCount = AtomicInteger(0)
         private val unsupportedUdpCount = AtomicInteger(0)
         private val tunWriteDroppedCount = AtomicInteger(0)
+        private val udpRelayDisabledCount = AtomicInteger(0)
+        private val udpRelayReadyCount = AtomicInteger(0)
+        private val udpRejectionSummaryCount = AtomicInteger(0)
+        private val reflectorUnreachableCount = AtomicInteger(0)
+        private val telegramTcpOpenCount = AtomicInteger(0)
+        private val telegramTcpEstablishedCount = AtomicInteger(0)
+        private val telegramTcpFailureCount = AtomicInteger(0)
 
         fun logTcpOpen(host: String, port: Int) {
             logLimited(
@@ -2804,11 +3087,23 @@ internal class KotlinTunForwarder(
             )
         }
 
-        fun logUdpRelayOpen(host: String, port: Int) {
+        fun logUdpRelayOpen(host: String, udpPort: Int, tcpPort: Int) {
             logLimited(
                 counter = udpRelayOpenCount,
-                message = "TUN UDP relay: opening reflector stream over SSH to $host:$port",
+                message = "TUN UDP relay: opening reflector TCP transport over SSH to $host:$tcpPort " +
+                    "for the UDP flow to port $udpPort",
                 suppressedMessage = "TUN UDP relay: further per-flow open logs suppressed",
+                limit = MAX_UDP_RELAY_LOGS,
+            )
+        }
+
+        fun logUdpRelayReady(host: String, udpPort: Int, tcpPort: Int, elapsedMs: Long) {
+            logLimited(
+                counter = udpRelayReadyCount,
+                message = "TUN UDP relay: reflector TCP transport to $host:$tcpPort connected in " +
+                    "${elapsedMs}ms; the UDP flow to port $udpPort is carried over it",
+                suppressedMessage = "TUN UDP relay: further transport-ready logs suppressed",
+                limit = MAX_UDP_RELAY_LOGS,
             )
         }
 
@@ -2817,6 +3112,7 @@ internal class KotlinTunForwarder(
                 counter = udpRelayFailureCount,
                 message = "TUN UDP relay failed: $host:$port: $message",
                 suppressedMessage = "TUN UDP relay: further failure logs suppressed",
+                limit = MAX_UDP_RELAY_LOGS,
             )
         }
 
@@ -2844,12 +3140,35 @@ internal class KotlinTunForwarder(
             )
         }
 
-        fun logUnsupportedUdp(host: String) {
+        fun logUnsupportedUdp(host: String, port: Int) {
             logLimited(
                 counter = unsupportedUdpCount,
-                message = "TUN UDP: $host is not a relayable destination; " +
-                    "SSH carries TCP, DNS UDP/53 and VoIP reflector UDP only",
+                message = "TUN UDP: $host:$port${describeUdpPort(port)} is not a relayable " +
+                    "destination; SSH carries TCP, DNS UDP/53 and VoIP reflector UDP only. " +
+                    "The client is told so with ICMP port unreachable, so it can fall back to TCP",
                 suppressedMessage = "TUN UDP: further unsupported-destination logs suppressed",
+                limit = MAX_UNSUPPORTED_UDP_LOGS,
+            )
+        }
+
+        fun logUdpRejectionSummary(summary: String) {
+            logLimited(
+                counter = udpRejectionSummaryCount,
+                message = "TUN UDP: $summary",
+                suppressedMessage = "TUN UDP: further rejection summaries suppressed",
+                limit = MAX_UDP_RELAY_LOGS,
+            )
+        }
+
+        fun logReflectorUnreachable() {
+            logLimited(
+                counter = reflectorUnreachableCount,
+                message = "TUN UDP relay: this SSH server reaches no TCP port of the Telegram VoIP " +
+                    "hosts - neither $REFLECTOR_TCP_PORT nor the media port - so call media cannot be " +
+                    "carried through it; the rest of Telegram is unaffected. The same hosts answer on " +
+                    "$REFLECTOR_TCP_PORT from other networks, so this is the server's egress path: " +
+                    "check its outbound filtering for Telegram VoIP prefixes, or use another server",
+                suppressedMessage = "TUN UDP relay: further reachability verdicts suppressed",
             )
         }
 
@@ -2861,14 +3180,53 @@ internal class KotlinTunForwarder(
             )
         }
 
+        fun logUdpRelayDisabled(host: String, port: Int, cooldownMs: Long) {
+            logLimited(
+                counter = udpRelayDisabledCount,
+                message = "TUN UDP relay disabled for $host:$port for ${cooldownMs / 1_000}s; " +
+                    "no reflector TCP port answered through the SSH server",
+                suppressedMessage = "TUN UDP relay: further disable logs suppressed",
+                limit = MAX_UDP_RELAY_LOGS,
+            )
+        }
+
+        fun logTelegramTcpOpen(host: String, port: Int) {
+            logLimited(
+                counter = telegramTcpOpenCount,
+                message = "TUN TCP to Telegram: opening SSH direct TCP to $host:$port",
+                suppressedMessage = "TUN TCP to Telegram: further open logs suppressed",
+                limit = MAX_TELEGRAM_TCP_LOGS,
+            )
+        }
+
+        fun logTelegramTcpEstablished(host: String, port: Int, elapsedMs: Long) {
+            logLimited(
+                counter = telegramTcpEstablishedCount,
+                message = "TUN TCP to Telegram: $host:$port connected in ${elapsedMs}ms",
+                suppressedMessage = "TUN TCP to Telegram: further connect logs suppressed",
+                limit = MAX_TELEGRAM_TCP_LOGS,
+            )
+        }
+
+        fun logTelegramTcpFailure(host: String, port: Int, message: String) {
+            logLimited(
+                counter = telegramTcpFailureCount,
+                message = "TUN TCP to Telegram failed: $host:$port: $message",
+                suppressedMessage = "TUN TCP to Telegram: further failure logs suppressed",
+                limit = MAX_TELEGRAM_TCP_LOGS,
+            )
+        }
+
         private fun logLimited(
             counter: AtomicInteger,
             message: String,
             suppressedMessage: String,
+            limit: Int = MAX_DETAILED_FORWARDER_LOGS,
         ) {
-            when (counter.incrementAndGet()) {
-                in 1..MAX_DETAILED_FORWARDER_LOGS -> log(message)
-                MAX_DETAILED_FORWARDER_LOGS + 1 -> log(suppressedMessage)
+            val seen = counter.incrementAndGet()
+            when {
+                seen <= limit -> log(message)
+                seen == limit + 1 -> log(suppressedMessage)
             }
         }
     }
@@ -2885,6 +3243,18 @@ internal class KotlinTunForwarder(
         ACCEPTED,
         DEFERRED,
     }
+
+    private data class UdpRelayTarget(
+        val address: Int,
+        val port: Int,
+    )
+
+    private data class UdpRejectKey(
+        val clientAddress: Int,
+        val clientPort: Int,
+        val remoteAddress: Int,
+        val remotePort: Int,
+    )
 
     private data class UdpKey(
         val clientAddress: Int,
@@ -3288,6 +3658,10 @@ internal class KotlinTunForwarder(
         const val DNS_TIMEOUT_POOL_NAME = "dns-timeout"
         const val REMOTE_READ_POOL_NAME = "remote-read"
         const val CLEANUP_POOL_NAME = "cleanup"
+        const val UDP_RELAY_THREAD_PREFIX = "kotlin-tun-udp-relay"
+        const val UDP_RELAY_POOL_NAME = "udp-relay"
+        const val UDP_RELAY_WORKER_THREADS = HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS
+        const val MAX_UDP_RELAY_QUEUE_SIZE = 256
         const val CONTROL_WORKER_THREADS = 8
         const val MAX_CONTROL_QUEUE_SIZE = 1_024
         const val DNS_WORKER_THREADS = 4
@@ -3301,6 +3675,8 @@ internal class KotlinTunForwarder(
         const val WORKER_KEEP_ALIVE_MS = 15_000L
         const val CLEANUP_WORKER_KEEP_ALIVE_MS = 60_000L
         const val MAX_DETAILED_FORWARDER_LOGS = 5
+        const val MAX_TELEGRAM_TCP_LOGS = 40
+        const val MAX_UDP_RELAY_LOGS = 40
         const val REMOTE_READ_BUFFER_SIZE = 16 * 1024
         const val SSH_CHANNEL_CONNECT_TIMEOUT_MS = 10_000
         const val DNS_PORT = 53
@@ -3319,14 +3695,28 @@ internal class KotlinTunForwarder(
         const val REMOTE_FIN_SESSION_TTL_MS = 30_000L
         const val CLIENT_FIN_SESSION_TTL_MS = 60_000L
         const val PRESSURE_IDLE_SESSION_TTL_MS = 35_000L
-        const val UDP_REJECT_BURST = 8
-        const val UDP_REJECT_REFILL_INTERVAL_MS = 250L
+        // One answer per new flow is the point, so the ceiling is generous and the pacing is
+        // per-flow: a silent drop costs the client a handshake timeout it does not need to pay.
+        const val UDP_REJECT_BURST = 64
+        const val UDP_REJECT_REFILL_INTERVAL_MS = 15L
+        const val UDP_REJECT_FLOW_INTERVAL_MS = 1_000L
+        const val UDP_REJECT_FLOW_TTL_MS = 60_000L
+        const val MAX_TRACKED_REJECTED_UDP_FLOWS = 256
+        const val UDP_REJECT_SUMMARY_INTERVAL_MS = 60_000L
+        const val MAX_SUMMARISED_UDP_PORTS = 16
+        const val TOP_SUMMARISED_UDP_PORTS = 3
+        const val MAX_UNSUPPORTED_UDP_LOGS = 20
         const val UDP_RELAY_IDLE_CHECK_MS = 15_000L
         const val UDP_RELAY_IDLE_TTL_MS = 45_000L
         const val MAX_PENDING_UDP_UPLINK_BYTES = 64 * 1024
         const val MAX_PENDING_UDP_UPLINK_DATAGRAMS = 256
         const val MAX_UDP_DATAGRAMS_PER_UPLINK_RUN = 16
-        const val UDP_RELAY_CONNECT_TIMEOUT_MS = 5_000
+        const val UDP_RELAY_CONNECT_TIMEOUT_MS = 2_000
+        // Long enough that a call stops hammering a dead reflector, short enough that a reflector
+        // parked during a flaky minute of transport comes back for the next call.
+        const val UDP_RELAY_FAILURE_COOLDOWN_MS = 300_000L
+        const val REFLECTOR_TCP_PORT = 443
+        const val CONNECT_VERDICT_SLACK_MS = 250
         const val TUN_RELAY_ENQUEUE_WAIT_MS = 25L
         const val PRESSURE_CLEANUP_INITIAL_DELAY_MS = 1_000L
         const val PRESSURE_CLEANUP_RECHECK_MS = 20_000L
@@ -3421,6 +3811,14 @@ private fun seqDistance(
 ): Long = (end - start) and 0xFFFF_FFFFL
 
 private fun initialSequence(): Long = System.nanoTime() and 0xFFFF_FFFFL
+
+/** Turns the ports that actually show up in these logs into something readable at a glance. */
+private fun describeUdpPort(port: Int): String = when (port) {
+    HTTP_PORT, HTTPS_PORT -> " (QUIC)"
+    STUN_PORT, STUN_ALT_PORT, TURN_TLS_PORT -> " (STUN/TURN)"
+    NTP_PORT -> " (NTP)"
+    else -> ""
+}
 
 private fun addressToString(address: Int): String {
     return listOf(

@@ -6,8 +6,9 @@ import java.net.ProtocolException
  * IPv4 prefixes announced by Telegram (`core.telegram.org/resources/cidr.txt`).
  *
  * Voice and video reflectors always live inside these ranges, so a non-DNS UDP flow that targets
- * them is reflector traffic and can be carried over the reflector's MTProto TCP transport instead
- * of being dropped: SSH `direct-tcpip` cannot carry UDP at all.
+ * them is reflector traffic and can be carried over the reflector's own TCP transport instead of
+ * being dropped: SSH `direct-tcpip` cannot carry UDP at all. That transport listens on 443; the
+ * UDP media ports drop TCP SYNs.
  */
 internal object TelegramNetworks {
     private val prefixes: List<Ipv4Prefix> = listOf(
@@ -180,9 +181,9 @@ internal class MtProtoIntermediateDecoder(
  *
  * A client that believes it speaks UDP opens the conversation with a 40-byte ping
  * (`peer_tag(16) | FF x12 | FE | FF x3 | 8 bytes`), while the reflector's TCP transport expects a
- * 20-byte hello (`peer_tag(16) | 00 00 00 00`) that registers the connection. The relay sends the
- * TCP hello once after the prologue and then forwards the client's datagrams verbatim, so the
- * client still receives the answer its UDP state machine waits for.
+ * 20-byte hello (`peer_tag(16) | 00 00 00 00`) that registers the connection. The relay translates
+ * every ping into that hello and forwards the remaining datagrams verbatim: data packets carry
+ * their own `peer_tag | sender_tag | big-endian size` header and need no rewriting.
  */
 internal object ReflectorHandshake {
     const val PEER_TAG_SIZE = 16
@@ -199,6 +200,20 @@ internal object ReflectorHandshake {
             if (payload[index] != FILLER_BYTE) return false
         }
         return true
+    }
+
+    /**
+     * The answer the client's UDP state machine is waiting for.
+     *
+     * tgcalls treats a reflector port as ready as soon as an inbound packet carries the peer tag,
+     * and treats a packet whose bytes 16..27 are `0xFF` as a control packet rather than media - the
+     * shape of the ping itself. Its TCP path never needs this because a connected socket is ready
+     * by definition, so the relay echoes the ping back once the TCP hello is on the wire and the
+     * client can start using the reflector it can no longer reach over UDP.
+     */
+    fun readyPong(udpHello: ByteArray): ByteArray {
+        require(isUdpHello(udpHello)) { "A ready pong is built from the ${UDP_HELLO_SIZE}-byte ping" }
+        return udpHello.copyOf()
     }
 
     fun tcpHello(peerTagSource: ByteArray): ByteArray {

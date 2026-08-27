@@ -298,18 +298,25 @@ internal class BoundedDiagnosticsBuffer(
     fun snapshot(): List<String> = entries.toList()
 }
 
+/**
+ * Per-flow destinations are the user's browsing history, so they never reach persisted diagnostics.
+ * The port survives: it is not identifying, and it is the one field that says whether a call is
+ * reaching for a reflector, for Telegram's TCP transport on 443, or for something else entirely.
+ */
 internal fun redactPersistentDestinationMetadata(message: String): String {
     val containsTunTcpMetadata = message.startsWith(TUN_TCP_DIAGNOSTIC_PREFIX) ||
         message.contains(" $TUN_TCP_DIAGNOSTIC_PREFIX")
-    return if (containsTunTcpMetadata) {
-        message.replace(IPV4_ENDPOINT_PATTERN, REDACTED_DESTINATION)
-    } else {
-        message
-    }
+    if (!containsTunTcpMetadata) return message
+    // Telegram's own addresses are infrastructure rather than browsing history, and they are the
+    // one thing a call diagnosis needs: whether the client reaches a reflector or only a data
+    // centre. The UDP relay lines already carry them.
+    if (message.contains(TELEGRAM_TUN_TCP_PREFIX)) return message
+    return message.replace(IPV4_ENDPOINT_PATTERN) { match -> REDACTED_DESTINATION + match.groupValues[1] }
 }
 
 private const val TUN_TCP_DIAGNOSTIC_PREFIX = "TUN TCP"
+private const val TELEGRAM_TUN_TCP_PREFIX = "TUN TCP to Telegram"
 private const val REDACTED_DESTINATION = "<destination>"
 private val IPV4_ENDPOINT_PATTERN = Regex(
-    pattern = "(?<![0-9.])(?:[0-9]{1,3}\\.){3}[0-9]{1,3}:[0-9]{1,5}(?![0-9])",
+    pattern = "(?<![0-9.])(?:[0-9]{1,3}\\.){3}[0-9]{1,3}(:[0-9]{1,5})?(?![0-9])",
 )

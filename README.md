@@ -35,9 +35,16 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
   - `Proxy` - через туннель идут все приложения;
   - `Selected apps` - через туннель идут только выбранные приложения.
 - Звонки Telegram работают через SSH-туннель: SSH не умеет UDP, поэтому VoIP-датаграммы на
-  рефлекторы Telegram заворачиваются в их же MTProto TCP-транспорт поверх `direct-tcpip`.
-  Сервер настраивать не нужно, медиатрафик остаётся внутри туннеля. Остальной non-DNS UDP
-  (QUIC, STUN, игры) по-прежнему не проксируется и отбивается rate-limited ICMP.
+  рефлекторы Telegram заворачиваются в их же TCP-транспорт поверх `direct-tcpip`, на порт `443`
+  рефлектора - на UDP-медиапорту (`599`, `1400`) TCP не слушает никто.
+  Сервер настраивать не нужно, медиатрафик остаётся внутри туннеля. Если SSH-сервер сам не
+  открывает TCP к VoIP-хостам Telegram, в логе появляется явный вердикт: звонки через такой
+  сервер не поднимутся, остальной Telegram при этом работает.
+- Остальной non-DNS UDP (QUIC, STUN, игры, звонки не-Telegram) через SSH не проксируется в
+  принципе: `direct-tcpip` несёт только TCP. На первую датаграмму каждого потока гарантированно
+  уходит ICMP port unreachable, чтобы клиент сразу ушёл на TCP, а не ждал свой таймаут; раз в
+  минуту в лог пишется сводка отклонённых потоков с портами. Полноценный UDP есть в режиме
+  `opensource` (Xray) - там TUN-инбаунд несёт и TCP, и UDP.
 - Выбор приложений с поиском, чекбоксами и системными приложениями.
 - Quick Settings tile `shadow-ssh` для Connect / Disconnect из шторки Android.
 - Кнопка `Check tunnel`, которая проверяет доступность `youtube.com:443` через SSH-туннель.
@@ -266,8 +273,10 @@ sdk.dir=/Users/<user>/Library/Android/sdk
 Выходной файл:
 
 ```text
-build/app/outputs/apk/release/app-universal-release.apk
+build/app/outputs/apk/release/app-universal-release-<version>.apk
 ```
+
+Каждый APK получает суффикс `versionName`, например `app-universal-release-3.0.0.apk` и `app-arm64-v8a-release-3.0.0.apk`.
 
 Если production signing переменные не заданы, скрипт автоматически создаёт локальный keystore в `.local/signing/`. Эта директория игнорируется git.
 
@@ -323,7 +332,7 @@ https://api.github.com/repos/stansful/ssh-vpn-client-kotlin/releases/latest
 Проверка подписи:
 
 ```bash
-apksigner verify --verbose build/app/outputs/apk/release/app-universal-release.apk
+apksigner verify --verbose build/app/outputs/apk/release/app-universal-release-*.apk
 ```
 
 ## Скрипты

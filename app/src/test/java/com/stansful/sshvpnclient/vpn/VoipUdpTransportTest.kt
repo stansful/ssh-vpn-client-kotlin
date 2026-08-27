@@ -195,6 +195,22 @@ class ReflectorHandshakeTest {
         assertArrayEquals(ByteArray(4), hello.copyOfRange(16, 20))
     }
 
+    @Test
+    fun `the ready pong keeps the peer tag and the control marker`() {
+        val pong = ReflectorHandshake.readyPong(udpHello())
+
+        assertEquals(ReflectorHandshake.UDP_HELLO_SIZE, pong.size)
+        assertArrayEquals(ByteArray(16) { index -> index.toByte() }, pong.copyOfRange(0, 16))
+        assertArrayEquals(ByteArray(12) { 0xFF.toByte() }, pong.copyOfRange(16, 28))
+    }
+
+    @Test
+    fun `a data packet cannot be turned into a ready pong`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ReflectorHandshake.readyPong(ByteArray(64) { index -> index.toByte() })
+        }
+    }
+
     private fun udpHello(): ByteArray {
         val hello = ByteArray(ReflectorHandshake.UDP_HELLO_SIZE)
         for (index in 0 until 16) {

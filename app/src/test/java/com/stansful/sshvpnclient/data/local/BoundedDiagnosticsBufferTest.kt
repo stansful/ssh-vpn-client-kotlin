@@ -47,7 +47,19 @@ class BoundedDiagnosticsBufferTest {
         )
 
         assertFalse(tunMessage.contains("203.0.113.10:443"))
-        assertTrue(tunMessage.contains("<destination>"))
+        assertTrue(tunMessage.contains("<destination>:443"))
         assertEquals("SSH socket remote=203.0.113.10:22", sshMessage)
+    }
+
+    @Test
+    fun `keeps Telegram addresses so call diagnosis stays possible`() {
+        val telegramMessage = redactPersistentDestinationMetadata(
+            "12:00:00 TUN TCP to Telegram: 91.108.9.69:443 connected in 118ms",
+        )
+
+        assertEquals(
+            "12:00:00 TUN TCP to Telegram: 91.108.9.69:443 connected in 118ms",
+            telegramMessage,
+        )
     }
 }

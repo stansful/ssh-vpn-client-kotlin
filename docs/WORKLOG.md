@@ -39,6 +39,165 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-08-28 - The server, not the client, is what blocks the call now
+
+Field run of the previous block. The relay dialled `443` as intended and the answer was immediate:
+`91.108.9.67:443` and `91.108.9.69:443` were **refused in 157 ms** through the SSH server, then the
+media ports burned the full 2 s timeout. The same two addresses accept TCP in 4 ms from an
+unrelated datacentre network, and Telegram's data centres on `443` connect fine through the same
+tunnel. So the reflector transport is reachable in general, but not from this SSH server: its
+egress path to Telegram's VoIP prefixes is filtered. No client-side change can carry the media
+through that server - Telegram's own TCP relay would take the same route.
+
+Plan:
+
+- Say that out loud in the diagnostics instead of leaving a reader to compare timings.
+- Stop hiding the one address that matters for a call diagnosis.
+- Make the fallback for everything else - QUIC, STUN, games - as fast as it can be, since that is
+  the only remaining lever on the client.
+
+Result:
+
+- One verdict line per transport when every reflector TCP port fails: the SSH server reaches none
+  of them, the same hosts answer on 443 from other networks, the rest of Telegram is unaffected,
+  check the server's egress or use another server.
+- `TUN TCP to Telegram` lines keep their address now. Everything else stays redacted, and the port
+  survives in both cases. Telegram's addresses are infrastructure, not browsing history, and the
+  relay lines have always carried them.
+- Unsupported UDP is now rejected per flow rather than under one shared budget: the first datagram
+  of every `client ip:port -> dst ip:port` flow always gets ICMP `port unreachable`, repeats get one
+  per second, and the token bucket (`64`, refill `15 ms`) is only a ceiling against a flood filling
+  the writer queue. A connected UDP socket - QUIC, most game clients - sees `ECONNREFUSED` at once
+  and switches to TCP instead of waiting out its handshake timeout. Before this, a burst of new
+  flows could consume the eight shared tokens and leave the rest in silence.
+- Rejected flows are logged with the port and a label (`443 (QUIC)`, `3478 (STUN/TURN)`), budget
+  raised to `20` lines, plus a once-a-minute summary of what is being rejected, so the picture
+  survives the log budget.
+- README and the technical documentation now state the boundary plainly: SSH carries TCP, DNS and
+  Telegram reflector media; everything else UDP needs the `opensource` (Xray) mode, whose TUN
+  inbound carries UDP natively.
+
+Verification:
+
+- `scripts/test.sh`, `scripts/lint.sh`, `scripts/build-debug.sh` on the Mac.
+- Reachability compared from two networks on the reflectors of the failing run: `91.108.9.67:443`
+  and `91.108.9.69:443` open in 4 ms from a neutral datacentre, refused in 157 ms through the SSH
+  server; media ports closed from both.
+- Open question for the next run, now answerable from the log: whether Telegram's own TCP relay
+  reaches `91.108.9.x:443` through the tunnel, or only `149.154.x:443`.
+
+### 2026-08-28 - The relay was dialling the wrong port
+
+Third pass on the same log. The previous entry read the evidence correctly - the reflector media
+ports do not answer TCP - and then drew the wrong conclusion, that nothing could be done from the
+client. Checking Telegram's own code and the reflectors themselves says otherwise: the TCP
+transport exists, it just does not live on the media port.
+
+Findings:
+
+- `tgcalls/v2/ReflectorPort.cpp` connects a TCP reflector through `RawTcpSocket`, whose framing is
+  exactly the one already implemented here: a single `0xEEEEEEEE` prologue, then a `uint32`
+  little-endian length per packet. The framing in `VoipUdpTransport.kt` was right all along.
+- A TCP reflector is registered with a 20-byte hello (`peer_tag | uint32 0`), and data packets are
+  identical on UDP and TCP (`peer_tag | sender_tag | big-endian size | payload | padding to 4`),
+  which is why relaying datagrams verbatim works at all.
+- `ReflectorPort` flips a TCP port to `STATE_READY` on socket connect, while the UDP path only
+  becomes ready when an inbound packet carries the peer tag. A relay that speaks TCP to the server
+  and UDP to the client therefore has to produce that inbound packet itself.
+- TCP `443` is open on every reflector in the failing log (`91.108.9.4`, `.67`, `.101`, `.121`),
+  from an unrelated datacenter network as well as from the SSH server; `599`, `598` and `1400`
+  drop the SYN everywhere. The relay had been dialling the UDP media port, so it could never have
+  connected, on any server.
+
+Plan:
+
+- Dial `443` for the reflector TCP transport, keep the UDP media port as a second candidate, and
+  remember the port that answered per reflector host.
+- Translate every reflector ping into the TCP hello instead of forwarding the ping verbatim after
+  it.
+- Answer the first ping locally so the client's UDP state machine marks the reflector ready.
+- Drop the one-shot `443` reachability probe: the real connect attempt now carries that
+  information.
+- Keep the destination port in persisted `TUN TCP` diagnostics so the next field log shows which
+  ports a call reaches for.
+
+Result:
+
+- `UdpProxySession` walks a candidate port list (`443`, then the UDP port), logs the port it
+  connected on, and reports the confirmed port back to the forwarder, which caches it per host for
+  the life of the SSH transport.
+- Only a failure of every candidate parks the destination; a saturated read pool no longer counts
+  as a reachability verdict. The park is `5` minutes instead of `30`, so a reflector parked during
+  a flaky minute of transport is available for the next call.
+- `ReflectorHandshake.readyPong` returns the ping the client sent; the relay delivers it once, right
+  after the TCP hello reaches the wire.
+- Removed `probeUdpRelayHost` / `runUdpRelayProbe` and the probe log category; added a
+  transport-ready log with the connect duration, and raised the UDP relay log budget from `5` to
+  `40` entries per category so a whole call fits in the log.
+- `redactPersistentDestinationMetadata` now redacts the address and keeps the port
+  (`<destination>:443`), which is what makes the next field log readable.
+- README and `docs/TECHNICAL_DOCUMENTATION.md` updated: the transport is on `443`, the ping is
+  translated rather than forwarded, and the readiness answer is documented.
+
+Verification:
+
+- `scripts/test.sh`, `scripts/lint.sh`, `scripts/build-debug.sh` on the Mac.
+- One on-device call, reading `TUN UDP relay` lines: the expected sequence is
+  `opening reflector TCP transport ... :443` followed by `reflector TCP transport ... connected`,
+  with no `disabled for` lines, and audio in both directions.
+
+### 2026-08-28 - Reflector ports are UDP-only, and the path to Telegram is fine
+
+Second on-device run. The relay still fails, but the probe timings rewrite the diagnosis: the
+reflector ports burn the full connect timeout (`5001ms`, `5002ms` - the SYN is dropped) while port
+443 on the *same* hosts fails in `180ms` and `313ms`. A fast failure is an RST, so the packet
+reached Telegram and came back: the SSH server routes to Telegram fine and the reflector ports are
+simply UDP-only. The earlier "the provider is blocking" reading was wrong.
+
+Result:
+
+- Probe verdict corrected: a failure that burns the timeout means dropped traffic, a fast failure
+  means the host is routable and refusing. The old wording claimed the host was unreachable.
+- Relay connect timeout cut to 2 s and the per-destination park extended to 30 minutes, since a
+  reflector port that drops SYNs will not start accepting them.
+- Added a dedicated log budget for TCP flows into Telegram prefixes (`TUN TCP to Telegram: ...`,
+  40 entries instead of the shared 5) including connect duration. This answers the one question the
+  logs could not: whether the call attempts Telegram's own TCP relay through the tunnel.
+- `logLimited` gained an explicit per-category limit.
+
+Verification:
+
+- `scripts/test.sh` plus one more on-device call, reading the `TUN TCP to Telegram` lines.
+
+
+### 2026-08-21 - VoIP relay hardening after the first on-device run
+
+Field result: the relay does fire, but the SSH server cannot open TCP to the reflectors.
+`91.108.9.81:597` and `91.108.9.35:1400` both fail after exactly the 5 s channel timeout, i.e. the
+SSH server never sees a SYN-ACK. Calls still hang on `Connecting` in both `Proxy` and
+`Selected apps` mode, so this is a path problem between the SSH server and Telegram, not a
+split-tunnel problem.
+
+Result:
+
+- Relay work moved off the shared control pool onto a dedicated `udp-relay` pool sized to the flow
+  cap, so a reflector that swallows SYNs can no longer pin the workers the TCP datapath needs.
+- Failed destinations are parked for 5 minutes (`udpRelayCooldowns`) instead of being retried on
+  every datagram; the cooldown is consulted only when no session exists, so a live flow is never
+  killed by a sibling flow's failure.
+- Connect failures are timed and classified: at or above the connect timeout the log says the SSH
+  server saw no SYN-ACK (filtered), below it the destination refused.
+- Added a one-shot reachability probe: on a filtered-looking failure the forwarder opens TCP to
+  port 443 on the same reflector host through SSH and logs whether the host is reachable at all.
+  This separates "the port is filtered" from "the server cannot reach Telegram".
+- A transport swap or a probe racing a reconnect no longer parks a healthy destination or burns the
+  one-shot probe flag; cooldowns and probe marks are cleared whenever the SSH transport changes.
+
+Verification:
+
+- `scripts/test.sh` and a second on-device call are still required.
+
+
 ### 2026-08-20 - VoIP UDP relay over the reflector TCP transport
 
 Result:

@@ -164,7 +164,7 @@ done < <(find "$release_output_dir" -maxdepth 1 -type f -name '*.apk' | sort)
 signed_apks=()
 unsigned_apks=()
 for apk_path in "${release_apks[@]}"; do
-  if [[ "$apk_path" == *-unsigned.apk ]]; then
+  if [[ "$apk_path" == *-unsigned*.apk ]]; then
     unsigned_apks+=("$apk_path")
   else
     signed_apks+=("$apk_path")
