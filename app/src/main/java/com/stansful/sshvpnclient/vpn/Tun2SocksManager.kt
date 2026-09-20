@@ -34,6 +34,9 @@ class Tun2SocksManager {
         maxPendingUploadBytesPerFlow: Int = DEFAULT_MAX_PENDING_UPLOAD_BYTES_PER_FLOW,
         tunWriteQueueCapacity: Int = DEFAULT_TUN_WRITE_QUEUE_CAPACITY,
         outboundPacketPoolCapacity: Int = DEFAULT_OUTBOUND_PACKET_POOL_CAPACITY,
+        onTransportSuspect: () -> Unit = {},
+        onTransportStall: (active: Boolean) -> Unit = {},
+        onNewFlow: () -> Unit = {},
         log: (String) -> Unit,
     ) {
         start(
@@ -48,6 +51,9 @@ class Tun2SocksManager {
             tunWriteQueueCapacity = tunWriteQueueCapacity,
             outboundPacketPoolCapacity = outboundPacketPoolCapacity,
             maxActiveTcpSessions = maxActiveTcpSessions,
+            onTransportSuspect = onTransportSuspect,
+            onTransportStall = onTransportStall,
+            onNewFlow = onNewFlow,
             log = log,
         )
     }
@@ -64,6 +70,9 @@ class Tun2SocksManager {
         tunWriteQueueCapacity: Int = DEFAULT_TUN_WRITE_QUEUE_CAPACITY,
         outboundPacketPoolCapacity: Int = DEFAULT_OUTBOUND_PACKET_POOL_CAPACITY,
         maxActiveTcpSessions: Int = DEFAULT_MAX_ACTIVE_TCP_SESSIONS,
+        onTransportSuspect: () -> Unit = {},
+        onTransportStall: (active: Boolean) -> Unit = {},
+        onNewFlow: () -> Unit = {},
         log: (String) -> Unit,
     ) {
         require(lease.owner === owner) { "TUN owner must match runtime lease" }
@@ -101,6 +110,12 @@ class Tun2SocksManager {
                             log("Kotlin TUN forwarding degradation detected: $reason")
                         }
                     },
+                    // Only a hint that traffic is waiting on a dead transport: the service still
+                    // decides, it just does not have to wait for its next poll to look. No lock is
+                    // taken here - the caller is the TUN read thread, and stop() waits for it.
+                    onTransportSuspect = onTransportSuspect,
+                    onTransportStall = onTransportStall,
+                    onNewFlow = onNewFlow,
                     config = TunForwarderConfig(
                         tunMtu = tunMtu,
                         sshChannelWindowBytes = sshChannelWindowBytes,
@@ -214,11 +229,10 @@ class Tun2SocksManager {
         }
     }
 
-    fun resetIdleClientConnections(owner: Any, minimumIdleMs: Long): Int {
+    fun activeTcpSessionCount(owner: Any): Int {
         return synchronized(lifecycleLock) {
-            if (activeOwner !== owner) return@synchronized 0
-            if (!isRunning || isTransportPaused) return@synchronized 0
-            forwarder?.resetIdleClientConnections(minimumIdleMs) ?: 0
+            if (activeOwner !== owner || !isRunning) return@synchronized 0
+            forwarder?.activeTcpSessionCount() ?: 0
         }
     }
 

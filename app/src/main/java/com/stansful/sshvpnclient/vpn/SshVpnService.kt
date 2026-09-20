@@ -31,8 +31,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -45,12 +45,21 @@ class SshVpnService : android.net.VpnService() {
     private val vpnTunnelOwner = Any()
     @Volatile
     private var connectionJob: Job? = null
-    private var wakeRecoveryJob: Job? = null
     private val connectionRunId = AtomicLong(0L)
     private val lifecycleCommandId = AtomicLong(0L)
     @Volatile
     private var lastStartId: Int = 0
-    private val connectionMonitorSignal = Channel<Unit>(Channel.CONFLATED)
+
+    /**
+     * Everything that asks the connection loop to look at its transport. The loop is the only
+     * consumer and the only place that starts SSH attempts; producers never block. Overflow drops
+     * the oldest hint - the monitor re-checks the transport itself on every wake-up anyway.
+     */
+    private val runtimeEvents = Channel<PostedTrigger>(
+        capacity = RUNTIME_EVENT_CAPACITY,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    private val triggerLog = TriggerLogThrottle()
     @Volatile
     private var userRequestedDisconnect: Boolean = true
     @Volatile
@@ -68,7 +77,11 @@ class SshVpnService : android.net.VpnService() {
     private lateinit var powerManager: PowerManager
     private lateinit var underlyingNetworkMonitor: UnderlyingNetworkMonitor
     private lateinit var protectedSocketRoute: UnderlyingNetworkSocketProtector
-    private val wakeRecoveryPolicy = WakeRecoveryPolicy(MINIMUM_SCREEN_OFF_RECOVERY_MS)
+    private lateinit var reconnectWakeHelper: ReconnectWakeHelper
+    private val reconnectHandoffHold = ReconnectWakeHelper.Hold()
+
+    // Every wake-up is worth one keepalive now, so any screen-off duration counts.
+    private val wakeRecoveryPolicy = WakeRecoveryPolicy(minimumScreenOffDurationMs = 0L)
     private val monitorCadencePolicy = ConnectionMonitorCadencePolicy(
         interactiveIntervalMs = INTERACTIVE_CONNECTION_MONITOR_INTERVAL_MS,
         screenOffIntervalMs = SCREEN_OFF_CONNECTION_MONITOR_INTERVAL_MS,
@@ -79,25 +92,21 @@ class SshVpnService : android.net.VpnService() {
                 Intent.ACTION_SCREEN_OFF -> {
                     deviceInteractive = false
                     screenOffAtMs = SystemClock.elapsedRealtime()
-                    wakeRecoveryJob?.cancel()
                     appContainer.sshConnectionManager.setDeviceInteractive(isInteractive = false)
                     trafficActivityMonitor.resetBaseline()
-                    connectionMonitorSignal.trySend(Unit)
                 }
 
                 Intent.ACTION_SCREEN_ON -> {
                     deviceInteractive = true
                     appContainer.sshConnectionManager.setDeviceInteractive(isInteractive = true)
-                    connectionMonitorSignal.trySend(Unit)
-                    val screenOnAtMs = SystemClock.elapsedRealtime()
-                    val durationMs = wakeRecoveryPolicy.recoveryDurationMs(
+                    val screenOffDurationMs = wakeRecoveryPolicy.recoveryDurationMs(
                         screenOffAtMs = screenOffAtMs,
-                        screenOnAtMs = screenOnAtMs,
+                        screenOnAtMs = SystemClock.elapsedRealtime(),
                     )
                     screenOffAtMs = NO_SCREEN_OFF_TIMESTAMP
-                    if (durationMs != null) {
-                        scheduleWakeRecovery(durationMs)
-                    }
+                    // A NAT that expired while the phone slept is found by one keepalive now,
+                    // not by the first app that times out.
+                    postTrigger(ReconnectTrigger.DeviceWake(screenOffDurationMs))
                 }
             }
         }
@@ -111,6 +120,11 @@ class SshVpnService : android.net.VpnService() {
         underlyingNetworkMonitor = UnderlyingNetworkMonitor(
             context = this,
             onNetworkChanged = ::onUnderlyingNetworkChanged,
+            onNetworkEvent = ::onUnderlyingNetworkEvent,
+        )
+        reconnectWakeHelper = ReconnectWakeHelper(
+            context = this,
+            onRetryAlarm = { postTrigger(ReconnectTrigger.RetryAlarm) },
         )
         protectedSocketRoute = UnderlyingNetworkSocketProtector(
             protectSocket = ::protect,
@@ -181,9 +195,11 @@ class SshVpnService : android.net.VpnService() {
         userRequestedDisconnect = true
         val destroyRunId = connectionRunId.incrementAndGet()
         connectionJob?.cancel()
-        wakeRecoveryJob?.cancel()
         if (::underlyingNetworkMonitor.isInitialized) {
             underlyingNetworkMonitor.close()
+        }
+        if (::reconnectWakeHelper.isInitialized) {
+            reconnectWakeHelper.close()
         }
         if (screenReceiverRegistered) {
             runCatching { unregisterReceiver(screenStateReceiver) }
@@ -271,48 +287,47 @@ class SshVpnService : android.net.VpnService() {
         }
     }
 
-    private fun scheduleWakeRecovery(screenOffDurationMs: Long) {
-        if (userRequestedDisconnect) return
-        val runId = connectionRunId.get()
-        wakeRecoveryJob?.cancel()
-        wakeRecoveryJob = serviceScope.launch {
-            delay(WAKE_RECOVERY_DEBOUNCE_MS)
-            if (!deviceInteractive || !shouldKeepConnectionAlive(runId) || !canReuseVpnPipeline()) {
-                return@launch
-            }
-            val traffic = trafficActivityMonitor.sampleSinceLast()
-            if (shouldDeferVpnDisruption(traffic, elapsedSinceLastForcedCheckMs = 0L)) {
-                appContainer.vpnConnectionRepository.appendDiagnostic(
-                    "Wake recovery skipped because active VPN traffic moved " +
-                        "${traffic.totalBytes / 1_024L} KiB while the screen was off",
+    private fun postTrigger(trigger: ReconnectTrigger) {
+        runtimeEvents.trySend(PostedTrigger(trigger, SystemClock.elapsedRealtime()))
+    }
+
+    /** The link a forwarder or network report is about: it may reach the loop after that link is gone. */
+    private fun currentLinkId(): Long = appContainer.sshConnectionManager.activeLinkId(vpnTunnelOwner) ?: 0L
+
+    /** Runs on the ConnectivityManager callback thread: only reads state and posts. */
+    private fun onUnderlyingNetworkEvent(event: UnderlyingNetworkEvent) {
+        if (!shouldKeepConnectionAlive(connectionRunId.get())) return
+        val currentTransportNetwork = transportNetwork
+        if (currentTransportNetwork != null && event.network != currentTransportNetwork) return
+        when (event) {
+            is UnderlyingNetworkEvent.AddressesChanged -> {
+                val endpoint = appContainer.sshConnectionManager.transportEndpoint(vpnTunnelOwner)
+                postTrigger(
+                    ReconnectTrigger.NetworkRefresh(
+                        detail = "addresses changed (+${event.added.size}/-${event.removed.size})",
+                        addressLostByLink = endpoint
+                            ?.takeIf { it.localAddress != null && event.removed.contains(it.localAddress) }
+                            ?.linkId,
+                    ),
                 )
-                return@launch
             }
-            val transportProbe = appContainer.sshConnectionManager.probeActiveTransport(
-                log = { message ->
-                    appContainer.vpnConnectionRepository.appendDiagnostic("Wake recovery: $message")
-                },
-                owner = vpnTunnelOwner,
+            is UnderlyingNetworkEvent.ValidationChanged -> postTrigger(
+                ReconnectTrigger.NetworkRefresh(
+                    detail = if (event.validated) "network validated" else "network lost validation",
+                    degraded = !event.validated,
+                ),
             )
-            if (!transportProbe.healthy && shouldKeepConnectionAlive(runId)) {
-                val resetCount = appContainer.tun2SocksManager.resetIdleClientConnections(
-                    owner = vpnTunnelOwner,
-                    minimumIdleMs = WAKE_STALE_CONNECTION_IDLE_MS,
+            is UnderlyingNetworkEvent.BlockedStatusChanged -> {
+                appContainer.vpnConnectionRepository.appendDiagnostic(
+                    if (event.blocked) {
+                        "Android is blocking this app's traffic on the underlying network (Doze, Data Saver " +
+                            "or background restrictions); SSH replies cannot arrive until it lifts"
+                    } else {
+                        "Android stopped blocking this app's traffic on the underlying network"
+                    },
                 )
-                if (resetCount > 0) {
-                    appContainer.vpnConnectionRepository.appendDiagnostic(
-                        "Wake recovery: reset $resetCount stale TCP session(s) after " +
-                            "${screenOffDurationMs / 1_000L}s screen off",
-                    )
-                }
-                val disconnected = transportProbe.session?.let(
-                    appContainer.sshConnectionManager::disconnectIfActive,
-                ) == true
-                if (disconnected) {
-                    appContainer.vpnConnectionRepository.appendDiagnostic(
-                        "Wake recovery: SSH transport is stale; reconnecting",
-                    )
-                    connectionMonitorSignal.trySend(Unit)
+                if (!event.blocked) {
+                    postTrigger(ReconnectTrigger.NetworkRefresh("network unblocked"))
                 }
             }
         }
@@ -334,7 +349,10 @@ class SshVpnService : android.net.VpnService() {
                 return@launch
             }
             if (!shouldRestartForNetworkChange(transportNetwork, new)) {
-                connectionMonitorSignal.trySend(Unit)
+                // No transport to replace: a loop waiting out its backoff may retry right away.
+                if (transportNetwork == null && new != null) {
+                    postTrigger(ReconnectTrigger.NetworkHandoff("$new is available"))
+                }
                 return@launch
             }
             transportNetwork = new
@@ -351,7 +369,7 @@ class SshVpnService : android.net.VpnService() {
                     appContainer.tun2SocksManager.pauseSshTransport(vpnTunnelOwner)
                 }
             }
-            connectionMonitorSignal.trySend(Unit)
+            postTrigger(ReconnectTrigger.NetworkHandoff(transition))
         }
     }
 
@@ -413,12 +431,14 @@ class SshVpnService : android.net.VpnService() {
 
             var attempt = 1
             var everConnected = false
-            val reconnectBackoff = ReconnectBackoff(
-                initialDelayMs = INITIAL_RECONNECT_DELAY_MS,
-                maxDelayMs = MAX_RECONNECT_DELAY_MS,
+            val supervisor = ReconnectSupervisor(
+                initialBackoffMs = INITIAL_RECONNECT_DELAY_MS,
+                maxBackoffMs = MAX_RECONNECT_DELAY_MS,
+                stableConnectionMs = STABLE_CONNECTION_BACKOFF_RESET_MS,
             )
             var reconnectStartedAtMs: Long? = null
             var forceVpnRebuildOnNextAttempt = false
+            drainStaleRuntimeEvents()
             while (shouldKeepConnectionAlive(runId)) {
                 if (attempt > 1) {
                     val publishedReconnect = mutateActiveConnectionIfCurrent(runId, commandId) {
@@ -429,20 +449,31 @@ class SshVpnService : android.net.VpnService() {
                 }
 
                 var activeConnectionInterrupted = false
-                var activeConnectionWasStable = false
+                var reconnectImmediately = false
                 try {
                     val reuseVpnInterface = everConnected && canReuseVpnPipeline()
-                    val connection = connectSingleAttempt(
-                        config = config,
-                        privateKey = privateKey,
-                        appSettings = appSettings,
-                        runId = runId,
-                        commandId = commandId,
-                        lease = lease,
-                        reuseVpnInterface = reuseVpnInterface && !forceVpnRebuildOnNextAttempt,
-                        includeNetworkDiagnostics = attempt == 1 ||
-                            attempt % NETWORK_DIAGNOSTICS_RETRY_INTERVAL == 0,
-                    )
+                    supervisor.onAttemptStarted(SystemClock.elapsedRealtime())
+                    val attemptWakeHold = ReconnectWakeHelper.Hold()
+                    var attemptFailed = true
+                    val connection = try {
+                        connectSingleAttempt(
+                            config = config,
+                            privateKey = privateKey,
+                            appSettings = appSettings,
+                            runId = runId,
+                            commandId = commandId,
+                            lease = lease,
+                            reuseVpnInterface = reuseVpnInterface && !forceVpnRebuildOnNextAttempt,
+                            includeNetworkDiagnostics = attempt == 1 ||
+                                attempt % NETWORK_DIAGNOSTICS_RETRY_INTERVAL == 0,
+                            wakeHold = attemptWakeHold,
+                        ).also { attemptFailed = false }
+                    } finally {
+                        // Overlap the locks: the backoff guard is armed only after a few thread hops.
+                        if (attemptFailed && shouldKeepConnectionAlive(runId)) holdCpuForReconnectHandoff()
+                        reconnectWakeHelper.release(attemptWakeHold)
+                        supervisor.onAttemptEnded(SystemClock.elapsedRealtime())
+                    }
                     everConnected = true
                     forceVpnRebuildOnNextAttempt = false
                     reconnectStartedAtMs?.let { startedAt ->
@@ -456,26 +487,28 @@ class SshVpnService : android.net.VpnService() {
                     }
                     reconnectStartedAtMs = null
 
-                    val connectedAtMs = SystemClock.elapsedRealtime()
-                    val interruptReason = monitorActiveConnection(connection.sshSession, runId)
+                    supervisor.onConnected(connection.linkId, SystemClock.elapsedRealtime())
+                    val interruptReason = monitorActiveConnection(connection, runId, supervisor)
                     if (!shouldKeepConnectionAlive(runId)) {
                         break
                     }
+                    holdCpuForReconnectHandoff()
                     activeConnectionInterrupted = true
-                    activeConnectionWasStable = shouldResetReconnectBackoff(
-                        connectedDurationMs = SystemClock.elapsedRealtime() - connectedAtMs,
-                        stableConnectionMs = STABLE_CONNECTION_BACKOFF_RESET_MS,
+                    val lossPlan = supervisor.onConnectionLost(
+                        nowMs = SystemClock.elapsedRealtime(),
+                        interruptForcesRebuild = interruptReason.forceVpnRebuild,
                     )
-                    if (activeConnectionWasStable) {
-                        reconnectBackoff.reset()
-                    }
-                    forceVpnRebuildOnNextAttempt = interruptReason.forceVpnRebuild
+                    reconnectImmediately = lossPlan.immediate
+                    forceVpnRebuildOnNextAttempt = lossPlan.forceVpnRebuild
                     reconnectStartedAtMs = SystemClock.elapsedRealtime()
                     if (!mutateActiveConnectionIfCurrent(runId, commandId) {
                             connectionRepository.setReconnecting(config.id)
                             connectionRepository.appendDiagnostic(
                                 "Connection interrupted: ${interruptReason.message}",
                             )
+                            lossPlan.note?.let { note ->
+                                connectionRepository.appendDiagnostic("SSH transport is flapping: $note")
+                            }
                         }
                     ) {
                         break
@@ -535,14 +568,18 @@ class SshVpnService : android.net.VpnService() {
                 ) {
                     break
                 }
-                if (activeConnectionInterrupted && activeConnectionWasStable) {
+                val reconnectDelayMs = supervisor.beginBackoff(
+                    nowMs = SystemClock.elapsedRealtime(),
+                    immediate = activeConnectionInterrupted && reconnectImmediately,
+                    deviceInteractive = deviceInteractive,
+                )
+                if (reconnectDelayMs == 0L) {
                     connectionRepository.appendDiagnostic("Immediate SSH reconnect starting")
                 } else {
-                    val reconnectDelayMs = reconnectBackoff.nextFailureDelayMs()
                     connectionRepository.appendDiagnostic(
                         "Reconnecting in ${reconnectDelayMs}ms; press Disconnect to stop",
                     )
-                    delay(reconnectDelayMs)
+                    waitBeforeReconnect(reconnectDelayMs, runId, supervisor)
                 }
                 attempt += 1
             }
@@ -601,6 +638,7 @@ class SshVpnService : android.net.VpnService() {
         lease: VpnRuntimeLease,
         reuseVpnInterface: Boolean,
         includeNetworkDiagnostics: Boolean,
+        wakeHold: ReconnectWakeHelper.Hold,
     ): ConnectionAttempt {
         val connectionRepository = appContainer.vpnConnectionRepository
         ensureConnectionStillWanted(runId, commandId)
@@ -620,6 +658,19 @@ class SshVpnService : android.net.VpnService() {
                 appendConnectionDiagnostic(runId, message)
             }
         }
+        val connectTimeoutMs = if (reuseVpnInterface) RECONNECT_CONNECT_TIMEOUT_MS else INITIAL_CONNECT_TIMEOUT_MS
+        if (!deviceInteractive) {
+            // Screen off: nothing else keeps the CPU up between the SYN and the last handshake
+            // packet. Bounded by the attempt deadline and released by the caller; never held while
+            // waiting for a network above.
+            val wakeLockMs = totalSshConnectDeadlineMs(connectTimeoutMs) + ATTEMPT_WAKE_LOCK_MARGIN_MS
+            reconnectWakeHelper.acquire(wakeHold, wakeLockMs)
+            reconnectWakeHelper.release(reconnectHandoffHold)
+            appendConnectionDiagnostic(
+                runId,
+                "Screen is off: wake lock held for this attempt, ${wakeLockMs / 1_000}s max",
+            )
+        }
         val log = connectionLogger(runId)
         val sshSession = appContainer.sshConnectionManager.connect(
             owner = vpnTunnelOwner,
@@ -628,8 +679,13 @@ class SshVpnService : android.net.VpnService() {
             privateKey = privateKey,
             log = log,
             socketProtector = protectedSocketRoute,
-            connectTimeoutMs = if (reuseVpnInterface) RECONNECT_CONNECT_TIMEOUT_MS else INITIAL_CONNECT_TIMEOUT_MS,
+            connectTimeoutMs = connectTimeoutMs,
             verboseDiagnostics = includeNetworkDiagnostics,
+            onTransportDead = { linkId, reason ->
+                // On the watchdog's timer thread: the loop that acts on this must get to run.
+                holdCpuForReconnectHandoff()
+                postTrigger(ReconnectTrigger.TransportDead(linkId, reason))
+            },
         )
         ensureConnectionStillWanted(runId, commandId)
         if (underlyingNetworkMonitor.currentNetwork() != selectedNetwork) {
@@ -678,6 +734,9 @@ class SshVpnService : android.net.VpnService() {
                 maxPendingUploadBytesPerFlow = resourceProfile.maxPendingUploadBytesPerFlow,
                 tunWriteQueueCapacity = resourceProfile.tunWriteQueueCapacity,
                 outboundPacketPoolCapacity = resourceProfile.outboundPacketPoolCapacity,
+                onTransportSuspect = { postTrigger(ReconnectTrigger.TransportDemand) },
+                onTransportStall = { active -> postTrigger(ReconnectTrigger.DataPathStall(active, currentLinkId())) },
+                onNewFlow = ::probeQuietTransportForNewFlow,
                 log = connectionRepository::appendDiagnostic,
             )
         }
@@ -695,16 +754,20 @@ class SshVpnService : android.net.VpnService() {
         return ConnectionAttempt(
             sshSession = sshSession,
             reusedVpnInterface = reusedVpnInterface,
+            linkId = appContainer.sshConnectionManager.activeLinkId(vpnTunnelOwner) ?: 0L,
         )
     }
 
     private suspend fun monitorActiveConnection(
-        sshSession: Session,
+        connection: ConnectionAttempt,
         runId: Long,
+        supervisor: ReconnectSupervisor,
     ): ActiveConnectionInterrupt {
+        val sshSession = connection.sshSession
         trafficActivityMonitor.resetBaseline()
         var pendingDegradationReason: String? = null
         var degradationDeferredAtMs = 0L
+        val heartbeat = SshHeartbeatClock(SystemClock.elapsedRealtime(), sleptSoFarMs())
         while (shouldKeepConnectionAlive(runId)) {
             if (!appContainer.tun2SocksManager.isRunning(vpnTunnelOwner)) {
                 return ActiveConnectionInterrupt(
@@ -717,6 +780,17 @@ class SshVpnService : android.net.VpnService() {
                     pendingDegradationReason = reason
                     degradationDeferredAtMs = SystemClock.elapsedRealtime()
                 }
+            }
+            // A rung of the stall ladder acts at once: it only exists while the forwarder still reports
+            // the stall, i.e. a full minute without one byte of channel data while apps kept sending.
+            // Deferring it on traffic counters would let it fire later, after the stall had cleared.
+            val escalation = supervisor.onMonitorTick(SystemClock.elapsedRealtime(), SystemClock.uptimeMillis())
+            if (escalation is ReconnectDecision.Interrupt) {
+                logTrigger(source = "stall ladder", decision = escalation)
+                return ActiveConnectionInterrupt(
+                    message = "TUN forwarding degraded: ${escalation.reason}",
+                    forceVpnRebuild = escalation.forceVpnRebuild,
+                )
             }
             pendingDegradationReason?.let { degradationReason ->
                 val now = SystemClock.elapsedRealtime()
@@ -732,14 +806,32 @@ class SshVpnService : android.net.VpnService() {
                     )
                 }
             }
-            if (!sshSession.isConnected) {
+            if (!appContainer.sshConnectionManager.isTransportAlive(sshSession)) {
                 return ActiveConnectionInterrupt(
                     message = "SSH session disconnected",
                     forceVpnRebuild = false,
                 )
             }
-            withTimeoutOrNull(monitorCadencePolicy.intervalMs(deviceInteractive)) {
-                connectionMonitorSignal.receive()
+            if (heartbeat.isDue(SystemClock.elapsedRealtime())) {
+                logHeartbeat(connection, heartbeat)
+            }
+            val posted = withTimeoutOrNull(monitorCadencePolicy.intervalMs(deviceInteractive)) {
+                runtimeEvents.receive()
+            } ?: continue
+            val trigger = posted.trigger
+            when (val decision = decide(posted, supervisor)) {
+                is ReconnectDecision.Interrupt -> {
+                    logTrigger(trigger.source, decision)
+                    return ActiveConnectionInterrupt(
+                        message = decision.reason,
+                        forceVpnRebuild = decision.forceVpnRebuild,
+                    )
+                }
+                is ReconnectDecision.Probe -> {
+                    val probe = appContainer.sshConnectionManager.probeTransport(vpnTunnelOwner)
+                    logTrigger(trigger.source, decision, outcome = probe?.name ?: "no supervised link")
+                }
+                is ReconnectDecision.Ignore, is ReconnectDecision.RetryNow -> logTrigger(trigger.source, decision)
             }
         }
         return ActiveConnectionInterrupt(
@@ -747,6 +839,142 @@ class SshVpnService : android.net.VpnService() {
             forceVpnRebuild = false,
         )
     }
+
+    /**
+     * Waits out a backoff without ever depending on a timer that deep sleep freezes: the wait ends
+     * at the deadline, on a trigger that makes a retry worthwhile (screen on, network back, an app
+     * waiting for the tunnel), or on the allow-while-idle alarm. A retry a trigger asks for only
+     * moves the deadline closer, and every deadline is guarded the same way: an alarm for more than a
+     * few seconds, a wake lock for less - whatever the screen does in the meantime.
+     */
+    private suspend fun waitBeforeReconnect(
+        delayMs: Long,
+        runId: Long,
+        supervisor: ReconnectSupervisor,
+    ) {
+        var deadlineMs = SystemClock.elapsedRealtime() + delayMs
+        // Whatever queued up while the loop was busy gets a look before anything is armed for nothing.
+        while (true) {
+            val queued = runtimeEvents.tryReceive().getOrNull() ?: break
+            retryDeadline(queued, supervisor)?.let { deadlineMs = minOf(deadlineMs, it) }
+        }
+        val waitHold = ReconnectWakeHelper.Hold()
+        var alarmArmed = false
+        var guardedDeadlineMs = Long.MAX_VALUE
+        try {
+            while (shouldKeepConnectionAlive(runId)) {
+                val remainingMs = deadlineMs - SystemClock.elapsedRealtime()
+                if (remainingMs <= 0L) break
+                if (deadlineMs < guardedDeadlineMs) {
+                    if (remainingMs > SHORT_BACKOFF_WAKE_LOCK_MS) {
+                        // Replaces an alarm armed for a later deadline: same PendingIntent.
+                        reconnectWakeHelper.scheduleRetryAlarm(remainingMs)
+                        alarmArmed = true
+                        // The alarm wakes the phone for the retry; until then it may sleep.
+                        reconnectWakeHelper.release(reconnectHandoffHold)
+                    } else {
+                        // Costs nothing while the screen is on and covers it going off mid-wait.
+                        reconnectWakeHelper.acquire(waitHold, remainingMs + BACKOFF_WAKE_LOCK_MARGIN_MS)
+                    }
+                    guardedDeadlineMs = deadlineMs
+                }
+                val posted = withTimeoutOrNull(remainingMs) { runtimeEvents.receive() } ?: break
+                retryDeadline(posted, supervisor)?.let { deadlineMs = minOf(deadlineMs, it) }
+            }
+        } finally {
+            // The attempt takes its own lock only after a network is selected; bridge the hops until then.
+            if (shouldKeepConnectionAlive(runId)) holdCpuForReconnectHandoff()
+            reconnectWakeHelper.release(waitHold)
+            if (alarmArmed) reconnectWakeHelper.cancelRetryAlarm()
+        }
+    }
+
+    /**
+     * With the screen off the CPU may suspend on any thread hop between a decision to reconnect and
+     * the attempt that follows, and the reconnect then waits for somebody else's wake-up. A short,
+     * self-expiring lock bridges that gap; the backoff guard or the attempt's own lock takes over.
+     */
+    private fun holdCpuForReconnectHandoff() {
+        if (!deviceInteractive) {
+            reconnectWakeHelper.acquire(reconnectHandoffHold, RECONNECT_HANDOFF_WAKE_MS)
+        }
+    }
+
+    /** Logs the supervisor's decision; returns the time to retry at if it asks to leave the wait. */
+    private fun retryDeadline(posted: PostedTrigger, supervisor: ReconnectSupervisor): Long? {
+        val decision = decide(posted, supervisor)
+        logTrigger(posted.trigger.source, decision)
+        return (decision as? ReconnectDecision.RetryNow)?.let { retry -> SystemClock.elapsedRealtime() + retry.afterMs }
+    }
+
+    private fun decide(posted: PostedTrigger, supervisor: ReconnectSupervisor): ReconnectDecision {
+        return supervisor.onTrigger(
+            trigger = posted.trigger,
+            nowMs = SystemClock.elapsedRealtime(),
+            postedAtMs = posted.postedAtMs,
+            awakeMs = SystemClock.uptimeMillis(),
+        )
+    }
+
+    /** New TCP flow on the TUN read thread: probe a link that has been silent for a while. Never blocks. */
+    private fun probeQuietTransportForNewFlow() {
+        val probe = appContainer.sshConnectionManager.probeTransportIfQuiet(vpnTunnelOwner, QUIET_LINK_PROBE_MS)
+        if (probe == LinkProbeDecision.SENT) {
+            logTrigger(
+                source = "new flow",
+                decision = ReconnectDecision.Probe("the link was silent for ${QUIET_LINK_PROBE_MS / 1_000}s+"),
+                outcome = probe.name,
+            )
+        }
+    }
+
+    private fun drainStaleRuntimeEvents() {
+        var drained = 0
+        while (runtimeEvents.tryReceive().isSuccess) drained += 1
+        if (drained > 0) {
+            appContainer.vpnConnectionRepository.appendDiagnostic(
+                "Dropped $drained transport hint(s) left over from the previous connection run",
+            )
+        }
+    }
+
+    /**
+     * Every trigger leaves a line, including the ones that changed nothing: an empty log during a
+     * freeze has to mean "nothing fired", not "something fired and was dropped silently".
+     */
+    private fun logTrigger(
+        source: String,
+        decision: ReconnectDecision,
+        outcome: String? = null,
+    ) {
+        val line = "Reconnect trigger [$source] -> ${decision.summary}" + outcome?.let { " ($it)" }.orEmpty()
+        val filtered = if (decision is ReconnectDecision.Interrupt) {
+            line
+        } else {
+            triggerLog.filter("$source|${decision::class.java.simpleName}", line, SystemClock.elapsedRealtime())
+        }
+        filtered?.let(appContainer.vpnConnectionRepository::appendDiagnostic)
+    }
+
+    private fun logHeartbeat(connection: ConnectionAttempt, heartbeat: SshHeartbeatClock) {
+        val nowMs = SystemClock.elapsedRealtime()
+        val sleptMs = sleptSoFarMs()
+        val sleptSinceLastMs = heartbeat.mark(nowMs, sleptMs)
+        val link = appContainer.sshConnectionManager.describeTransport(vpnTunnelOwner)
+            ?: "link #${connection.linkId} not supervised"
+        val flows = appContainer.tun2SocksManager.activeTcpSessionCount(vpnTunnelOwner)
+        val doze = runCatching { powerManager.isDeviceIdleMode }.getOrDefault(false)
+        val network = transportNetwork
+        val blocked = network?.let(underlyingNetworkMonitor::blockedStatus) ?: "unknown"
+        appContainer.vpnConnectionRepository.appendDiagnostic(
+            "SSH heartbeat: $link; flows=$flows; net=${network ?: "none"} blocked=$blocked " +
+                "screen=${if (deviceInteractive) "on" else "off"} doze=$doze; " +
+                "deep sleep since last heartbeat ${formatLinkDuration(sleptSinceLastMs)}",
+        )
+    }
+
+    /** Deep sleep since boot: elapsedRealtime counts it, uptimeMillis does not. */
+    private fun sleptSoFarMs(): Long = SystemClock.elapsedRealtime() - SystemClock.uptimeMillis()
 
     private fun logConnectionAttemptFailure(
         attempt: Int,
@@ -900,6 +1128,9 @@ class SshVpnService : android.net.VpnService() {
     ) {
         lifecycleMutex.withLock {
             if (!isActiveConnectionCommandCurrent(runId, commandId)) return@withLock
+            // Socket first: pausing flows closes their SSH channels, and on a dead path each close
+            // would otherwise queue behind a JSch write that never returns.
+            appContainer.sshConnectionManager.killTransport(vpnTunnelOwner, "reconnecting")
             if (keepVpnPipeline && canReuseVpnPipeline()) {
                 if (announceHotReconnect) {
                     appContainer.vpnConnectionRepository.appendDiagnostic(
@@ -1002,6 +1233,7 @@ class SshVpnService : android.net.VpnService() {
         awaitTunTermination: Boolean = true,
     ) {
         if (connectionRunId.get() != runId) return
+        appContainer.sshConnectionManager.killTransport(vpnTunnelOwner, "VPN teardown")
         cleanupVpnPipelineForRebuild(runId, awaitTunTermination)
         cleanupDisconnectStep("SSH session") {
             appContainer.sshConnectionManager.disconnectOwner(vpnTunnelOwner)
@@ -1096,10 +1328,13 @@ class SshVpnService : android.net.VpnService() {
         private const val MAX_RECONNECT_DELAY_MS = 30_000L
         private const val STABLE_CONNECTION_BACKOFF_RESET_MS = 30_000L
         private const val NETWORK_DIAGNOSTICS_RETRY_INTERVAL = 5
-        private const val MINIMUM_SCREEN_OFF_RECOVERY_MS = 5 * 60_000L
-        private const val WAKE_STALE_CONNECTION_IDLE_MS = 2 * 60_000L
-        private const val WAKE_RECOVERY_DEBOUNCE_MS = 2_000L
         private const val NO_SCREEN_OFF_TIMESTAMP = -1L
+        private const val RUNTIME_EVENT_CAPACITY = 64
+        private const val QUIET_LINK_PROBE_MS = 20_000L
+        private const val SHORT_BACKOFF_WAKE_LOCK_MS = 4_000L
+        private const val BACKOFF_WAKE_LOCK_MARGIN_MS = 1_000L
+        private const val ATTEMPT_WAKE_LOCK_MARGIN_MS = 15_000L
+        private const val RECONNECT_HANDOFF_WAKE_MS = 10_000L
 
         fun connectIntent(
             context: Context,
@@ -1116,10 +1351,35 @@ class SshVpnService : android.net.VpnService() {
     }
 }
 
+/** A trigger and when it was queued: the supervisor needs to know what an attempt already covered. */
+private data class PostedTrigger(val trigger: ReconnectTrigger, val postedAtMs: Long)
+
 private data class ConnectionAttempt(
     val sshSession: Session,
     val reusedVpnInterface: Boolean,
+    /** Generation that watchdog verdicts are matched against; 0 if the session has no supervised link. */
+    val linkId: Long,
 )
+
+/** Heartbeat cadence and the deep-sleep counter it reports the growth of. */
+private class SshHeartbeatClock(startedAtMs: Long, sleptMs: Long) {
+    private var lastAtMs = startedAtMs
+    private var lastSleptMs = sleptMs
+
+    fun isDue(nowMs: Long): Boolean = nowMs - lastAtMs >= HEARTBEAT_INTERVAL_MS
+
+    /** @return deep sleep since the previous heartbeat. */
+    fun mark(nowMs: Long, sleptMs: Long): Long {
+        val sleptSinceLastMs = (sleptMs - lastSleptMs).coerceAtLeast(0L)
+        lastAtMs = nowMs
+        lastSleptMs = sleptMs
+        return sleptSinceLastMs
+    }
+
+    private companion object {
+        const val HEARTBEAT_INTERVAL_MS = 5 * 60_000L
+    }
+}
 
 private data class ActiveConnectionInterrupt(
     val message: String,

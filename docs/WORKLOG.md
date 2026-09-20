@@ -39,6 +39,228 @@ After each block it is updated with the actual result, verification status, and 
 
 ## Change Log
 
+### 2026-09-20 - Selected apps: a few unreachable hosts froze the whole tunnel; the app no longer uses port 443
+
+Report, with a log from the v1 build: in selected-apps mode the apps get nothing through SSH. And: the
+app must not go to port 443 - only two ports are open, everything goes through the SSH server on 22,
+and every change stays on the client.
+
+Findings, from the log and the code:
+
+- The SSH link itself was healthy the whole time: the tunnel check opened a channel in 170 ms, the
+  terminal opened a shell, the watchdog had no verdict. What failed were the forwarder's channel
+  opens: each timed out at exactly 10 s, then the flow table hit 128/128 and new flows were refused.
+- Opening a `direct-tcpip` channel blocks until the server has connected to the destination - up to
+  10 s for one it cannot reach. Opens ran on the same 8-thread `control` pool as the uploads of every
+  established flow. A handful of destinations the server could not reach (`:9001`, some `:443`) held
+  all 8 threads, and every other open and every upload queued behind them: one app's dead hosts froze
+  every app. This is older than 3.1.0; the selected-apps routing itself (`VpnTunnelManager`) has not
+  changed since 3.1.0.
+- DNS: an app asked the phone's own resolver, `192.168.3.1` (the Wi-Fi router), and the forwarder sent
+  that query through the SSH server, which is in another network and can never reach it. Each such
+  query held one of 4 DNS workers for 10 s; queries to `1.1.1.1` queued behind them and expired before
+  they were sent, so DNS failed for every app, and the fallback went to DoH on `1.1.1.1:443`.
+- The app itself used 443 in two places: that DoH fallback and the tunnel check (`youtube.com:443`).
+  The other `:443` lines in the log are the apps' own destinations (and Android's DNS over HTTP/3 to
+  `8.8.8.8`, which the forwarder refuses); the server reaches those inside the SSH connection, and the
+  phone only ever talks to the server on port 22.
+
+Result:
+
+- Channel opens have their own pool (`connect`), a thread per flow (twice the session cap + 32, since a
+  closed flow keeps its open until it times out): a host the server cannot reach costs only its own
+  flow. Uploads keep the `control` pool to themselves.
+- `TunnelDnsPolicy.kt`: the resolver the app asked goes first, then the tunnel's own - `1.1.1.1`,
+  `8.8.8.8`, the same the VPN interface gives apps - all over DNS-over-TCP on port 53 through SSH, and
+  the answer always comes from the address the app asked. A resolver followed by another gets half of
+  the remaining time, one on a private address at most `1.5 s` (an internal resolver on the server's
+  side answers in milliseconds, the phone's router never does). A resolver that does not answer is
+  skipped for 5 minutes, until the transport changes: only the first query pays. 16 DNS workers
+  instead of 4.
+- No DoH and no 443 from the app itself.
+- The tunnel check opens its channel to the SSH server itself (`127.0.0.1:<ssh port>`, then
+  `127.0.0.1:22` for a server behind a port forward, then the address the app connected to) instead
+  of `youtube.com:443`; the button says `Checking tunnel...`.
+- New log lines: `DNS over SSH: <resolver> did not answer (...); asking <next> instead; skipping it
+  for 5 minutes` and `DNS query used up its 10000ms before it was sent`, which means the DNS workers
+  are saturated.
+
+Verification:
+
+- Cloud workspace: compile against android.jar 37, 157 `vpn` unit tests (new `TunnelDnsPolicyTest`),
+  no new compiler warnings, `scripts/check-cancellation.sh`; the rig's tunnel check succeeds through
+  the SSH port.
+- Not verified here: the Gradle build, lint and the phone. Field: the same apps in selected-apps mode;
+  a host the server cannot reach should fail on its own (`TUN TCP failed ... after 10000ms` for that
+  host only) without `session limit reached`, and no DoH lines at all.
+
+### 2026-09-19 - An SSH transport that cannot die silently, and reconnects that happen in the background
+
+Report: "the reconnect sometimes does not happen", mostly with the phone in a pocket. The plan (stages
+1-4) was made in chat; stage 1 was first built and rig-tested outside the repo, then integrated here
+together with stages 2-4. The server is not touched: everything is client-side, on the wire there are
+only standard SSH keepalives.
+
+Findings, from reading the code:
+
+- The only liveness signal was `session.isConnected`, which JSch drops only when its reader thread gets
+  an exception. A half-open path (expired NAT, a new address on the same network, sleep) raises
+  nothing. Idle, JSch's keepalive notices after 4 x `serverAliveInterval` of awake time - 60 s with the
+  screen on, 8 minutes with it off. Under traffic writers park in `socket.write` for up to ~15 minutes
+  of kernel retries, and JSch's keepalive waits behind the same write lock.
+- `Session.disconnect()` writes `CHANNEL_CLOSE` through that lock and was called synchronously on every
+  teardown path. `disconnectIfCurrent` even paused the forwarder (closing every channel) under
+  `sessionLock`, the lock `setDeviceInteractive()` takes on the main thread at screen on/off.
+- `session.connect(timeout)` bounds each handshake read, not the attempt: a server that trickles bytes
+  held an attempt indefinitely.
+- The backoff was a coroutine `delay()`, which stands still in deep sleep: a session lost with the
+  screen off could sit in a 30 s backoff for as long as the phone slept, and nothing cut the wait short
+  when the network came back or an app needed the tunnel. Nothing kept the CPU up during an attempt.
+- Wake recovery ran only after 5+ minutes of screen off, and its `direct-tcpip` probe could itself
+  hang on the dead link. `onDegraded` still had no callers.
+
+Result:
+
+- Stage 1, `SshTransportLink.kt` + `SshLinkLiveness.kt`: every session gets a link (`SSH link #N` in the
+  log). The app owns the socket: `TCP_USER_TIMEOUT` `30 s`, byte counters on the streams, `kill()` that
+  fails every pending read, write and connect at once. One deadline per attempt (`2 x connectTimeout`,
+  at least `15 s`; mapped to `Connection timeout`). Teardown never blocks: socket first,
+  `Session.disconnect()` on a pool thread; `disconnectIfCurrent`, `prepareForReconnect` and the full
+  teardown close the socket before touching channels or the forwarder. A watchdog turns silence into a
+  verdict and calls back with the socket already closed:
+  - `PROBE_TIMEOUT`: nothing from the server `8 s` after an SSH keepalive, counted only while the JSch
+    reader was listening. A keepalive written right after 32 KiB+ of upload may wait in the kernel's
+    send queue behind it, so it gets `45 s`, and the verdict says `written behind X of upload`. One
+    probe at a time; a probe JSch could not even write within a minute is dropped without a verdict.
+  - `READER_GONE`, `BLOCKED_WRITE` (a socket write stuck `45 s` - a backstop for `TCP_USER_TIMEOUT`),
+    `PROBE_SEND_FAILED`.
+  - `READER_STALLED`: the JSch reader parked `20 s` on delivering into one channel's pipe, so no flow
+    gets a byte (head-of-line). A backstop for the forwarder's own `10 s` bound on such flows.
+
+  Probes go out on every screen on, network event and `TUN stall`, on a new flow after `20 s` of
+  silence (real time, sleep included), and on the link's own trigger: bytes sent and nothing back for
+  `6 s`. That last one is what catches a path that dies under an upload: JSch writers wait on the SSH
+  channel window there, not in `socket.write`.
+- Stage 2: every trigger leaves `Reconnect trigger [source] -> decision`, ignored ones included, with
+  repeats of the same pair folded to one line a minute. `SSH heartbeat` every 5 minutes: link state
+  (byte ages, reader, probes, RTT), flows, network, blocked, screen, Doze and deep sleep since the last
+  heartbeat.
+- Stage 3, `ReconnectSupervisor.kt`: the connection loop stays the only place that starts attempts;
+  every trigger arrives through one channel and gets a decision from a pure state machine
+  (`CONNECTING/CONNECTED/BACKOFF`, link generation, backoff). Triggers carry the time they were queued
+  and, where it matters, the link they are about: a verdict, stall report or lost address about link
+  #6 never touches link #7, and a hint that sat in the queue through a failed attempt does not cut the
+  next wait short (a changed network still does). The degradation branch is alive again as a ladder:
+  stall -> probe -> hot reconnect after 60 s -> VPN rebuild if it recurs within 10 minutes; a rung acts
+  at once, and the minute is awake time (a phone that slept through it has not watched it). A stall
+  that outlives a hot reconnect is reported again for the new link. A transport dying young three
+  times in a row gets one rebuild per streak.
+- Stage 4, `ReconnectWakeHelper.kt` and the wait in `SshVpnService`:
+  - A partial wake lock for one attempt while the screen is off (deadline + 15 s, released in
+    `finally`, never while waiting for a network). Holders are tracked one by one, so a late release
+    cannot end a newer attempt's lock.
+  - A bridge lock (`10 s` at most) from a decision to reconnect (a verdict, a lost session, a failed
+    attempt, the end of a wait) to the attempt: a thread hop in deep sleep must not strand it. It is
+    dropped as soon as a backoff alarm or the attempt's own lock takes over.
+  - Backoff waits over 4 s are guarded by an allow-while-idle alarm, shorter ones by a wake lock, and
+    the guard is re-armed whenever a trigger pulls the deadline in.
+  - Waits are cut short by screen on, network back or validated, or an app waiting for the tunnel -
+    the forwarder reports that while it is paused, which is exactly the backoff. An app only halves
+    the wait (15 s at most), so a session that keeps dying young is not revived by every SYN.
+  - With the screen off the backoff grows to 5 minutes instead of 30 s.
+  - `UnderlyingNetworkMonitor` reports address changes, validation flips and blocked status of the
+    selected network; losing the socket's own address reconnects at once. `WAKE_LOCK` is declared
+    explicitly.
+- Behaviour change: the old wake recovery (`direct-tcpip` to `1.1.1.1:443` after 5+ minutes of screen
+  off, then a reset of idle TCP sessions) is gone. One keepalive probe on every screen on replaces it,
+  and a link that fails it is replaced as a whole.
+- `tools/blackhole_proxy.py`: a proxy on the Mac that turns the path into a black hole on `b` (no FIN,
+  no RST), to reproduce half-open links against the real server from a phone on the same Wi-Fi.
+- Two adversarial reviews of the finished change ran before the handover; their findings are fixed
+  and folded into the description above.
+
+Verification:
+
+- Cloud workspace: the `vpn` package compiled with Kotlin 2.4.0 against the project's own android.jar
+  (platform 37), JSch 2.28.3, coroutines 1.11 and androidx.core 1.19 from the Gradle cache, no new
+  compiler warnings; 152 `vpn` unit tests pass (112 before, new: `SshLinkLivenessTest`,
+  `ReconnectSupervisorTest`). `scripts/check-cancellation.sh` passes.
+- Rig outside the repo: real JSch + OpenSSH 9.6 through the black-hole proxy, driving
+  `SshConnectionManager.connect()` itself, with the thresholds shortened (probe `3 s`, probe behind an
+  upload `10 s`, stall and blocked write `6 s`). Healthy link: 32 MiB echo plus ~190 probes, no
+  verdict. Idle half-open: `PROBE_TIMEOUT` at 3.05 s, `isConnected` false 0 ms later. Half-open under
+  upload: the link's own silence probe, written behind 2 MiB of upload, condemned it 15 s after the
+  path died. `disconnectIfCurrent` with hung writers: 1 ms. Trickling server: attempt ends at the
+  15 s deadline as `Connection timeout`. Hung connect aborted by `disconnectOwner`: under 1 ms.
+  Head-of-line: the other flow froze for 7 s, then `READER_STALLED` with the
+  `PipedInputStream.awaitSpace` stack.
+- Not verified here: the Gradle build, Android lint, and anything on a device (`TCP_USER_TIMEOUT` on the
+  phone's kernel, alarms in Doze, wake lock accounting). Run `scripts/test.sh`, `scripts/lint.sh` and
+  `scripts/build-debug.sh` on the Mac.
+- Field: the lines to look for are `SSH link #N: DEAD ...`, `Reconnect trigger [...]`, `SSH heartbeat`,
+  `Screen is off: wake lock held`, `TCP_USER_TIMEOUT not applied` (should never appear) and
+  `JSch reader has not read the socket`.
+
+### 2026-09-11 - Release 3.2.0: silent stalls and pages that crawl
+
+Two field reports after 3.1.0: Telegram drops and reconnects every 10-40 s "as if the VPN keeps
+restarting", and work applications in Yandex Browser load for ages even though the whole browser is
+routed through the tunnel. Two causes found by reading the paths; a field log is still needed to
+confirm which one dominates on that device.
+
+Findings:
+
+- Session pressure cleanup closed any session idle for **35 s** as soon as the table passed 3/4 of
+  the cap (96 of 128), down to 72, rechecking every 20 s, and closed them with RST. A browser plus
+  messengers hold well over 96 sockets, and both park idle keep-alives for minutes - which is
+  exactly what a 35 s deadline harvests. Every harvested socket is a visible reconnect in the app
+  that owned it.
+- Every DNS query over UDP/53 opened its own SSH `direct-tcpip` channel to the resolver: a channel
+  open plus a query round trip, ~200-300 ms on a 90 ms link, with nothing remembered between
+  lookups. One page pulls dozens of names.
+- A dead SSH session was only noticed by the service's connection monitor, which polls every 5 s
+  screen-on and 30 s screen-off, so an otherwise instant reconnect could stall traffic for seconds
+  before it even started.
+
+Result:
+
+- Pressure cleanup keeps a parked keep-alive for `150 s` now, and only falls back to a short
+  deadline (`20 s`) when the table is actually full and the next flow would be refused. One summary
+  line per sweep says how many sessions went and how full the table was, with a `20`-line budget,
+  so this stops being invisible.
+- `DnsCache.kt`: answers are cached by resolver plus question with the name lower-cased, kept for
+  the smallest record TTL in the answer (capped at `600 s`, `512` answers, LRU). A reused answer is
+  re-addressed to the new query and its TTLs are aged by the time it sat in the cache, so a client
+  that caches it in turn does not hold it past its life. Only plain single-question queries and
+  NOERROR/NXDOMAIN answers are stored; anything that does not parse exactly goes to the resolver.
+  A served answer carries the new query's id and its question bytes verbatim - resolvers randomise
+  the case of the name and check that the answer echoes it back - and its TTLs are cut to whatever
+  is left of the entry's life, so a stub that caches it in turn cannot hold it longer than we would.
+  The cache survives an SSH reconnect and answers during one.
+- The forwarder now tells the service the moment traffic needs a transport that is gone - a SYN with
+  no SSH session, or a DNS query with none - and the service wakes its monitor instead of waiting
+  for the next poll. It is a hint, not a verdict: the monitor still decides what to do.
+- A flow waiting for its client to reopen a closed receive window stops draining its SSH channel,
+  and JSch feeds every channel from one thread, so such a flow can freeze the whole tunnel rather
+  than only itself. The wait is bounded at `10 s` now: past that the flow is reset on its own, with
+  a log line naming it. The forwarder has no retransmission - a downlink packet must reach the TUN -
+  so this is the safe half of the fix; keeping the channel drained into a per-flow buffer is the
+  other half and waits for a field log that says it is needed.
+- TUN writer queue `256 -> 512` packets and the outbound packet pool `64 -> 128` on the default
+  profile, so a downlink burst is absorbed instead of blocking the flow that produced it - and
+  through it, every other flow on the same SSH session.
+- Version bumped to `3.2.0`.
+
+Verification:
+
+- `scripts/test.sh` (new `DnsCacheTest`), `scripts/lint.sh`, `scripts/build-debug.sh` on the Mac.
+- Field: one log covering two or three Telegram drops, taken from the app's own diagnostics - no
+  logcat needed. The lines that name the cause are `TUN stall: ... waitingForClientWindow=N`,
+  `TUN stall cleared after ...`, `TUN TCP session pressure: ...`, `TUN TCP reset ...: the app
+  stopped reading`, `SSH transport is gone while traffic is waiting` and `Connection interrupted: ...`.
+- The previous field report came with an empty log, which was itself the finding: no lifecycle event
+  fires during those freezes, so nothing outside the data path is causing them.
+
 ### 2026-08-28 - The server, not the client, is what blocks the call now
 
 Field run of the previous block. The relay dialled `443` as intended and the answer was immediate:

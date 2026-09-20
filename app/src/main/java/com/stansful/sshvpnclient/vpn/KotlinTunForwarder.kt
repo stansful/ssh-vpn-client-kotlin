@@ -5,16 +5,12 @@ import android.os.SystemClock
 import com.jcraft.jsch.ChannelDirectTCPIP
 import com.jcraft.jsch.DirectTcpipChannelTuning
 import com.jcraft.jsch.Session
-import java.io.ByteArrayOutputStream
 import java.io.EOFException
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
-import java.net.InetAddress
-import java.net.Socket
 import java.net.SocketTimeoutException
-import java.nio.charset.StandardCharsets
 import java.util.ArrayDeque
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
@@ -32,8 +28,6 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
-import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 import kotlin.concurrent.withLock
 
 private const val MIN_IPV4_MTU = 576
@@ -464,6 +458,9 @@ internal class TunPacketWriter(
         }
     }
 
+    /** Diagnostics only: how much is waiting to reach the TUN right now. */
+    fun queuedPackets(): Int = queue.size
+
     fun enqueue(packet: ByteArray): Boolean {
         return enqueue(TunWritePacket(packet))
     }
@@ -544,6 +541,11 @@ internal class KotlinTunForwarder(
     sshSession: Session,
     private val log: (String) -> Unit,
     private val onDegraded: (reason: String, transportGeneration: Long?) -> Unit = { _, _ -> },
+    private val onTransportSuspect: () -> Unit = {},
+    /** Stall episode started (true) or cleared (false); the service probes the SSH link on a start. */
+    private val onTransportStall: (active: Boolean) -> Unit = {},
+    /** A client opened a TCP flow; lets the service probe a link that has been silent for a while. */
+    private val onNewFlow: () -> Unit = {},
     private val config: TunForwarderConfig,
 ) {
     private val running = AtomicBoolean(false)
@@ -554,13 +556,29 @@ internal class KotlinTunForwarder(
     private val udpRelayCooldowns = ConcurrentHashMap<UdpRelayTarget, Long>()
     private val udpRelayTcpPorts = ConcurrentHashMap<Int, Int>()
     private val udpRejectedFlows = ConcurrentHashMap<UdpRejectKey, Long>()
+    private val dnsCache = DnsResponseCache(nowMs = ::elapsedRealtimeMs)
+    private val transportLossReportedAtMs = AtomicLong(0L)
+
+    @Volatile
+    private var lastTunReadAtMs = 0L
+
+    @Volatile
+    private var stallStartedAtMs = 0L
+
+    /** Transport generation the current stall episode was reported for; the watchdog thread only. */
+    private var stallTransportGeneration = 0L
+
     private val udpRejectionSummary = UdpRejectionSummary()
     private val reflectorVerdictLogged = AtomicBoolean(false)
     private val sshSessionReference = AtomicReference<Session?>(sshSession)
     private val transportLock = Any()
     private var transportGeneration = 0L
     private val diagnostics = ForwarderDiagnostics(log)
-    private val executors = ForwarderExecutors(diagnostics)
+    private val executors = ForwarderExecutors(
+        diagnostics = diagnostics,
+        // Closed flows keep their open until it times out, so a table's worth of those comes on top.
+        maxConcurrentConnects = 2 * config.maxActiveTcpSessions + CONNECT_THREAD_SLACK,
+    )
     private val outboundPacketPool = TunPacketBufferPool(
         bufferSize = config.tunMtu,
         capacity = config.outboundPacketPoolCapacity,
@@ -614,7 +632,9 @@ internal class KotlinTunForwarder(
     }
     private val packetId = AtomicInteger(1)
     private val dnsFailureStreak = AtomicInteger(0)
-    private var dnsTcpRetryAfterMs = 0L
+
+    /** Resolvers that did not answer through the current transport, and until when to skip them. */
+    private val silentResolvers = ConcurrentHashMap<Int, Long>()
     private val degradationReported = AtomicBoolean(false)
     private val terminalError = AtomicReference<String?>(null)
     private val pressureCleanupScheduled = AtomicBoolean(false)
@@ -644,13 +664,17 @@ internal class KotlinTunForwarder(
         )
         tunWriterReference.set(writer)
         writer.start()
+        lastTunReadAtMs = elapsedRealtimeMs()
+        diagnostics.markRemoteRead(lastTunReadAtMs)
+        scheduleStallWatchdog()
         log(
             "Kotlin TUN optimized datapath: mtu=${config.tunMtu}, mss=${config.tcpMss}, " +
                 "sshWindow=${config.sshChannelWindowBytes}B, " +
                 "uploadQueue=${config.maxPendingUploadBytesPerFlow}B/flow, " +
                 "sessions=${config.maxActiveTcpSessions}, tunWriter=${config.tunWriteQueueCapacity} packets, " +
                 "dnsTimeout=${config.dnsQueryTimeoutMs}ms, " +
-                "voipUdpRelay=$HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS flows over reflector TCP $REFLECTOR_TCP_PORT",
+                "voipUdpRelay=$HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS flows over reflector TCP $REFLECTOR_TCP_PORT, " +
+                "dnsCache=${DnsResponseCache.DEFAULT_MAX_ENTRIES} answers",
         )
         readThread = Thread(
             {
@@ -720,14 +744,6 @@ internal class KotlinTunForwarder(
         }
     }
 
-    fun resetIdleClientConnections(minimumIdleMs: Long): Int {
-        if (!running.get()) return 0
-        val now = elapsedRealtimeMs()
-        return sessions.values.count { session ->
-            session.resetAfterDeviceWake(now, minimumIdleMs)
-        }
-    }
-
     fun isDegradationSignalCurrent(expectedTransportGeneration: Long?): Boolean {
         if (expectedTransportGeneration == null) return running.get()
         return synchronized(transportLock) {
@@ -753,24 +769,43 @@ internal class KotlinTunForwarder(
         }
     }
 
+    /**
+     * An idle keep-alive is not a leak. Browsers and messengers park connections for minutes and
+     * expect to reuse them, and closing one costs the user a visible reconnect - a chat that says
+     * "connecting", a page that reloads. So pressure alone buys a long deadline, and the short one
+     * is kept for the case that actually hurts: a full table, where the next flow would be refused.
+     */
     private fun runPressureCleanup() {
         val now = elapsedRealtimeMs()
         val activeCount = sessions.size
         if (activeCount <= config.sessionPressureThreshold) return
 
+        val idleTtlMs = if (activeCount >= config.maxActiveTcpSessions) {
+            SATURATED_IDLE_SESSION_TTL_MS
+        } else {
+            PRESSURE_IDLE_SESSION_TTL_MS
+        }
         val maxToClose = activeCount - config.sessionPressureTarget
         var closedCount = 0
         sessions.values
             .asSequence()
             .map { session -> session to session.idleForMs(now) }
-            .filter { (_, idleForMs) -> idleForMs >= PRESSURE_IDLE_SESSION_TTL_MS }
+            .filter { (_, idleForMs) -> idleForMs >= idleTtlMs }
             .sortedByDescending { (_, idleForMs) -> idleForMs }
             .forEach { (session, _) ->
                 if (closedCount >= maxToClose) return@forEach
-                if (session.closeIdleUnderPressure(now)) {
+                if (session.closeIdleUnderPressure(now, idleTtlMs)) {
                     closedCount += 1
                 }
             }
+        if (closedCount > 0) {
+            diagnostics.logPressureCleanup(
+                closedCount = closedCount,
+                activeCount = activeCount,
+                maxSessions = config.maxActiveTcpSessions,
+                idleTtlMs = idleTtlMs,
+            )
+        }
     }
 
     private fun readTunLoop(input: FileInputStream) {
@@ -782,9 +817,83 @@ internal class KotlinTunForwarder(
                 sleepAfterEmptyRead()
                 continue
             }
+            lastTunReadAtMs = elapsedRealtimeMs()
             handleIpv4Packet(buffer, read)
         }
     }
+
+    /**
+     * "Everything freezes for a moment and then comes back", with nothing in the log: no reconnect,
+     * no rebuild, no error - so the stall is inside the data path and nothing was reporting it.
+     * This does: how long the tunnel has been silent while apps were still sending, how many flows
+     * are parked waiting for their client to open its receive window, and how full the TUN writer
+     * queue is. Those three numbers separate a wedged SSH session from a slow peer.
+     */
+    private fun scheduleStallWatchdog() {
+        if (!running.get()) return
+        // Nothing to watch while no flow is open, and a twice-a-second timer for diagnostics has no
+        // business waking a sleeping device.
+        val delayMs = if (sessions.isEmpty()) STALL_WATCHDOG_IDLE_INTERVAL_MS else STALL_WATCHDOG_INTERVAL_MS
+        val scheduled = executors.scheduleQuietCleanup(delayMs) {
+            try {
+                runStallWatchdog()
+            } finally {
+                scheduleStallWatchdog()
+            }
+        }
+        if (scheduled == null) {
+            stallStartedAtMs = 0L
+        }
+    }
+
+    private fun runStallWatchdog() {
+        if (!running.get()) return
+        // Read before the sessions: a pause that lands after this closes them, and the next tick sees it.
+        val generation = synchronized(transportLock) { transportGeneration }
+        val nowMs = elapsedRealtimeMs()
+        val activeSessions = sessions.size
+        val silentForMs = nowMs - diagnostics.lastRemoteReadAtMs()
+        val clientQuietForMs = nowMs - lastTunReadAtMs
+        // Apps still sending plus nothing at all coming back from any channel is the shape of a
+        // stall; an idle tunnel is quiet in both directions and says nothing.
+        val awaitingClientWindow = diagnostics.clientWindowWaitCount()
+        val writerQueueDepth = tunWriterReference.get()?.queuedPackets() ?: 0
+        // Silence alone is not a stall: an upload legitimately receives nothing for seconds. What
+        // makes it one is silence while something is visibly stuck - a flow parked on a closed
+        // client window, or a TUN writer queue that is backing up.
+        val stalled = activeSessions > 0 &&
+            silentForMs >= STALL_SILENCE_THRESHOLD_MS &&
+            clientQuietForMs <= STALL_CLIENT_ACTIVITY_MS &&
+            (awaitingClientWindow > 0 || writerQueueDepth >= config.tunWriteQueueCapacity / 2)
+        if (stalled) {
+            // A stall that outlives a hot reconnect is news about the new transport: report it again,
+            // or the service, which forgets stalls with the old link, would never hear of it.
+            if (stallStartedAtMs == 0L || stallTransportGeneration != generation) {
+                stallStartedAtMs = nowMs
+                stallTransportGeneration = generation
+                diagnostics.logTunStall(
+                    silentForMs = silentForMs,
+                    activeSessions = activeSessions,
+                    awaitingClientWindow = awaitingClientWindow,
+                    writerQueueDepth = writerQueueDepth,
+                    writerQueueCapacity = config.tunWriteQueueCapacity,
+                )
+                notifyTransportStall(active = true)
+            }
+            return
+        }
+        if (stallStartedAtMs != 0L) {
+            diagnostics.logTunStallCleared(nowMs - stallStartedAtMs)
+            stallStartedAtMs = 0L
+            notifyTransportStall(active = false)
+        }
+    }
+
+    private fun notifyTransportStall(active: Boolean) {
+        runCatching { onTransportStall(active) }
+    }
+
+    fun activeTcpSessionCount(): Int = sessions.size
 
     private fun handleIpv4Packet(buffer: ByteArray, length: Int) {
         val packet = PacketCodec.parseIpv4(buffer, length) ?: return
@@ -841,7 +950,10 @@ internal class KotlinTunForwarder(
         }
 
         if (session == null) {
-            if (isInitialSyn && waitForSshTransport) return
+            if (isInitialSyn && waitForSshTransport) {
+                noticeTransportLoss()
+                return
+            }
             sendTcpReset(packet, tcp)
             return
         }
@@ -851,6 +963,8 @@ internal class KotlinTunForwarder(
         if (isInitialSyn) {
             session.onSyn(tcp.sequence)
             requestPressureCleanup()
+            // Only a hint, rate-limited on the other side; the read thread must never wait on it.
+            runCatching { onNewFlow() }
         }
 
         if (tcp.flags.hasFlag(TCP_ACK)) {
@@ -1092,50 +1206,44 @@ internal class KotlinTunForwarder(
         deadlineAtMs: Long,
     ) {
         if (!running.get()) return
-        val transport = currentDnsTransport() ?: return
-        val sshSession = transport.session
-        val dnsServer = addressToString(dnsServerAddress)
-        try {
-            val now = elapsedRealtimeMs()
-            val response = if (isDnsTcpCooldownActive(transport, now)) {
-                resolveDnsOverHttps(
-                    sshSession = sshSession,
-                    query = query,
-                    clientAddress = clientAddress,
-                    clientPort = clientPort,
-                    tcpError = null,
-                    deadlineAtMs = deadlineAtMs,
-                    transportGeneration = transport.generation,
+        val cacheKey = DnsMessage.questionKey(query, dnsServerAddress)
+        if (cacheKey != null) {
+            val cached = dnsCache.lookup(cacheKey, query)
+            if (cached != null) {
+                diagnostics.logDnsCacheHit()
+                sendUdpPacket(
+                    sourceAddress = dnsServerAddress,
+                    destinationAddress = clientAddress,
+                    sourcePort = DNS_PORT,
+                    destinationPort = clientPort,
+                    payload = cached,
                 )
-            } else {
-                try {
-                    resolveDnsOverTcp(
-                        sshSession = sshSession,
-                        query = query,
-                        dnsServer = dnsServer,
-                        clientAddress = clientAddress,
-                        clientPort = clientPort,
-                        deadlineAtMs = deadlineAtMs,
-                        transportGeneration = transport.generation,
-                    ).also {
-                        clearDnsTcpCooldown(transport)
-                    }
-                } catch (tcpError: Exception) {
-                    if (!setDnsTcpCooldown(transport, now + DNS_TCP_FAILURE_COOLDOWN_MS)) {
-                        throw EOFException("SSH transport changed while retrying DNS")
-                    }
-                    resolveDnsOverHttps(
-                        sshSession = sshSession,
-                        query = query,
-                        clientAddress = clientAddress,
-                        clientPort = clientPort,
-                        tcpError = tcpError,
-                        deadlineAtMs = deadlineAtMs,
-                        transportGeneration = transport.generation,
-                    )
+                return
+            }
+        }
+        val transport = currentDnsTransport() ?: run {
+            noticeTransportLoss()
+            return
+        }
+        val sshSession = transport.session
+        val upstreams = TunnelDnsPolicy.upstreamsFor(dnsServerAddress, ::isResolverSilent)
+        try {
+            val response = resolveThroughTunnel(
+                sshSession = sshSession,
+                query = query,
+                upstreams = upstreams,
+                clientAddress = clientAddress,
+                clientPort = clientPort,
+                deadlineAtMs = deadlineAtMs,
+                transportGeneration = transport.generation,
+            )
+            ensureDnsTransportActive(sshSession, transport.generation)
+            if (cacheKey != null) {
+                DnsMessage.cacheableTtlSeconds(response)?.let { ttlSeconds ->
+                    dnsCache.store(cacheKey, response, ttlSeconds)
                 }
             }
-            ensureDnsTransportActive(sshSession, transport.generation)
+            // The answer comes from the address the app asked, whichever resolver gave it.
             sendUdpPacket(
                 sourceAddress = dnsServerAddress,
                 destinationAddress = clientAddress,
@@ -1146,41 +1254,103 @@ internal class KotlinTunForwarder(
             recordDnsSuccess(transport)
         } catch (error: Exception) {
             val message = error.message ?: error::class.java.simpleName
-            val failure = "$dnsServer: $message"
+            val asked = upstreams.joinToString(", ") { upstream -> addressToString(upstream) }
+            val failure = "${addressToString(dnsServerAddress)} (asked $asked): $message"
             if (recordDnsFailure(failure, transport)) {
                 diagnostics.logDnsFailure(failure)
             }
         }
     }
 
+    /**
+     * DNS over TCP through the SSH session, one resolver after another, and nothing but port 53 on
+     * the server's side. A resolver that does not answer within its share of the time is remembered
+     * as silent, so the next queries go straight to the one that does.
+     */
+    private fun resolveThroughTunnel(
+        sshSession: Session,
+        query: ByteArray,
+        upstreams: List<Int>,
+        clientAddress: Int,
+        clientPort: Int,
+        deadlineAtMs: Long,
+        transportGeneration: Long,
+    ): ByteArray {
+        var lastError: Exception? = null
+        for ((index, upstream) in upstreams.withIndex()) {
+            val startedAtMs = elapsedRealtimeMs()
+            val remainingMs = deadlineAtMs - startedAtMs
+            if (remainingMs <= 0L) break
+            val isLast = index == upstreams.lastIndex
+            val budgetMs = if (isLast) remainingMs else TunnelDnsPolicy.attemptBudgetMs(upstream, remainingMs)
+            try {
+                val response = resolveDnsOverTcp(
+                    sshSession = sshSession,
+                    query = query,
+                    dnsServer = addressToString(upstream),
+                    clientAddress = clientAddress,
+                    clientPort = clientPort,
+                    deadlineAtMs = startedAtMs + budgetMs,
+                    transportGeneration = transportGeneration,
+                )
+                silentResolvers.remove(upstream)
+                return response
+            } catch (error: Exception) {
+                lastError = error
+                // A transport that changed under the query says nothing about the resolver.
+                ensureDnsTransportActive(sshSession, transportGeneration)
+                if (budgetMs >= TunnelDnsPolicy.MIN_SILENCE_EVIDENCE_MS) {
+                    markResolverSilent(
+                        resolver = upstream,
+                        next = upstreams.getOrNull(index + 1),
+                        message = error.message ?: error::class.java.simpleName,
+                    )
+                }
+            }
+        }
+        throw lastError ?: SocketTimeoutException("DNS over SSH timed out after ${config.dnsQueryTimeoutMs}ms")
+    }
+
+    private fun isResolverSilent(resolver: Int): Boolean {
+        val silentUntilMs = silentResolvers[resolver] ?: return false
+        if (elapsedRealtimeMs() < silentUntilMs) return true
+        silentResolvers.remove(resolver, silentUntilMs)
+        return false
+    }
+
+    private fun markResolverSilent(resolver: Int, next: Int?, message: String) {
+        val previous = silentResolvers.put(resolver, elapsedRealtimeMs() + TunnelDnsPolicy.SILENT_RESOLVER_COOLDOWN_MS)
+        if (previous != null) return
+        diagnostics.logSilentResolver(
+            resolver = addressToString(resolver),
+            next = next?.let(::addressToString),
+            privateAddress = !TunnelDnsPolicy.isPublicUnicast(resolver),
+            message = message,
+        )
+    }
+
+    /**
+     * An app needed the tunnel and the SSH session is gone with it. The service polls for that
+     * every few seconds, so saying it now is the difference between a reconnect nobody notices and
+     * one that freezes every app until the next poll. Throttled: a stalled device retries a lot.
+     */
+    private fun noticeTransportLoss() {
+        // Paused included: that is when the service waits out a backoff, and an app asking for the
+        // tunnel is exactly the reason to stop waiting.
+        if (!running.get()) return
+        if (sshSessionReference.get()?.isConnected == true) return
+        val nowMs = elapsedRealtimeMs()
+        val lastReportedAtMs = transportLossReportedAtMs.get()
+        if (nowMs - lastReportedAtMs < TRANSPORT_LOSS_REPORT_INTERVAL_MS) return
+        if (!transportLossReportedAtMs.compareAndSet(lastReportedAtMs, nowMs)) return
+        diagnostics.logTransportLost()
+        onTransportSuspect()
+    }
+
     private fun currentDnsTransport(): DnsTransport? = synchronized(transportLock) {
         val activeSession = sshSessionReference.get()?.takeIf { it.isConnected }
             ?: return@synchronized null
         DnsTransport(activeSession, transportGeneration)
-    }
-
-    private fun isDnsTcpCooldownActive(
-        expectedTransport: DnsTransport,
-        nowMs: Long,
-    ): Boolean = synchronized(transportLock) {
-        isDnsTransportActiveLocked(expectedTransport) && nowMs < dnsTcpRetryAfterMs
-    }
-
-    private fun setDnsTcpCooldown(
-        expectedTransport: DnsTransport,
-        retryAfterMs: Long,
-    ): Boolean = synchronized(transportLock) {
-        if (!isDnsTransportActiveLocked(expectedTransport)) return@synchronized false
-        dnsTcpRetryAfterMs = retryAfterMs
-        true
-    }
-
-    private fun clearDnsTcpCooldown(expectedTransport: DnsTransport) {
-        synchronized(transportLock) {
-            if (isDnsTransportActiveLocked(expectedTransport)) {
-                dnsTcpRetryAfterMs = 0L
-            }
-        }
     }
 
     private fun resolveDnsOverTcp(
@@ -1229,189 +1399,6 @@ internal class KotlinTunForwarder(
         }
     }
 
-    private fun resolveDnsOverHttps(
-        sshSession: Session,
-        query: ByteArray,
-        clientAddress: Int,
-        clientPort: Int,
-        tcpError: Exception?,
-        deadlineAtMs: Long,
-        transportGeneration: Long,
-    ): ByteArray {
-        var channel: ChannelDirectTCPIP? = null
-        var tlsSocket: SSLSocket? = null
-        try {
-            if (tcpError != null) {
-                diagnostics.logDnsFallback(tcpError.message ?: tcpError::class.java.simpleName)
-            }
-            channel = createDirectTcpChannel(
-                sshSession = sshSession,
-                host = DOH_ENDPOINT_ADDRESS,
-                port = DOH_ENDPOINT_PORT,
-                originAddress = clientAddress,
-                originPort = clientPort,
-            )
-            activeDnsChannels += channel
-            ensureDnsTransportActive(sshSession, transportGeneration)
-            return withDnsChannelDeadline(channel, deadlineAtMs) { remainingTimeoutMs ->
-                ensureDnsTransportActive(sshSession, transportGeneration)
-                channel.connect(minOf(SSH_CHANNEL_CONNECT_TIMEOUT_MS.toLong(), remainingTimeoutMs).toInt())
-                ensureDnsTransportActive(sshSession, transportGeneration)
-                val tunnelSocket = StreamBackedSocket(
-                    input = channel.inputStream,
-                    output = channel.outputStream,
-                    remotePort = DOH_ENDPOINT_PORT,
-                    closeAction = channel::disconnect,
-                )
-                tlsSocket = (SSLSocketFactory.getDefault() as SSLSocketFactory)
-                    .createSocket(tunnelSocket, DOH_ENDPOINT_HOST, DOH_ENDPOINT_PORT, true) as SSLSocket
-                tlsSocket.useClientMode = true
-                tlsSocket.sslParameters = tlsSocket.sslParameters.apply {
-                    endpointIdentificationAlgorithm = "HTTPS"
-                }
-                tlsSocket.soTimeout = minOf(DOH_READ_TIMEOUT_MS.toLong(), remainingTimeoutMs).toInt()
-                tlsSocket.startHandshake()
-
-                val output = tlsSocket.outputStream
-                val requestHeaders = buildString {
-                    append("POST /dns-query HTTP/1.1\r\n")
-                    append("Host: ")
-                    append(DOH_ENDPOINT_HOST)
-                    append("\r\n")
-                    append("Accept: application/dns-message\r\n")
-                    append("Content-Type: application/dns-message\r\n")
-                    append("Content-Length: ")
-                    append(query.size)
-                    append("\r\n")
-                    append("Connection: close\r\n")
-                    append("\r\n")
-                }.toByteArray(StandardCharsets.US_ASCII)
-                output.write(requestHeaders)
-                output.write(query)
-                output.flush()
-
-                readDnsOverHttpsResponse(tlsSocket.inputStream)
-            }
-        } finally {
-            runCatching { tlsSocket?.close() }
-            channel?.let(activeDnsChannels::remove)
-            channel?.disconnect()
-        }
-    }
-
-    private fun readDnsOverHttpsResponse(input: InputStream): ByteArray {
-        val headers = readHttpHeaders(input)
-        if (headers.statusCode !in HTTP_SUCCESS_MIN..HTTP_SUCCESS_MAX) {
-            throw EOFException("DoH HTTP ${headers.statusCode}")
-        }
-        val transferEncoding = headers.values["transfer-encoding"].orEmpty()
-        val body = if (transferEncoding.contains("chunked", ignoreCase = true)) {
-            readChunkedHttpBody(input)
-        } else {
-            val contentLength = headers.values["content-length"]?.toIntOrNull()
-            if (contentLength != null) {
-                if (contentLength <= 0 || contentLength > DNS_MAX_RESPONSE_SIZE) {
-                    throw EOFException("Invalid DoH response length: $contentLength")
-                }
-                ByteArray(contentLength).also { readFully(input, it) }
-            } else {
-                readUntilEof(input, DNS_MAX_RESPONSE_SIZE)
-            }
-        }
-        if (body.isEmpty() || body.size > DNS_MAX_RESPONSE_SIZE) {
-            throw EOFException("Invalid DoH body length: ${body.size}")
-        }
-        return body
-    }
-
-    private fun readHttpHeaders(input: InputStream): HttpHeaders {
-        val bytes = ByteArrayOutputStream(HTTP_MAX_HEADER_BYTES)
-        var matched = 0
-        while (bytes.size() < HTTP_MAX_HEADER_BYTES) {
-            val next = input.read()
-            if (next < 0) throw EOFException("Unexpected EOF before DoH headers")
-            bytes.write(next)
-            matched = if (next.toByte() == HTTP_HEADER_TERMINATOR[matched]) {
-                matched + 1
-            } else {
-                if (next == HTTP_HEADER_TERMINATOR[0].toInt()) 1 else 0
-            }
-            if (matched == HTTP_HEADER_TERMINATOR.size) break
-        }
-        if (matched != HTTP_HEADER_TERMINATOR.size) {
-            throw EOFException("DoH headers are too large")
-        }
-        val text = bytes.toByteArray().toString(StandardCharsets.ISO_8859_1)
-        val lines = text.split("\r\n")
-        val statusCode = lines.firstOrNull()
-            ?.split(" ")
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-            ?: throw EOFException("Invalid DoH status line")
-        val values = lines.drop(1)
-            .mapNotNull { line ->
-                val separator = line.indexOf(':')
-                if (separator <= 0) return@mapNotNull null
-                line.substring(0, separator).trim().lowercase() to line.substring(separator + 1).trim()
-            }
-            .toMap()
-        return HttpHeaders(statusCode, values)
-    }
-
-    private fun readChunkedHttpBody(input: InputStream): ByteArray {
-        val body = ByteArrayOutputStream(DNS_MAX_RESPONSE_SIZE)
-        while (true) {
-            val chunkSize = readHttpLine(input).substringBefore(';').trim().toInt(16)
-            if (chunkSize == 0) {
-                readHttpLine(input)
-                return body.toByteArray()
-            }
-            if (chunkSize < 0 || body.size() + chunkSize > DNS_MAX_RESPONSE_SIZE) {
-                throw EOFException("Invalid DoH chunk size: $chunkSize")
-            }
-            val chunk = ByteArray(chunkSize)
-            readFully(input, chunk)
-            body.write(chunk)
-            val cr = input.read()
-            val lf = input.read()
-            if (cr != '\r'.code || lf != '\n'.code) {
-                throw EOFException("Invalid DoH chunk delimiter")
-            }
-        }
-    }
-
-    private fun readHttpLine(input: InputStream): String {
-        val bytes = ByteArrayOutputStream()
-        while (bytes.size() < HTTP_MAX_LINE_BYTES) {
-            val next = input.read()
-            if (next < 0) throw EOFException("Unexpected EOF in DoH response")
-            if (next == '\n'.code) {
-                val lineBytes = bytes.toByteArray()
-                val lineLength = if (lineBytes.lastOrNull() == '\r'.code.toByte()) {
-                    lineBytes.size - 1
-                } else {
-                    lineBytes.size
-                }
-                return String(lineBytes, 0, lineLength, StandardCharsets.ISO_8859_1)
-            }
-            bytes.write(next)
-        }
-        throw EOFException("DoH line is too large")
-    }
-
-    private fun readUntilEof(input: InputStream, maxBytes: Int): ByteArray {
-        val body = ByteArrayOutputStream(maxBytes)
-        val buffer = ByteArray(1024)
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) return body.toByteArray()
-            if (body.size() + read > maxBytes) {
-                throw EOFException("DoH response is too large")
-            }
-            body.write(buffer, 0, read)
-        }
-    }
-
     private fun recordDnsSuccess(expectedTransport: DnsTransport) {
         synchronized(transportLock) {
             if (isDnsTransportActiveLocked(expectedTransport)) {
@@ -1446,7 +1433,7 @@ internal class KotlinTunForwarder(
     private fun resetDnsFailureStateLocked() {
         dnsFailureStreak.set(0)
         degradationReported.set(false)
-        dnsTcpRetryAfterMs = 0L
+        silentResolvers.clear()
     }
 
     private fun isDnsTransportActiveLocked(expectedTransport: DnsTransport): Boolean {
@@ -1599,7 +1586,7 @@ internal class KotlinTunForwarder(
         val remainingTimeoutMs = (deadlineAtMs - elapsedRealtimeMs()).coerceAtLeast(0L)
         if (remainingTimeoutMs == 0L) {
             channel.disconnect()
-            throw SocketTimeoutException("DNS over SSH timed out after ${config.dnsQueryTimeoutMs}ms")
+            throw SocketTimeoutException("DNS query used up its ${config.dnsQueryTimeoutMs}ms before it was sent")
         }
         val timedOut = AtomicBoolean(false)
         val timeout = executors.scheduleDnsTimeout(remainingTimeoutMs) {
@@ -1612,12 +1599,12 @@ internal class KotlinTunForwarder(
         try {
             val result = operation(remainingTimeoutMs)
             if (timedOut.get()) {
-                throw SocketTimeoutException("DNS over SSH timed out after ${config.dnsQueryTimeoutMs}ms")
+                throw SocketTimeoutException("DNS over SSH timed out after ${remainingTimeoutMs}ms")
             }
             return result
         } catch (error: Exception) {
             if (timedOut.get() && error !is SocketTimeoutException) {
-                throw SocketTimeoutException("DNS over SSH timed out after ${config.dnsQueryTimeoutMs}ms").apply {
+                throw SocketTimeoutException("DNS over SSH timed out after ${remainingTimeoutMs}ms").apply {
                     initCause(error)
                 }
             }
@@ -1678,7 +1665,24 @@ internal class KotlinTunForwarder(
 
     private class ForwarderExecutors(
         private val diagnostics: ForwarderDiagnostics,
+        maxConcurrentConnects: Int,
     ) {
+        /**
+         * Opening a `direct-tcpip` channel blocks until the SSH server has reached the destination -
+         * up to [SSH_CHANNEL_CONNECT_TIMEOUT_MS] for a host it cannot reach. On the shared control
+         * pool a handful of such hosts tied up every worker, and the uploads of every established
+         * flow queued behind them: the whole tunnel froze. Opens get their own threads, one per flow
+         * at most, so a dead destination only ever costs its own flow.
+         */
+        private val connectExecutor = ThreadPoolExecutor(
+            0,
+            maxConcurrentConnects,
+            WORKER_KEEP_ALIVE_MS,
+            TimeUnit.MILLISECONDS,
+            SynchronousQueue(),
+            NamedThreadFactory(CONNECT_THREAD_PREFIX),
+            ThreadPoolExecutor.AbortPolicy(),
+        )
         private val controlExecutor = ThreadPoolExecutor(
             CONTROL_WORKER_THREADS,
             CONTROL_WORKER_THREADS,
@@ -1742,6 +1746,10 @@ internal class KotlinTunForwarder(
             return execute(CONTROL_POOL_NAME, controlExecutor, task)
         }
 
+        fun executeConnect(task: () -> Unit): Boolean {
+            return execute(CONNECT_POOL_NAME, connectExecutor, task)
+        }
+
         fun executeDns(task: () -> Unit): Boolean {
             return execute(DNS_POOL_NAME, dnsExecutor, task)
         }
@@ -1766,6 +1774,18 @@ internal class KotlinTunForwarder(
             }
         }
 
+        /** Like [scheduleCleanup], but a rejection during teardown is not worth a log line. */
+        fun scheduleQuietCleanup(
+            delayMs: Long,
+            task: () -> Unit,
+        ): ScheduledFuture<*>? {
+            return try {
+                cleanupExecutor.schedule({ task() }, delayMs, TimeUnit.MILLISECONDS)
+            } catch (_: RejectedExecutionException) {
+                null
+            }
+        }
+
         fun scheduleDnsTimeout(
             delayMs: Long,
             task: () -> Unit,
@@ -1779,6 +1799,7 @@ internal class KotlinTunForwarder(
         }
 
         fun shutdownNow() {
+            connectExecutor.shutdownNow()
             controlExecutor.shutdownNow()
             udpRelayExecutor.shutdownNow()
             dnsExecutor.shutdownNow()
@@ -1964,7 +1985,7 @@ internal class KotlinTunForwarder(
                 }
             }
             if (shouldStart) {
-                val scheduled = executors.executeControl { connectRemote() }
+                val scheduled = executors.executeConnect { connectRemote() }
                 if (!scheduled) {
                     lock.withLock {
                         connecting = false
@@ -2181,7 +2202,9 @@ internal class KotlinTunForwarder(
                         sleepAfterEmptyRead()
                         continue
                     }
-                    markActivity()
+                    val readAtMs = elapsedRealtimeMs()
+                    markActivity(readAtMs)
+                    diagnostics.markRemoteRead(readAtMs)
                     var offset = 0
                     while (offset < read) {
                         val chunkSize = minOf(config.tcpMss, read - offset)
@@ -2209,13 +2232,13 @@ internal class KotlinTunForwarder(
 
         fun idleForMs(now: Long): Long = now - lastActivityAtMs.get()
 
-        fun closeIdleUnderPressure(now: Long): Boolean {
+        fun closeIdleUnderPressure(now: Long, idleTtlMs: Long): Boolean {
             val idleForMs = idleForMs(now)
             val shouldClose = lock.withLock {
                 state != TcpState.CLOSED &&
                     state != TcpState.REMOTE_FIN_SENT &&
                     !clientUpload.isFinished &&
-                    idleForMs >= PRESSURE_IDLE_SESSION_TTL_MS
+                    idleForMs >= idleTtlMs
             }
             if (shouldClose) {
                 diagnostics.logIdleTimeout(addressToString(key.remoteAddress), key.remotePort, idleForMs)
@@ -2223,15 +2246,6 @@ internal class KotlinTunForwarder(
                 return true
             }
             return false
-        }
-
-        fun resetAfterDeviceWake(now: Long, minimumIdleMs: Long): Boolean {
-            val shouldReset = lock.withLock {
-                state != TcpState.CLOSED && idleForMs(now) >= minimumIdleMs
-            }
-            if (!shouldReset) return false
-            sendResetAndClose()
-            return true
         }
 
         private fun markActivity(now: Long = elapsedRealtimeMs()) {
@@ -2249,6 +2263,10 @@ internal class KotlinTunForwarder(
         ): Boolean {
             var offset = payloadOffset
             val endOffset = payloadOffset + payloadLength
+            // One deadline for handing this chunk over, not one per retry: a client that opens a
+            // byte of window every few seconds would otherwise reset the clock forever and keep
+            // holding the SSH session that every other flow shares.
+            val handoverDeadlineAtMs = elapsedRealtimeMs() + CLIENT_WINDOW_STALL_TIMEOUT_MS
             while (offset < endOffset) {
                 var sequence = 0L
                 var acknowledgement = 0L
@@ -2291,16 +2309,42 @@ internal class KotlinTunForwarder(
                     }
                 }
                 if (shouldWaitForWindow) {
-                    lock.withLock {
-                        while (state != TcpState.CLOSED && availableSendWindowLocked() <= 0) {
-                            try {
-                                sendWindowChanged.await()
-                            } catch (_: InterruptedException) {
-                                Thread.currentThread().interrupt()
-                                return false
+                    // While this flow waits it stops draining its SSH channel, and JSch delivers
+                    // every channel on one thread: a client that never reopens its window would
+                    // freeze the whole tunnel, not just itself. So the wait is bounded, and a flow
+                    // that sits on a closed window past the deadline is reset on its own.
+                    var stalledOnClientWindow = false
+                    diagnostics.enterClientWindowWait()
+                    try {
+                        lock.withLock {
+                            while (state != TcpState.CLOSED && availableSendWindowLocked() <= 0) {
+                                try {
+                                    sendWindowChanged.await(
+                                        CLIENT_WINDOW_WAIT_SLICE_MS,
+                                        TimeUnit.MILLISECONDS,
+                                    )
+                                } catch (_: InterruptedException) {
+                                    Thread.currentThread().interrupt()
+                                    return false
+                                }
+                                if (elapsedRealtimeMs() >= handoverDeadlineAtMs) {
+                                    stalledOnClientWindow = true
+                                    break
+                                }
                             }
+                            if (state == TcpState.CLOSED) return false
                         }
-                        if (state == TcpState.CLOSED) return false
+                    } finally {
+                        diagnostics.exitClientWindowWait()
+                    }
+                    if (stalledOnClientWindow) {
+                        diagnostics.logClientWindowStall(
+                            host = addressToString(key.remoteAddress),
+                            port = key.remotePort,
+                            stalledForMs = CLIENT_WINDOW_STALL_TIMEOUT_MS,
+                        )
+                        sendResetAndClose()
+                        return false
                     }
                 } else {
                     offset += chunkSize
@@ -2989,7 +3033,7 @@ internal class KotlinTunForwarder(
         private val tcpClientFinTimeoutCount = AtomicInteger(0)
         private val tcpIdleTimeoutCount = AtomicInteger(0)
         private val dnsFailureCount = AtomicInteger(0)
-        private val dnsFallbackCount = AtomicInteger(0)
+        private val silentResolverCount = AtomicInteger(0)
         private val workerRejectedCount = AtomicInteger(0)
         private val sessionLimitCount = AtomicInteger(0)
         private val udpRelayOpenCount = AtomicInteger(0)
@@ -3002,6 +3046,13 @@ internal class KotlinTunForwarder(
         private val udpRelayDisabledCount = AtomicInteger(0)
         private val udpRelayReadyCount = AtomicInteger(0)
         private val udpRejectionSummaryCount = AtomicInteger(0)
+        private val dnsCacheHitCount = AtomicInteger(0)
+        private val pressureCleanupCount = AtomicInteger(0)
+        private val tunStallCount = AtomicInteger(0)
+        private val clientWindowStallCount = AtomicInteger(0)
+        private val lastRemoteReadAt = AtomicLong(0L)
+        private val clientWindowWaiters = AtomicInteger(0)
+        private val transportLostCount = AtomicInteger(0)
         private val reflectorUnreachableCount = AtomicInteger(0)
         private val telegramTcpOpenCount = AtomicInteger(0)
         private val telegramTcpEstablishedCount = AtomicInteger(0)
@@ -3055,6 +3106,21 @@ internal class KotlinTunForwarder(
             )
         }
 
+        fun logPressureCleanup(
+            closedCount: Int,
+            activeCount: Int,
+            maxSessions: Int,
+            idleTtlMs: Long,
+        ) {
+            logLimited(
+                counter = pressureCleanupCount,
+                message = "TUN TCP session pressure: closed $closedCount session(s) idle for " +
+                    "${idleTtlMs / 1_000}s or more; table was $activeCount/$maxSessions",
+                suppressedMessage = "TUN TCP: further session-pressure logs suppressed",
+                limit = MAX_SESSION_PRESSURE_LOGS,
+            )
+        }
+
         fun logDnsFailure(message: String) {
             logLimited(
                 counter = dnsFailureCount,
@@ -3063,11 +3129,88 @@ internal class KotlinTunForwarder(
             )
         }
 
-        fun logDnsFallback(message: String) {
+        fun markRemoteRead(nowMs: Long) {
+            lastRemoteReadAt.set(nowMs)
+        }
+
+        fun lastRemoteReadAtMs(): Long = lastRemoteReadAt.get()
+
+        fun enterClientWindowWait() {
+            clientWindowWaiters.incrementAndGet()
+        }
+
+        fun exitClientWindowWait() {
+            clientWindowWaiters.decrementAndGet()
+        }
+
+        fun clientWindowWaitCount(): Int = clientWindowWaiters.get()
+
+        fun logTunStall(
+            silentForMs: Long,
+            activeSessions: Int,
+            awaitingClientWindow: Int,
+            writerQueueDepth: Int,
+            writerQueueCapacity: Int,
+        ) {
             logLimited(
-                counter = dnsFallbackCount,
-                message = "DNS over SSH TCP failed, trying DoH fallback: $message",
-                suppressedMessage = "DNS over SSH: further DoH fallback logs suppressed",
+                counter = tunStallCount,
+                message = "TUN stall: nothing received over SSH for ${silentForMs}ms while apps are " +
+                    "still sending; sessions=$activeSessions, waitingForClientWindow=$awaitingClientWindow, " +
+                    "tunWriterQueue=$writerQueueDepth/$writerQueueCapacity",
+                suppressedMessage = "TUN stall: further stall reports suppressed",
+                limit = MAX_TUN_STALL_LOGS,
+            )
+        }
+
+        fun logClientWindowStall(host: String, port: Int, stalledForMs: Long) {
+            logLimited(
+                counter = clientWindowStallCount,
+                message = "TUN TCP reset $host:$port: the app stopped reading for " +
+                    "${stalledForMs / 1_000}s while data kept arriving, and a flow parked that long " +
+                    "holds the whole SSH session",
+                suppressedMessage = "TUN TCP: further client-window stall logs suppressed",
+                limit = MAX_TUN_STALL_LOGS,
+            )
+        }
+
+        fun logTunStallCleared(stalledForMs: Long) {
+            logLimited(
+                counter = tunStallCount,
+                message = "TUN stall cleared after ${stalledForMs}ms",
+                suppressedMessage = "TUN stall: further stall reports suppressed",
+                limit = MAX_TUN_STALL_LOGS,
+            )
+        }
+
+        fun logDnsCacheHit() {
+            logLimited(
+                counter = dnsCacheHitCount,
+                message = "DNS answered from the forwarder cache without a round trip through SSH",
+                suppressedMessage = "DNS cache: further local answers are not logged",
+                limit = MAX_DNS_CACHE_LOGS,
+            )
+        }
+
+        fun logTransportLost() {
+            logLimited(
+                counter = transportLostCount,
+                message = "SSH transport is gone while traffic is waiting; asking for an immediate reconnect",
+                suppressedMessage = "Kotlin TUN: further transport-loss notices suppressed",
+            )
+        }
+
+        fun logSilentResolver(resolver: String, next: String?, privateAddress: Boolean, message: String) {
+            val why = if (privateAddress) {
+                "most likely a resolver on the phone's own network, which the SSH server cannot reach"
+            } else {
+                message
+            }
+            val instead = next?.let { "asking $it instead" } ?: "no other resolver left to ask"
+            logLimited(
+                counter = silentResolverCount,
+                message = "DNS over SSH: $resolver did not answer ($why); $instead; skipping it for " +
+                    "${TunnelDnsPolicy.SILENT_RESOLVER_COOLDOWN_MS / 60_000} minutes",
+                suppressedMessage = "DNS over SSH: further silent-resolver logs suppressed",
             )
         }
 
@@ -3263,43 +3406,10 @@ internal class KotlinTunForwarder(
         val remotePort: Int,
     )
 
-    private data class HttpHeaders(
-        val statusCode: Int,
-        val values: Map<String, String>,
-    )
-
     private data class DnsTransport(
         val session: Session,
         val generation: Long,
     )
-
-    private class StreamBackedSocket(
-        private val input: InputStream,
-        private val output: OutputStream,
-        private val remotePort: Int,
-        private val closeAction: () -> Unit,
-    ) : Socket() {
-        @Volatile
-        private var closed = false
-
-        override fun getInputStream(): InputStream = input
-
-        override fun getOutputStream(): OutputStream = output
-
-        override fun close() {
-            if (closed) return
-            closed = true
-            closeAction()
-        }
-
-        override fun isConnected(): Boolean = !closed
-
-        override fun isClosed(): Boolean = closed
-
-        override fun getInetAddress(): InetAddress = InetAddress.getLoopbackAddress()
-
-        override fun getPort(): Int = remotePort
-    }
 
     internal data class Ipv4Packet(
         val source: Int,
@@ -3649,11 +3759,13 @@ internal class KotlinTunForwarder(
     private companion object {
         const val READ_THREAD_NAME = "kotlin-tun-forwarder"
         const val CONTROL_THREAD_PREFIX = "kotlin-tun-control"
+        const val CONNECT_THREAD_PREFIX = "kotlin-tun-connect"
         const val DNS_THREAD_PREFIX = "kotlin-tun-dns"
         const val DNS_TIMEOUT_THREAD_PREFIX = "kotlin-tun-dns-timeout"
         const val REMOTE_READ_THREAD_PREFIX = "kotlin-tun-read"
         const val CLEANUP_THREAD_PREFIX = "kotlin-tun-cleanup"
         const val CONTROL_POOL_NAME = "control"
+        const val CONNECT_POOL_NAME = "connect"
         const val DNS_POOL_NAME = "dns"
         const val DNS_TIMEOUT_POOL_NAME = "dns-timeout"
         const val REMOTE_READ_POOL_NAME = "remote-read"
@@ -3664,7 +3776,9 @@ internal class KotlinTunForwarder(
         const val MAX_UDP_RELAY_QUEUE_SIZE = 256
         const val CONTROL_WORKER_THREADS = 8
         const val MAX_CONTROL_QUEUE_SIZE = 1_024
-        const val DNS_WORKER_THREADS = 4
+        const val CONNECT_THREAD_SLACK = 32
+        // A query holds its worker until its resolver answers or its time is up.
+        const val DNS_WORKER_THREADS = 16
         const val MAX_DNS_QUEUE_SIZE = 256
         const val DNS_TIMEOUT_WORKER_THREADS = 4
         const val MIN_REMOTE_READ_THREADS = 0
@@ -3683,18 +3797,13 @@ internal class KotlinTunForwarder(
         const val DNS_TCP_LENGTH_SIZE = 2
         const val DNS_MAX_RESPONSE_SIZE = 4_096
         const val DNS_DEGRADATION_FAILURE_THRESHOLD = 3
-        const val DNS_TCP_FAILURE_COOLDOWN_MS = 60_000L
-        const val DOH_ENDPOINT_ADDRESS = "1.1.1.1"
-        const val DOH_ENDPOINT_HOST = "cloudflare-dns.com"
-        const val DOH_ENDPOINT_PORT = 443
-        const val DOH_READ_TIMEOUT_MS = 10_000
-        const val HTTP_MAX_HEADER_BYTES = 16 * 1024
-        const val HTTP_MAX_LINE_BYTES = 4 * 1024
-        const val HTTP_SUCCESS_MIN = 200
-        const val HTTP_SUCCESS_MAX = 299
         const val REMOTE_FIN_SESSION_TTL_MS = 30_000L
         const val CLIENT_FIN_SESSION_TTL_MS = 60_000L
-        const val PRESSURE_IDLE_SESSION_TTL_MS = 35_000L
+        // Long enough that a parked keep-alive survives: servers hold theirs for 60-120s, and an
+        // app that loses one shows the user a reconnect.
+        const val PRESSURE_IDLE_SESSION_TTL_MS = 150_000L
+        // The table is full and the next flow would be refused, so a stale session has to go.
+        const val SATURATED_IDLE_SESSION_TTL_MS = 20_000L
         // One answer per new flow is the point, so the ceiling is generous and the pacing is
         // per-flow: a silent drop costs the client a handshake timeout it does not need to pay.
         const val UDP_REJECT_BURST = 64
@@ -3706,6 +3815,18 @@ internal class KotlinTunForwarder(
         const val MAX_SUMMARISED_UDP_PORTS = 16
         const val TOP_SUMMARISED_UDP_PORTS = 3
         const val MAX_UNSUPPORTED_UDP_LOGS = 20
+        const val MAX_DNS_CACHE_LOGS = 3
+        const val MAX_SESSION_PRESSURE_LOGS = 20
+        const val MAX_TUN_STALL_LOGS = 30
+        const val STALL_WATCHDOG_INTERVAL_MS = 500L
+        const val STALL_WATCHDOG_IDLE_INTERVAL_MS = 5_000L
+        const val STALL_SILENCE_THRESHOLD_MS = 1_500L
+        const val STALL_CLIENT_ACTIVITY_MS = 1_000L
+        const val CLIENT_WINDOW_WAIT_SLICE_MS = 250L
+        // Long enough for an app that is merely busy, short enough that a wedged flow cannot hold
+        // the shared SSH session for a noticeable time.
+        const val CLIENT_WINDOW_STALL_TIMEOUT_MS = 10_000L
+        const val TRANSPORT_LOSS_REPORT_INTERVAL_MS = 1_000L
         const val UDP_RELAY_IDLE_CHECK_MS = 15_000L
         const val UDP_RELAY_IDLE_TTL_MS = 45_000L
         const val MAX_PENDING_UDP_UPLINK_BYTES = 64 * 1024
@@ -3742,7 +3863,6 @@ internal class KotlinTunForwarder(
         const val TCP_OPTION_MSS = 2
         const val TCP_MSS_OPTION_SIZE = 4
         const val UINT_MASK = 0xFFFF_FFFFL
-        val HTTP_HEADER_TERMINATOR = byteArrayOf('\r'.code.toByte(), '\n'.code.toByte(), '\r'.code.toByte(), '\n'.code.toByte())
         val EMPTY_BYTES = ByteArray(0)
     }
 }

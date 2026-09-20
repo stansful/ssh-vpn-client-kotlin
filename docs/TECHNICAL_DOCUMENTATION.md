@@ -310,6 +310,8 @@ UI учитывает и transport, и logical owner: Smart/OpenSource не по
 - `Tun2SocksManager`.
 - `KotlinTunForwarder`.
 - `VpnProtectedSocketFactory`.
+- `SshTransportLink` / `LinkWatchdog` (раздел 14.1).
+- `ReconnectSupervisor`, `ReconnectWakeHelper` (раздел 16).
 
 Поток подключения:
 
@@ -342,6 +344,56 @@ Fingerprint behavior:
 - Поддерживаются OpenSSH SHA-256 и legacy MD5; сравнение digest выполняется constant-time.
 - При mismatch authentication не запускается, возвращается `Fingerprint mismatch`.
 
+### 14.1 SSH link: транспорт, который нельзя потерять молча
+
+Каждая SSH-сессия получает `SshTransportLink` (`SSH link #N` в логе). Сокет по-прежнему открывает
+`VpnProtectedSocketFactory` (`resolve -> bind -> protect -> connect`), но теперь им владеет приложение,
+а не JSch:
+
+- `TCP_USER_TIMEOUT = 30 s` через `ParcelFileDescriptor.fromSocket` + `Os.setsockoptInt`: если
+  отправленные данные 30 s бодрствования не подтверждены, ядро рвёт соединение, и все зависшие
+  `read()`/`write()` JSch падают. Без опции Linux ретраит около 15 минут, и всё это время JSch считает
+  сессию живой. Если опция не встала - строка `TCP_USER_TIMEOUT not applied`, не фатально.
+- Обёртки стримов сокета считают байты: возраст последнего байта в обе стороны, где сейчас reader
+  JSch, висит ли запись, первая запись без ответа сервера.
+- `kill()` закрывает сокет из любого потока без блокировки, в том числе посреди `connect()`.
+- Общий дедлайн попытки: `2 x connectTimeout`, не меньше 15 s (реконнект 8 s -> 16 s, первое
+  подключение 20 s -> 40 s). `session.connect(timeout)` ограничивает только отдельное чтение
+  handshake; сервер, который цедит байты, раньше держал попытку бесконечно. Ошибка маппится в
+  `Connection timeout`.
+- Разбор никогда не ждёт сеть: сначала закрывается сокет, `Session.disconnect()` уходит в пул
+  потоков. На мёртвом линке `disconnect()` пишет `CHANNEL_CLOSE` через тот же lock записи JSch, на
+  котором висит писатель, и раньше мог встать вместе с реконнектом. `disconnectIfCurrent`,
+  `prepareForReconnect` и полный teardown закрывают сокет раньше, чем трогают каналы и форвардер.
+
+Watchdog (`LinkWatchdog`, чистая логика - `LinkJudge`) тикает только пока CPU не спит, все пороги
+считаются в `uptimeMillis`. Вердикты:
+
+- `PROBE_TIMEOUT`: после SSH keepalive (`keepalive@jcraft.com`, отвечает сам sshd) 8 s не пришло ни
+  байта, а reader JSch всё это время ждал в `read()`. Часы ответа стартуют, когда keepalive реально
+  записан; отметка RX берётся прямо перед записью, так что быстрый ответ не теряется. Ответом
+  считается любой байт от сервера.
+- Keepalive, записанный сразу после аплоада от 32 KiB (за последние 8-16 s), может стоять в очереди
+  ядра за этими данными - очередь приложению не видна. Такая проба ждёт ответа 45 s, вердикт пишет
+  `written behind X of upload`. Живой аплоад отвечает раньше: sshd шлёт window adjust примерно на
+  каждые 96 KiB, а мёртвый путь под аплоадом ловит TCP_USER_TIMEOUT.
+- Проба одна за раз: пока предыдущая без ответа, новая не уходит (`ALREADY_PENDING`). Keepalive,
+  который JSch не смог даже записать за минуту, снимается без вердикта.
+- `READER_GONE`, `BLOCKED_WRITE` (запись в сокет не возвращается 45 s - страховка к
+  TCP_USER_TIMEOUT), `PROBE_SEND_FAILED`.
+- `READER_STALLED`: reader 20 s стоит на доставке данных в один канал (`PipedInputStream.awaitSpace`)
+  и не читает сокет - head-of-line, заморожены все потоки. С 5 s пишется строка со стеком reader'а.
+  Это страховка к собственному пределу форвардера в 10 s для потока, ждущего окно клиента.
+
+Проба уходит на каждое включение экрана, событие сети и `TUN stall`; на новый TCP-поток, если линк
+молчал 20 s реального времени, сон включительно (не чаще раза в 10 s); и по собственному триггеру
+линка - что-то отправили, а сервер 6 s молчит (не чаще раза в 15 s). Последнее ловит путь, умерший под аплоадом: писатели JSch стоят
+там на SSH-окне канала, а не в `socket.write`, и другие признаки не срабатывают. При вердикте сокет
+уже закрыт, `isConnected` падает за миллисекунды, сервис получает `TransportDead(linkId)`.
+
+Для полевой проверки half-open без изменений на сервере есть `tools/blackhole_proxy.py`: прокси на
+Mac, который по `b` перестаёт пропускать байты в обе стороны без FIN и RST.
+
 ## 15. Kotlin TUN forwarder
 
 `KotlinTunForwarder` читает IPv4 packets из TUN и реализует forwarding на уровне приложения.
@@ -350,9 +402,47 @@ Fingerprint behavior:
 
 - TCP forwarding через SSH `direct-tcpip`.
 - UDP DNS на port `53`.
-- DNS-over-TCP через SSH.
-- DNS-over-HTTPS fallback на Cloudflare `cloudflare-dns.com` / `1.1.1.1:443`, если DNS-over-TCP деградирует.
+- DNS-over-TCP через SSH, только port `53` на стороне сервера. Приложение само никуда по `443` не
+  ходит: DoH-fallback на `1.1.1.1:443` убран.
+- Порядок резолверов (`TunnelDnsPolicy`): тот, что спросило приложение, затем резолверы туннеля
+  (`1.1.1.1`, `8.8.8.8` - те же, что VPN-интерфейс отдаёт приложениям). Ответ всегда возвращается от
+  адреса, который спросило приложение. Резолвер, за которым идёт следующий, получает половину
+  оставшегося времени запроса, а резолвер на частном адресе - не больше `1.5 s`: внутренний резолвер
+  на стороне сервера отвечает за миллисекунды, а роутер телефона (`192.168.x.1`, резолвер оператора в
+  `10.x`/`100.64.x`) из сети сервера недостижим.
+- Резолвер, который не ответил, запоминается как молчащий на `5` минут (до смены SSH-транспорта) и
+  пропускается: платит только первый запрос. Строка в логе:
+  `DNS over SSH: <резолвер> did not answer (...); asking <следующий> instead`.
+- Открытие `direct-tcpip` канала ждёт, пока сервер дозвонится до адресата, до `10 s` для
+  недостижимого. Поэтому открытия идут в своём пуле (`connect`, поток на поток TCP, до двух лимитов
+  сессий + `32`: закрытый поток держит своё открытие до таймаута), а не в общем `control`: раньше несколько недостижимых адресов занимали все `8`
+  control-потоков, и за ними вставали загрузки всех живых потоков - замирал весь туннель. DNS -
+  `16` воркеров вместо `4`.
 - VoIP UDP на Telegram-рефлекторы - relay поверх TCP (см. ниже).
+
+### 15.0 Кэш DNS и watchdog датапата
+
+- Ответы UDP/53 кэшируются в forwarder (`DnsCache.kt`): ключ - резолвер плюс вопрос с именем в
+  нижнем регистре, срок жизни - минимальный TTL записи в ответе, потолок `600 s`, `512` ответов,
+  вытеснение LRU. Без кэша каждый запрос стоил отдельного SSH-канала и двух round trip'ов, а одна
+  страница тянет десятки имён.
+- Переиспользованный ответ переадресуется на новый query id, а TTL всех записей уменьшается на
+  время, проведённое в кэше, чтобы клиент не держал его дольше положенного. Кэшируются только
+  обычные запросы с одним вопросом и ответы `NOERROR`/`NXDOMAIN`; всё, что не разобралось, идёт к
+  резолверу. Кэш переживает реконнект SSH и отвечает во время него.
+- Watchdog датапата раз в `500 ms` проверяет связку «приложения шлют, а из SSH не пришло ничего
+  дольше `1.5 s`» и пишет одну строку на эпизод: сколько сессий активно, сколько потоков стоит в
+  ожидании окна клиента, насколько заполнена очередь TUN-writer'а, плюс строку о том, сколько
+  залипание длилось. Это ответ на фризы, при которых в логе раньше было пусто: реконнекта нет,
+  ошибки нет, значит стоп внутри датапата.
+- Чистка сессий под давлением больше не трогает живые keep-alive: порог простоя `150 s`, короткий
+  `20 s` - только когда таблица упёрлась в лимит и новый поток всё равно получил бы отказ. Каждый
+  проход пишет строку с числом закрытых сессий и заполненностью таблицы.
+- Начало и конец эпизода залипания уходят в сервис (`onTransportStall`): начало - повод для пробы
+  SSH-линка и первая ступень лестницы деградации (раздел 16). Эпизод, переживший hot reconnect,
+  сообщается заново - уже про новый транспорт. Новый TCP-поток (`onNewFlow`) даёт
+  сервису проверить линк, молчавший 20 s. Оба колбэка только кладут событие и не блокируют поток
+  чтения TUN.
 
 ### 15.1 VoIP UDP relay
 
@@ -429,33 +519,98 @@ SSH не умеет форвардить UDP: `direct-tcpip` - это тольк
 - DNS timeout core threads завершаются после idle.
 - Periodic session maintenance отсутствует: client/remote FIN cleanup планируется событийно, сохранённые futures отменяются при close/reschedule, pressure cleanup запускается single-flight только при превышении порога. Client-FIN cleanup использует 60 секунд именно бездействия после последней half-close активности, remote-FIN TTL — 30 секунд; cleanup worker также освобождает thread stack после 60 секунд idle.
 - Лимит подробных diagnostic logs.
-- TCP reset для stale sessions после wake recovery.
+- Сброс idle TCP sessions после сна убран вместе со старым wake recovery: мёртвый SSH-линк заменяется
+  целиком, и hot reconnect сам сбрасывает все клиентские потоки (раздел 16).
 
 ## 16. SSH reconnect и wake recovery
 
 `SshVpnService` работает как foreground service и возвращает `START_NOT_STICKY`. Connect/disconnect сериализованы через lifecycle `Mutex`; монотонные command/run id, захваченный конкретным run process-wide runtime lease и service-owner identity отсекают устаревшие команды до захвата общих SSH/TUN/VPN managers. Terminal transition выполняется на main thread и меняет state/foreground только после успешного `stopSelfResult(startId)`, поэтому старый disconnect/failure не может остановить уже поставленный Android новый start. При disconnect SSH transport сначала закрывается на `Dispatchers.IO`, после чего отменённый connection job получает ограниченное время на завершение; `onDestroy` также ставит тяжёлый teardown в IO service scope. Xray runtime дополнительно привязан к generation, и stale cleanup может останавливать только generation своей попытки.
 
+Один владелец реконнекта:
+
+- Попытки подключения запускает только connection loop (`runConnectionLoop`). Решения принимает
+  `ReconnectSupervisor` - чистый класс без Android и потоков: фазы `CONNECTING/CONNECTED/BACKOFF`,
+  поколение (id SSH-линка), backoff и лестница деградации. Всё остальное - вердикты watchdog'а,
+  сетевые колбэки, экран, подсказки форвардера, alarm - кладётся в канал `runtimeEvents` как
+  `ReconnectTrigger` и получает решение: `Probe`, `Interrupt`, `RetryNow` или `Ignore`.
+- Триггеры несут время постановки в очередь и, где это важно, id линка. Вердикт, сообщение о
+  залипании или потеря адреса про линк #6 не трогают линк #7. Подсказка, пролежавшая в очереди всю
+  неудачную попытку (включение экрана, SYN приложения), уже учтена этой попыткой и не сокращает
+  следующее ожидание; смена сети - сокращает.
+- Каждый триггер оставляет строку `Reconnect trigger [источник] -> решение`, включая
+  проигнорированные, с причиной. Повтор одной пары (источник, тип решения) - не чаще раза в минуту,
+  со счётчиком `(+N similar)`; `Interrupt` не сворачивается никогда. Пустой лог во время фриза теперь
+  значит «ничего не сработало», а не «сработало и потерялось».
+
 Reconnect:
 
-- Initial delay: 250 мс.
-- Max delay: 30000 мс.
-- Backoff сбрасывается только после стабильного соединения минимум 30 секунд; короткие flapping-сессии не образуют hot reconnect loop.
-- Если usable `INTERNET + NOT_VPN` physical network отсутствует, loop suspend-ится на `StateFlow` до network callback.
-- Active monitor использует cadence 5 секунд при screen-on и 30 секунд при screen-off; handoff и screen events доставляются conflated signal немедленно.
+- Initial delay 250 мс, max 30000 мс при включённом экране. При выключенном экране backoff растёт
+  дальше, до 5 минут: каждая попытка во сне - это пробуждение, и лежащий сервер не должен будить
+  телефон раз в 30 секунд всю ночь.
+- Backoff сбрасывается только после соединения, прожившего минимум 30 секунд; потеря такого
+  соединения - реконнект сразу.
+- Ожидание прерывается триггерами: экран включился, сеть появилась, сменилась, прошла валидацию или
+  разблокирована, alarm. Между стартами попыток минимум 1 s. Потеря валидации ожидание не сокращает.
+- Трафик приложений без транспорта (SYN или DNS) тоже сокращает ожидание. Форвардер сообщает о нём и
+  на паузе, то есть именно во время backoff. Но только вдвое и не дальше 15 s от начала ожидания:
+  сессия, которая раз за разом умирает молодой, не должна оживляться каждым SYN.
+- Корутинный `delay` в deep sleep стоит, поэтому ожидание длиннее 4 s страхуется
+  `AlarmManager.setAndAllowWhileIdle(ELAPSED_REALTIME_WAKEUP)`, а короткое - wake lock'ом на его
+  длительность (при включённом экране это ничего не стоит и страхует выключение экрана посреди
+  ожидания). Когда триггер приближает дедлайн, защита перевзводится под новый.
+- Если usable `INTERNET + NOT_VPN` physical network отсутствует, loop suspend-ится на `StateFlow` до
+  network callback, без alarm и без lock попытки (мост до попытки истекает сам, максимум 10 s).
 - До первого успешного подключения unrecoverable auth/key/fingerprint ошибки переводят state в `ERROR`.
 - После первого успешного подключения сервис старается восстановиться автоматически.
 - Если TUN pipeline жив, SSH reconnect может пройти без пересоздания Android VPN interface.
 - Если forwarder деградировал или остановился, pipeline пересоздается.
 
+Wake lock:
+
+- `PARTIAL_WAKE_LOCK` `shadow-ssh:reconnect` берётся только на время реконнекта, всегда с таймаутом:
+  - одна попытка подключения при выключенном экране, уже после выбора сети: «дедлайн попытки + 15 s»,
+    отпускается в `finally`. Без него CPU засыпает между SYN и концом handshake, и начатый реконнект
+    стоит до следующего чужого пробуждения;
+  - ожидание backoff не длиннее 4 s (плюс 1 s запаса);
+  - мост до 10 s при выключенном экране от решения о реконнекте (вердикт watchdog'а, потеря сессии,
+    неудачная попытка, конец ожидания) до попытки: на любом переключении потоков CPU может уснуть, и
+    реконнект встанет до чужого пробуждения. Снимается, когда ожидание встаёт на alarm или попытка
+    берёт свой lock, иначе истекает сам;
+  - alarm-ресивер держит CPU до 10 s, пока loop не подхватит событие.
+- Держатели учитываются по отдельности, у каждого свой дедлайн: запоздалый release старой попытки не
+  снимает lock новой. Платформенный lock не reference counted и держится до самого дальнего дедлайна.
+
+Монитор активного соединения:
+
+- Cadence 5 секунд при screen-on и 30 секунд при screen-off, плюс немедленно по любому триггеру.
+- Транспорт считается живым по `isTransportAlive`, а не по `isConnected`: убитый или приговорённый
+  watchdog'ом линк транспортом не считается, даже пока JSch ещё не заметил.
+- `SSH heartbeat` раз в 5 минут: состояние линка (возраст последнего байта в обе стороны, где reader,
+  пробы и RTT), число TCP-сессий, сеть, `blocked`, экран, Doze и сколько устройство проспало с прошлого
+  heartbeat'а (рост `elapsedRealtime - uptimeMillis`).
+- Лестница деградации: `TUN stall` -> проба линка; стоп держится 60 s при живом линке -> hot reconnect;
+  вернулся в течение 10 минут -> полный rebuild VPN. Ступени срабатывают сразу: ступень существует,
+  только пока форвардер сообщает о залипании - минуту без байта данных каналов, пока приложения шлют.
+  Минута считается во времени бодрствования: телефон, проспавший её, залипания не наблюдал.
+  Сигнал деградации самого форвардера по-прежнему откладывается через `shouldDeferVpnDisruption`.
+  Транспорт, трижды подряд умерший моложе 30 s, получает один rebuild на серию.
+
 Wake recovery:
 
 - Сервис регистрирует dynamic receiver на `SCREEN_OFF` и `SCREEN_ON`.
-- Wake recovery запускается только если экран был выключен минимум 5 минут и после `SCREEN_ON` ждёт 2 секунды стабилизации сети.
-- Wake recovery не захватывает собственный wake lock; во время screen-off нет дополнительного polling.
-- После wake сначала выполняется короткий SSH transport health-check через `direct-tcpip` к `1.1.1.1:443`.
-- Только если transport stale, сбрасываются TCP sessions с idle минимум 2 минуты и SSH session отключается, что запускает reconnect loop.
+- На каждое включение экрана (раньше - только после 5 минут) уходит одна SSH keepalive-проба. NAT,
+  истёкший во сне, находится за время пробы, а не первым приложением, упавшим по таймауту.
+- Прежняя проба `direct-tcpip` к `1.1.1.1:443` и сброс idle TCP sessions после сна не используются:
+  мёртвый линк реконнектится целиком, а hot reconnect и так сбрасывает все клиентские потоки.
 
-Это решает кейс, когда после сна SSH session формально жива, но старые app sockets больше не проводят трафик.
+Сеть:
+
+- Handoff на другую физическую сеть работает как раньше, но сокет старого транспорта закрывается до
+  паузы форвардера, под `sessionLock` не остаётся ничего, что может ждать сеть.
+- `UnderlyingNetworkMonitor` дополнительно сообщает о событиях выбранной сети, которые не handoff:
+  смена адресов (`onLinkPropertiesChanged`), смена валидации, `onBlockedStatusChanged`. Исчез адрес
+  SSH-сокета - hot reconnect сразу; иначе проба. Блокировка трафика приложения Android'ом (Doze, Data
+  Saver, фоновые ограничения) пишется в лог и в heartbeat.
 
 ## 17. SSH diagnostics и terminal
 
@@ -468,7 +623,9 @@ Diagnostics:
 Tunnel check:
 
 - `MainViewModel.checkTunnel()` вызывает `SshConnectionManager.checkTcpForward()`.
-- По умолчанию проверяется `youtube.com:443` через SSH `direct-tcpip`.
+- По умолчанию SSH `direct-tcpip` открывается к самому серверу: `127.0.0.1:<порт SSH>`, затем
+  `127.0.0.1:22` (сервер за пробросом порта), затем адрес, к которому подключилось приложение.
+  Проверяется проброс через туннель, а сервер никуда, кроме своего SSH-порта, не подключается.
 - Кнопка меняет цвет по результату: idle, success, failure.
 
 Terminal:
@@ -939,8 +1096,9 @@ Backup:
 - Package icons декодируются максимум двумя параллельными `Dispatchers.IO` задачами, одинаковые запросы объединяются single-flight, результат хранится в LRU до 4 MiB с TTL 5 минут и повторно используется после закрытия app picker.
 - Public proxy import получает существующие fingerprints batch-запросами, staging secrets делает одним durable Tink commit, а Room switch выполняет одной транзакцией.
 - Public config auto-refresh выключен по умолчанию; если пользователь включает его, WorkManager запускается раз в 12 часов с flex 4 часа и constraints `network unmetered` + `battery not low`. Worker дополнительно требует физическую `VALIDATED + NOT_VPN + NOT_METERED` сеть и открывает HTTP через `Network.openConnection`.
-- VPN runtime не держит собственный long-lived wake/wifi lock. WorkManager/Android могут использовать кратковременный управляемый wake lock на время worker.
-- SSH wake recovery event-driven: только screen on/off receiver во время foreground service, один probe после сна от 5 минут.
+- VPN runtime не держит long-lived wake/wifi lock. WorkManager/Android могут использовать кратковременный управляемый wake lock на время worker. Единственное исключение в самом VPN - SSH реконнект: wake lock на одну попытку при выключенном экране (дедлайн + 15 s), мост до 10 s от решения о реконнекте до попытки, wake lock на ожидание backoff до 4 s и allow-while-idle alarm на более длинное; при выключенном экране backoff растёт до 5 минут.
+- SSH wake recovery event-driven: screen on/off receiver во время foreground service, на каждое включение экрана одна SSH keepalive-проба (один пакет).
+- Watchdog SSH-линка ничего не будит: тикает раз в 5 s, пока CPU бодрствует, и раз в 1 s только во время пробы, записи или молчания после записи.
 - SSH/Xray local monitor замедляется при screen-off; SSH keepalive увеличивается минимум до 120 секунд.
 - TUN writer и zero-window TCP используют blocking wait; periodic session maintenance отсутствует.
 - Outbound TCP кеширует до 64 возвращённых MTU-буферов в normal и до 32 в Battery Saver/low-RAM; sender не выполняет primitive boxing. Профили используют соответственно 128/64/32 flow, но одинаковые bounded 512 KiB upload queues и TUN queue 256. Retained-pool cap не является пределом transient allocations при backlog.
@@ -990,6 +1148,9 @@ Backup:
 - `AppUpdateDownloadStateTest` - progress state.
 - `SshPrivateKeyValidatorTest` - private key validation.
 - `WakeRecoveryPolicyTest` - screen off/on policy.
+- `SshLinkLivenessTest` - счётчики SSH-сокета, вердикты watchdog'а (проба, reader, head-of-line, зависшая запись, молчание после записи), `kill()` на реальном loopback-сокете.
+- `TunnelDnsPolicyTest` - порядок резолверов через SSH, пропуск молчащих, короткий бюджет для частного адреса, границы частных диапазонов.
+- `ReconnectSupervisorTest` - backoff (включая screen-off), поколения линков, устаревшие триггеры (время постановки в очередь, id линка), прерывание ожидания и его пределы, лестница деградации, flapping, throttle строк триггеров.
 - `ReconnectBackoffTest` - exponential backoff.
 - `ConnectionPowerPolicyTest` - cadence, network handoff и stable-connection backoff policy.
 - `TunPacketWriterTest` - ownership/recycle pooled packets и корректная длина TUN write.
@@ -1002,6 +1163,8 @@ Backup:
 - `VpnRuntimeLeaseRegistryTest`/`VpnLifecyclePolicyTest` - logical owner isolation и stale command races.
 - `RoomSmartProxyProfileRepositoryBatchTest` - isolated secrets, batch queries и guarded atomic finalization.
 - `XrayCoreDownloadGateTest` - process-wide single-flight core downloads.
+
+Что проверено стендом вне репозитория (при изменениях SSH-транспорта стоит повторить): настоящий JSch и OpenSSH через `tools/blackhole_proxy.py` - idle half-open, half-open под аплоадом, дедлайн handshake, abort зависшего connect, head-of-line, отсутствие ложных вердиктов под нагрузкой.
 
 Что не покрыто автоматикой:
 
@@ -1096,3 +1259,5 @@ Backup:
 - Новые background задачи должны иметь battery/network constraints и не держать wake lock без отдельного обоснования.
 - Любой новый release asset selection должен сохранять ABI-specific preference и universal fallback.
 - Новые пользовательские строки нужно выносить в resources, чтобы не ухудшать будущую локализацию.
+- SSH-транспорт закрывается только через `SshConnectionManager` (`killTransport`, `disconnectOwner`, `disconnectIfCurrent`): сокет первым, `Session.disconnect()` никогда синхронно на пути реконнекта и никогда под `sessionLock`.
+- Реконнект запускает только connection loop; новый источник событий - это новый `ReconnectTrigger` с решением в `ReconnectSupervisor`, а не ещё один путь, который сам рвёт сессию.

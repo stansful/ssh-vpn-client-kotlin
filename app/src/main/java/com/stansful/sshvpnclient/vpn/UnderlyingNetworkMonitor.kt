@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.vpn
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.first
 class UnderlyingNetworkMonitor(
     context: Context,
     private val onNetworkChanged: (old: Network?, new: Network?) -> Unit = { _, _ -> },
+    private val onNetworkEvent: (UnderlyingNetworkEvent) -> Unit = {},
 ) : Closeable {
     private val connectivityManager =
         requireNotNull(context.applicationContext.getSystemService(ConnectivityManager::class.java)) {
@@ -31,6 +33,8 @@ class UnderlyingNetworkMonitor(
         }
     private val lock = Any()
     private val capabilitiesByNetwork = LinkedHashMap<Network, NetworkCapabilities>()
+    private val addressesByNetwork = HashMap<Network, Set<InetAddress>>()
+    private val blockedByNetwork = HashMap<Network, Boolean>()
     private var registered = false
     private var hasInitialSelection = false
     private val selectedNetworkState = MutableStateFlow<Network?>(null)
@@ -47,9 +51,25 @@ class UnderlyingNetworkMonitor(
             updateNetwork(network, capabilities)
         }
 
+        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+            updateLinkProperties(network, linkProperties)
+        }
+
+        override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
+            val changed = synchronized(lock) {
+                if (!registered) return@synchronized false
+                val previous = blockedByNetwork.put(network, blocked)
+                // The first report after registration is the baseline, not news - unless it is a block.
+                selectedNetwork == network && (if (previous == null) blocked else previous != blocked)
+            }
+            if (changed) onNetworkEvent(UnderlyingNetworkEvent.BlockedStatusChanged(network, blocked))
+        }
+
         override fun onLost(network: Network) {
             val change = synchronized(lock) {
                 capabilitiesByNetwork.remove(network)
+                addressesByNetwork.remove(network)
+                blockedByNetwork.remove(network)
                 selectLocked()
             }
             change?.let { (old, new) -> onNetworkChanged(old, new) }
@@ -80,6 +100,9 @@ class UnderlyingNetworkMonitor(
 
     fun currentNetwork(): Network? = selectedNetwork
 
+    /** Whether Android blocks this app on [network] (API 29+ reports it); null until reported. */
+    fun blockedStatus(network: Network): Boolean? = synchronized(lock) { blockedByNetwork[network] }
+
     fun dnsEndpointFor(network: Network): String? {
         return runCatching {
             connectivityManager.getLinkProperties(network)
@@ -107,6 +130,8 @@ class UnderlyingNetworkMonitor(
             if (!registered) return@synchronized false
             registered = false
             capabilitiesByNetwork.clear()
+            addressesByNetwork.clear()
+            blockedByNetwork.clear()
             selectedNetwork = null
             selectedNetworkState.value = null
             true
@@ -130,12 +155,40 @@ class UnderlyingNetworkMonitor(
     }
 
     private fun updateNetwork(network: Network, capabilities: NetworkCapabilities) {
+        var validationEvent: UnderlyingNetworkEvent? = null
         val change = synchronized(lock) {
             if (!registered) return@synchronized null
-            capabilitiesByNetwork[network] = capabilities
-            selectLocked()
+            val previous = capabilitiesByNetwork.put(network, capabilities)
+            val selectionChange = selectLocked()
+            val validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            val wasValidated = previous?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            // Validation flipping on the network we keep is not a handoff, but it is news: a
+            // captive portal cleared, or the path behind the Wi-Fi went away.
+            val validationFlipped = wasValidated != null && wasValidated != validated
+            if (selectionChange == null && selectedNetwork == network && validationFlipped) {
+                validationEvent = UnderlyingNetworkEvent.ValidationChanged(network, validated)
+            }
+            selectionChange
         }
         change?.let { (old, new) -> onNetworkChanged(old, new) }
+        validationEvent?.let(onNetworkEvent)
+    }
+
+    private fun updateLinkProperties(network: Network, linkProperties: LinkProperties) {
+        val event = synchronized(lock) {
+            if (!registered) return@synchronized null
+            val addresses = linkProperties.linkAddresses.mapNotNull { it.address }.toSet()
+            val previous = addressesByNetwork.put(network, addresses)
+            if (previous == null || previous == addresses || selectedNetwork != network) {
+                return@synchronized null
+            }
+            UnderlyingNetworkEvent.AddressesChanged(
+                network = network,
+                added = (addresses - previous).toList(),
+                removed = (previous - addresses).toList(),
+            )
+        }
+        event?.let(onNetworkEvent)
     }
 
     private fun selectLocked(): Pair<Network?, Network?>? {
@@ -170,6 +223,29 @@ class UnderlyingNetworkMonitor(
         }
         return previous to selected
     }
+}
+
+/** In-place changes of the selected physical network that are not a handoff to another network. */
+sealed interface UnderlyingNetworkEvent {
+    val network: Network
+
+    /** DHCP renewal, a cellular re-attach or IPv6 address rotation: sockets bound to a removed address are dead. */
+    data class AddressesChanged(
+        override val network: Network,
+        val added: List<InetAddress>,
+        val removed: List<InetAddress>,
+    ) : UnderlyingNetworkEvent
+
+    data class ValidationChanged(
+        override val network: Network,
+        val validated: Boolean,
+    ) : UnderlyingNetworkEvent
+
+    /** Android started or stopped blocking this app on the network: Doze, Data Saver, background limits. */
+    data class BlockedStatusChanged(
+        override val network: Network,
+        val blocked: Boolean,
+    ) : UnderlyingNetworkEvent
 }
 
 /** Captures one network for DNS resolution and socket binding as one atomic routing decision. */

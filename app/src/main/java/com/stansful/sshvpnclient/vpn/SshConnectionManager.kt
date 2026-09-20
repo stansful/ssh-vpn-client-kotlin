@@ -17,25 +17,44 @@ import com.stansful.sshvpnclient.domain.model.SshPrivateKey
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.net.InetAddress
 import java.net.Socket
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.Properties
+import java.util.concurrent.atomic.AtomicLong
 
 internal const val SSH_SERVER_ALIVE_COUNT_MAX = 3
 
-class SshConnectionManager {
+class SshConnectionManager internal constructor(
+    private val linkClock: LinkClock,
+    private val linkConfig: SshTransportLinkConfig,
+    private val tuneTransportSocket: (socket: Socket, userTimeoutMs: Int, log: (String) -> Unit) -> Boolean,
+) {
+    constructor() : this(
+        linkClock = AndroidLinkClock,
+        linkConfig = SshTransportLinkConfig(),
+        tuneTransportSocket = ::applyTcpUserTimeout,
+    )
+
     private val sessionLock = Any()
+    private val linkIds = AtomicLong(0L)
     private var connectionGeneration = 0L
     private var connectingSession: Session? = null
+    private var connectingLink: SshTransportLink? = null
     private var connectingOwner: Any? = null
     private var connectingKeepAliveIntervalSec: Int? = null
     private var activeOwner: Any? = null
+    private var activeLink: SshTransportLink? = null
     private var activeKeepAliveIntervalSec: Int? = null
     private var deviceInteractive: Boolean = true
 
     @Volatile
     private var activeSession: Session? = null
+
+    /** Lock-free copy of (owner, link) for callers on the TUN read thread; written under [sessionLock]. */
+    @Volatile
+    private var activeLinkRef: ActiveLinkRef? = null
 
     suspend fun connect(
         owner: Any,
@@ -46,10 +65,12 @@ class SshConnectionManager {
         socketProtector: ((Socket) -> Boolean)? = null,
         connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS,
         verboseDiagnostics: Boolean = true,
+        onTransportDead: (linkId: Long, reason: String) -> Unit = { _, _ -> },
     ): Session = withContext(Dispatchers.IO) {
         require(lease.owner === owner) { "SSH owner must match runtime lease" }
         val attemptGeneration = beginConnectionAttempt(owner, lease)
         var attemptedSession: Session? = null
+        var attemptedLink: SshTransportLink? = null
 
         try {
             val safeLog: (String) -> Unit = { message ->
@@ -80,14 +101,16 @@ class SshConnectionManager {
                 val session = jsch.getSession(config.username, config.host, config.port)
                 attemptedSession = session
                 if (socketProtector != null) {
-                    session.setSocketFactory(
-                        VpnProtectedSocketFactory(
-                            protectSocket = socketProtector,
-                            connectTimeoutMs = connectTimeoutMs,
-                            log = detailLog,
-                        ),
+                    val link = createTransportLink(
+                        protector = socketProtector,
+                        connectTimeoutMs = connectTimeoutMs,
+                        log = safeLog,
+                        detailLog = detailLog,
+                        onTransportDead = onTransportDead,
                     )
-                    detailLog("SSH socket protection enabled")
+                    attemptedLink = link
+                    session.setSocketFactory(link.socketFactory)
+                    detailLog("SSH socket protection enabled (${link.label})")
                 }
                 session.setConfig(connectionConfig(config.authType))
                 val configuredKeepAliveIntervalSec = config.keepAliveIntervalSec.coerceIn(
@@ -114,6 +137,7 @@ class SshConnectionManager {
                     generation = attemptGeneration,
                     lease = lease,
                     session = session,
+                    link = attemptedLink,
                     configuredKeepAliveIntervalSec = configuredKeepAliveIntervalSec,
                 )
                 if (!connectionRegistered) {
@@ -126,15 +150,16 @@ class SshConnectionManager {
 
                 if (verboseDiagnostics) {
                     withJschLog(detailLog) {
-                        session.connect(connectTimeoutMs)
+                        connectTransport(session, attemptedLink, connectTimeoutMs)
                     }
                 } else {
-                    session.connect(connectTimeoutMs)
+                    connectTransport(session, attemptedLink, connectTimeoutMs)
                 }
                 if (!promoteConnectedSession(attemptGeneration, lease, session)) {
                     throw CancellationException("SSH connection attempt was cancelled")
                 }
-                safeLog("SSH transport connected")
+                attemptedLink?.startWatchdog()
+                safeLog("SSH transport connected" + attemptedLink?.let { link -> " (${link.label})" }.orEmpty())
                 session
             } catch (error: JSchException) {
                 safeLog("JSch exception: ${error.message.orEmpty().ifBlank { error::class.java.simpleName }}")
@@ -147,8 +172,61 @@ class SshConnectionManager {
                 throw mapJschError(error, config)
             }
         } finally {
-            finishConnectionAttempt(attemptGeneration, attemptedSession)
+            finishConnectionAttempt(attemptGeneration, attemptedSession, attemptedLink)
         }
+    }
+
+    private fun createTransportLink(
+        protector: (Socket) -> Boolean,
+        connectTimeoutMs: Int,
+        log: (String) -> Unit,
+        detailLog: (String) -> Unit,
+        onTransportDead: (Long, String) -> Unit,
+    ): SshTransportLink {
+        val stats = LinkStats(linkClock)
+        val userTimeoutMs = linkConfig.tcpUserTimeoutMs
+        val factory = VpnProtectedSocketFactory(
+            protectSocket = protector,
+            connectTimeoutMs = connectTimeoutMs,
+            log = detailLog,
+            linkStats = stats,
+            tuneSocket = { socket ->
+                if (tuneTransportSocket(socket, userTimeoutMs, log)) {
+                    detailLog("SSH socket: TCP_USER_TIMEOUT=${userTimeoutMs}ms")
+                }
+            },
+        )
+        return SshTransportLink(
+            id = linkIds.incrementAndGet(),
+            socketFactory = factory,
+            stats = stats,
+            config = linkConfig,
+            log = log,
+            onDead = { link, reason, detail -> onLinkDead(link, reason, detail, onTransportDead) },
+        )
+    }
+
+    private fun connectTransport(session: Session, link: SshTransportLink?, connectTimeoutMs: Int) {
+        if (link == null) {
+            session.connect(connectTimeoutMs)
+        } else {
+            link.connect(
+                session = session,
+                handshakeTimeoutMs = connectTimeoutMs,
+                totalDeadlineMs = totalSshConnectDeadlineMs(connectTimeoutMs),
+            )
+        }
+    }
+
+    /** Runs on the watchdog timer thread with the socket already closed: only hand the news on. */
+    private fun onLinkDead(
+        link: SshTransportLink,
+        reason: LinkDeathReason,
+        detail: String,
+        onTransportDead: (Long, String) -> Unit,
+    ) {
+        val isActive = synchronized(sessionLock) { activeLink === link }
+        if (isActive) onTransportDead(link.id, "${reason.name}: $detail")
     }
 
     /** Adjusts the idle SSH probe cadence without reconnecting the active transport. */
@@ -168,29 +246,102 @@ class SshConnectionManager {
         }
     }
 
+    /**
+     * Releases every SSH transport of [owner]. Never blocks on the network: sockets are closed first,
+     * `Session.disconnect()` runs off the caller's thread.
+     */
     fun disconnectOwner(owner: Any): Boolean {
-        val sessionsToDisconnect = synchronized(sessionLock) {
+        val transportsToClose = synchronized(sessionLock) {
             val ownsConnecting = connectingOwner === owner
             val ownsActive = activeOwner === owner
             if (!ownsConnecting && !ownsActive) return@synchronized emptyList()
             connectionGeneration += 1L
             buildList {
                 if (ownsConnecting) {
-                    connectingSession?.let(::add)
-                    connectingSession = null
-                    connectingOwner = null
-                    connectingKeepAliveIntervalSec = null
+                    connectingSession?.let { session -> add(session to connectingLink) }
+                    clearConnectingLocked()
                 }
                 if (ownsActive) {
-                    activeSession?.let(::add)
-                    activeSession = null
-                    activeOwner = null
-                    activeKeepAliveIntervalSec = null
+                    activeSession?.let { session -> add(session to activeLink) }
+                    clearActiveLocked()
                 }
-            }.distinct()
+            }.distinctBySession()
         }
-        sessionsToDisconnect.forEach { session -> runCatching { session.disconnect() } }
-        return sessionsToDisconnect.isNotEmpty()
+        transportsToClose.forEach { (session, link) -> closeTransport(session, link, "disconnect") }
+        return transportsToClose.isNotEmpty()
+    }
+
+    /**
+     * Closes the sockets of [owner]'s transports without touching bookkeeping, so that whatever the
+     * caller tears down next (TUN flows, channels) cannot wait on a JSch write to a dead path.
+     */
+    internal fun killTransport(owner: Any, reason: String) {
+        val links = synchronized(sessionLock) {
+            listOfNotNull(
+                connectingLink.takeIf { connectingOwner === owner },
+                activeLink.takeIf { activeOwner === owner },
+            )
+        }
+        links.forEach { link -> link.kill(reason) }
+    }
+
+    /** Sends one SSH keepalive on [owner]'s active link; the verdict arrives through `onTransportDead`. */
+    internal fun probeTransport(owner: Any): LinkProbeDecision? = activeLinkOf(owner)?.probe()
+
+    /** Probes only if the active link has been silent for [quietMs]; cheap enough for every new flow. */
+    internal fun probeTransportIfQuiet(owner: Any, quietMs: Long): LinkProbeDecision? {
+        return activeLinkOf(owner)?.probeIfQuiet(quietMs)
+    }
+
+    /** `isConnected` alone lags a dead path; a killed or condemned link is not a transport either. */
+    internal fun isTransportAlive(session: Session): Boolean {
+        if (!session.isConnected) return false
+        val link = synchronized(sessionLock) {
+            when {
+                activeSession === session -> activeLink
+                connectingSession === session -> connectingLink
+                else -> return false
+            }
+        }
+        return link?.isUsable ?: true
+    }
+
+    internal fun describeTransport(owner: Any): String? = activeLinkOf(owner)?.describe()
+
+    /** Id of [owner]'s active link, the generation that watchdog verdicts are matched against. */
+    internal fun activeLinkId(owner: Any): Long? = activeLinkOf(owner)?.id
+
+    /** Id and local address of [owner]'s active link, read together so they describe the same socket. */
+    internal fun transportEndpoint(owner: Any): TransportEndpoint? {
+        val link = activeLinkOf(owner) ?: return null
+        return TransportEndpoint(link.id, link.localAddress())
+    }
+
+    private fun activeLinkOf(owner: Any): SshTransportLink? {
+        return activeLinkRef?.takeIf { ref -> ref.owner === owner }?.link
+    }
+
+    private fun clearConnectingLocked() {
+        connectingSession = null
+        connectingLink = null
+        connectingOwner = null
+        connectingKeepAliveIntervalSec = null
+    }
+
+    private fun clearActiveLocked() {
+        activeSession = null
+        activeLink = null
+        activeLinkRef = null
+        activeOwner = null
+        activeKeepAliveIntervalSec = null
+    }
+
+    private fun closeTransport(session: Session, link: SshTransportLink?, reason: String) {
+        if (link != null) {
+            link.destroy(reason)
+        } else {
+            runCatching { session.disconnect() }
+        }
     }
 
     private fun beginConnectionAttempt(owner: Any, lease: VpnRuntimeLease): Long {
@@ -205,17 +356,17 @@ class SshConnectionManager {
                 }
                 connectionGeneration += 1L
                 val nextGeneration = connectionGeneration
-                val previousSessions = listOfNotNull(connectingSession, activeSession).distinct()
-                connectingSession = null
+                val previousTransports = listOfNotNull(
+                    connectingSession?.let { session -> session to connectingLink },
+                    activeSession?.let { session -> session to activeLink },
+                ).distinctBySession()
+                clearConnectingLocked()
                 connectingOwner = owner
-                connectingKeepAliveIntervalSec = null
-                activeSession = null
-                activeOwner = null
-                activeKeepAliveIntervalSec = null
-                nextGeneration to previousSessions
+                clearActiveLocked()
+                nextGeneration to previousTransports
             }
         }
-        sessionsToDisconnect.forEach { session -> runCatching { session.disconnect() } }
+        sessionsToDisconnect.forEach { (session, link) -> closeTransport(session, link, "superseded by a new attempt") }
         return generation
     }
 
@@ -223,6 +374,7 @@ class SshConnectionManager {
         generation: Long,
         lease: VpnRuntimeLease,
         session: Session,
+        link: SshTransportLink?,
         configuredKeepAliveIntervalSec: Int,
     ): Boolean {
         return lease.requireCurrent {
@@ -230,6 +382,7 @@ class SshConnectionManager {
                 if (!lease.isCurrent()) return@synchronized false
                 if (connectionGeneration != generation) return@synchronized false
                 connectingSession = session
+                connectingLink = link
                 connectingKeepAliveIntervalSec = configuredKeepAliveIntervalSec
                 applyKeepAliveInterval(session, configuredKeepAliveIntervalSec, deviceInteractive)
                 true
@@ -252,28 +405,29 @@ class SshConnectionManager {
                 ) {
                     return@synchronized false
                 }
-                connectingSession = null
-                activeOwner = connectingOwner
-                connectingOwner = null
+                val owner = connectingOwner
+                activeOwner = owner
+                activeLink = connectingLink
+                activeLinkRef = connectingLink?.let { link -> ActiveLinkRef(owner, link) }
                 activeKeepAliveIntervalSec = connectingKeepAliveIntervalSec
-                connectingKeepAliveIntervalSec = null
+                clearConnectingLocked()
                 activeSession = session
                 true
             }
         }
     }
 
-    private fun finishConnectionAttempt(generation: Long, session: Session?) {
+    private fun finishConnectionAttempt(generation: Long, session: Session?, link: SshTransportLink?) {
         val shouldDisconnect = synchronized(sessionLock) {
             if (connectionGeneration == generation && activeSession !== session) {
-                connectingSession = null
-                connectingOwner = null
-                connectingKeepAliveIntervalSec = null
+                clearConnectingLocked()
             }
             session != null && activeSession !== session
         }
-        if (shouldDisconnect) {
-            runCatching { session?.disconnect() }
+        if (shouldDisconnect && session != null) {
+            closeTransport(session, link, "connect attempt abandoned")
+        } else if (session == null) {
+            link?.destroy("connect attempt abandoned")
         }
     }
 
@@ -289,58 +443,16 @@ class SshConnectionManager {
         runCatching { session.setServerAliveInterval(effectiveIntervalSec * 1_000) }
     }
 
-    suspend fun checkActiveTransport(
-        log: (String) -> Unit = {},
-        timeoutMs: Int = WAKE_HEALTH_CHECK_TIMEOUT_MS,
-    ): Boolean = probeActiveTransport(log, timeoutMs).healthy
-
-    internal suspend fun probeActiveTransport(
-        log: (String) -> Unit = {},
-        timeoutMs: Int = WAKE_HEALTH_CHECK_TIMEOUT_MS,
-        owner: Any? = null,
-    ): SshTransportProbeResult = withContext(Dispatchers.IO) {
-        val session = synchronized(sessionLock) {
-            activeSession.takeIf { owner == null || activeOwner === owner }
-        } ?: run {
-            log("SSH transport probe failed: session is not connected")
-            return@withContext SshTransportProbeResult(session = null, healthy = false)
-        }
-        if (!session.isConnected) {
-            log("SSH transport probe failed: session is not connected")
-            return@withContext SshTransportProbeResult(session = session, healthy = false)
-        }
-        var channel: ChannelDirectTCPIP? = null
-        try {
-            log("SSH transport probe: opening direct TCP to $WAKE_HEALTH_CHECK_HOST:$WAKE_HEALTH_CHECK_PORT")
-            channel = session.openChannel("direct-tcpip") as ChannelDirectTCPIP
-            channel.setHost(WAKE_HEALTH_CHECK_HOST)
-            channel.setPort(WAKE_HEALTH_CHECK_PORT)
-            channel.setOrgIPAddress(LOOPBACK_ADDRESS)
-            channel.setOrgPort(0)
-            channel.connect(timeoutMs)
-            log("SSH transport probe succeeded")
-            SshTransportProbeResult(session = session, healthy = true)
-        } catch (error: Exception) {
-            log("SSH transport probe failed: ${error.message ?: error::class.java.simpleName}")
-            SshTransportProbeResult(session = session, healthy = false)
-        } finally {
-            channel?.disconnect()
-        }
-    }
-
     internal fun disconnectIfActive(expectedSession: Session): Boolean {
-        val shouldDisconnect = synchronized(sessionLock) {
-            if (activeSession !== expectedSession) return@synchronized false
+        val link = synchronized(sessionLock) {
+            if (activeSession !== expectedSession) return false
             connectionGeneration += 1L
-            activeSession = null
-            activeOwner = null
-            activeKeepAliveIntervalSec = null
-            true
+            val link = activeLink
+            clearActiveLocked()
+            link
         }
-        if (shouldDisconnect) {
-            runCatching { expectedSession.disconnect() }
-        }
-        return shouldDisconnect
+        closeTransport(expectedSession, link, "stale transport")
+        return true
     }
 
     internal fun transportSessionSnapshot(owner: Any): Session? = synchronized(sessionLock) {
@@ -359,30 +471,25 @@ class SshConnectionManager {
         expectedSession: Session,
         beforeDisconnect: () -> Unit,
     ): Boolean {
-        val shouldDisconnect = synchronized(sessionLock) {
+        val link = synchronized(sessionLock) {
             val isConnecting = connectingSession === expectedSession
             val isActive = activeSession === expectedSession
-            if (!isConnecting && !isActive) return@synchronized false
+            if (!isConnecting && !isActive) return false
+            val link = if (isActive) activeLink else connectingLink
+            // Close the socket before anything else touches this transport: a JSch write stuck on the
+            // old path would otherwise make the pause below (channel closes) wait for it, here, under
+            // the lock that the main thread also takes on screen on/off.
+            link?.kill("transport replaced")
             // Claim the exact current session before mutating the TUN transport. Holding this lock
             // prevents a reconnect from promoting session B between the check and pause callback.
             beforeDisconnect()
             connectionGeneration += 1L
-            if (isConnecting) {
-                connectingSession = null
-                connectingOwner = null
-                connectingKeepAliveIntervalSec = null
-            }
-            if (isActive) {
-                activeSession = null
-                activeOwner = null
-                activeKeepAliveIntervalSec = null
-            }
-            true
+            if (isConnecting) clearConnectingLocked()
+            if (isActive) clearActiveLocked()
+            link
         }
-        if (shouldDisconnect) {
-            runCatching { expectedSession.disconnect() }
-        }
-        return shouldDisconnect
+        closeTransport(expectedSession, link, "transport replaced")
+        return true
     }
 
     suspend fun openTerminal(
@@ -436,32 +543,57 @@ class SshConnectionManager {
         }
     }
 
+    /**
+     * Proves that forwarding through the SSH session works. By default the forwarded connection goes
+     * back to the SSH server itself - its loopback on the port the app dials, then on 22 for a server
+     * behind a port forward, then the address the app connected to for an sshd that does not listen
+     * on loopback - so the check needs nothing but the SSH port and makes the server connect nowhere
+     * else.
+     */
     suspend fun checkTcpForward(
-        host: String = DEFAULT_TUNNEL_CHECK_HOST,
-        port: Int = DEFAULT_TUNNEL_CHECK_PORT,
+        host: String? = null,
+        port: Int? = null,
         log: (String) -> Unit = {},
     ) = withContext(Dispatchers.IO) {
         val session = activeSession?.takeIf { it.isConnected }
             ?: throw VpnConnectionException("Tunnel check failed: SSH session is not connected")
-        var channel: ChannelDirectTCPIP? = null
-        val startedAt = System.currentTimeMillis()
-        try {
-            log("Tunnel check: opening SSH direct TCP to $host:$port")
-            channel = session.openChannel("direct-tcpip") as ChannelDirectTCPIP
-            channel.setHost(host)
-            channel.setPort(port)
-            channel.setOrgIPAddress(LOOPBACK_ADDRESS)
-            channel.setOrgPort(0)
-            channel.connect(TUNNEL_CHECK_TIMEOUT_MS)
-            val elapsedMs = System.currentTimeMillis() - startedAt
-            log("Tunnel check succeeded: $host:$port reachable through SSH in ${elapsedMs}ms")
-        } catch (error: Exception) {
-            val message = error.message ?: error::class.java.simpleName
-            log("Tunnel check failed: $message")
-            throw VpnConnectionException("Tunnel check failed: $message", error)
-        } finally {
-            channel?.disconnect()
+        val targets = if (host != null) {
+            listOf(host to (port ?: session.port))
+        } else {
+            val sshPort = port ?: session.port
+            val serverAddress = activeLinkRef?.link?.socketFactory?.currentSocket?.inetAddress?.hostAddress
+            listOfNotNull(
+                LOOPBACK_ADDRESS to sshPort,
+                (LOOPBACK_ADDRESS to DEFAULT_SSH_PORT).takeIf { port == null },
+                serverAddress?.let { address -> address to sshPort },
+            ).distinct()
         }
+        var lastError: Exception? = null
+        for ((targetHost, targetPort) in targets) {
+            val startedAt = System.currentTimeMillis()
+            var channel: ChannelDirectTCPIP? = null
+            try {
+                log("Tunnel check: opening SSH direct TCP to $targetHost:$targetPort on the SSH server")
+                channel = session.openChannel("direct-tcpip") as ChannelDirectTCPIP
+                channel.setHost(targetHost)
+                channel.setPort(targetPort)
+                channel.setOrgIPAddress(LOOPBACK_ADDRESS)
+                channel.setOrgPort(0)
+                channel.connect(TUNNEL_CHECK_TIMEOUT_MS)
+                val elapsedMs = System.currentTimeMillis() - startedAt
+                log("Tunnel check succeeded: $targetHost:$targetPort reachable through SSH in ${elapsedMs}ms")
+                return@withContext
+            } catch (error: Exception) {
+                lastError = error
+                val message = error.message ?: error::class.java.simpleName
+                log("Tunnel check: $targetHost:$targetPort failed: $message")
+            } finally {
+                channel?.disconnect()
+            }
+        }
+        val message = lastError?.message ?: lastError?.let { it::class.java.simpleName } ?: "no target"
+        log("Tunnel check failed: $message")
+        throw VpnConnectionException("Tunnel check failed: $message", lastError)
     }
 
     private fun addPrivateKeyIdentity(jsch: JSch, key: SshPrivateKey) {
@@ -596,14 +728,9 @@ class SshConnectionManager {
         const val TERMINAL_CONNECT_TIMEOUT_MS = 10_000
         const val TERMINAL_PTY_TYPE = "xterm"
         const val TUNNEL_CHECK_TIMEOUT_MS = 10_000
-        const val WAKE_HEALTH_CHECK_TIMEOUT_MS = 4_000
-        const val WAKE_HEALTH_CHECK_HOST = "1.1.1.1"
-        const val WAKE_HEALTH_CHECK_PORT = 443
-        const val DEFAULT_TUNNEL_CHECK_HOST = "youtube.com"
-        const val DEFAULT_TUNNEL_CHECK_PORT = 443
         const val LOOPBACK_ADDRESS = "127.0.0.1"
+        const val DEFAULT_SSH_PORT = 22
         val NO_OP_LOG: (String) -> Unit = {}
-        val jschThreadLog = InheritableThreadLocal<((String) -> Unit)?>()
 
         @Volatile
         var jschLoggerInstalled = false
@@ -647,10 +774,37 @@ class SshConnectionManager {
     }
 }
 
-internal data class SshTransportProbeResult(
-    val session: Session?,
-    val healthy: Boolean,
-)
+/**
+ * One deadline for TCP, key exchange and authentication together: `session.connect(timeout)`
+ * alone bounds each handshake read, not the attempt.
+ */
+internal fun totalSshConnectDeadlineMs(connectTimeoutMs: Int): Long {
+    return (connectTimeoutMs.toLong() * 2L).coerceAtLeast(MIN_TOTAL_SSH_CONNECT_DEADLINE_MS)
+}
+
+private const val MIN_TOTAL_SSH_CONNECT_DEADLINE_MS = 15_000L
+
+private class ActiveLinkRef(val owner: Any?, val link: SshTransportLink)
+
+internal data class TransportEndpoint(val linkId: Long, val localAddress: InetAddress?)
+
+/**
+ * JSch diagnostics of the attempt that runs on this thread. Inheritable on purpose: the JSch session
+ * thread started by `connect()` reports into the same connection log.
+ */
+private val jschThreadLog = InheritableThreadLocal<((String) -> Unit)?>()
+
+/** For long-lived pool threads that were created inside an attempt and must not keep its logger. */
+internal fun detachJschLogFromCurrentThread() {
+    jschThreadLog.remove()
+}
+
+/** Connecting and active can be the same session object; close it once. Identity, not equals(). */
+private fun List<Pair<Session, SshTransportLink?>>.distinctBySession(): List<Pair<Session, SshTransportLink?>> {
+    val distinct = ArrayList<Pair<Session, SshTransportLink?>>(size)
+    forEach { transport -> if (distinct.none { it.first === transport.first }) distinct += transport }
+    return distinct
+}
 
 internal class FingerprintHostKeyRepository(
     expectedFingerprint: String?,

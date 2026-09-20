@@ -480,7 +480,7 @@ private fun TunnelCheckButton(
         }
         Text(
             text = if (state.isTunnelCheckRunning) {
-                "Checking youtube.com..."
+                "Checking tunnel..."
             } else {
                 "Check tunnel"
             },

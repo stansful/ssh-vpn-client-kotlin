@@ -10,11 +10,45 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 
-class VpnProtectedSocketFactory(
+/**
+ * Opens the SSH socket below the VPN: DNS and bind on the selected physical network, protect, and
+ * one deadline across all resolved addresses. One factory serves one session attempt.
+ *
+ * With [linkStats] the socket streams feed the SSH link watchdog, and [kill] closes the socket from
+ * any thread without blocking - including while `connect()` is still in progress - so nothing that
+ * JSch does on a dead path can outlive a teardown.
+ */
+internal class VpnProtectedSocketFactory(
     private val protectSocket: (Socket) -> Boolean,
     private val connectTimeoutMs: Int,
     private val log: (String) -> Unit,
+    private val linkStats: LinkStats? = null,
+    private val tuneSocket: (Socket) -> Unit = {},
 ) : SocketFactory {
+    @Volatile
+    var currentSocket: Socket? = null
+        private set
+
+    @Volatile
+    var killReason: String? = null
+        private set
+
+    val isKilled: Boolean
+        get() = killReason != null
+
+    /** Idempotent and non-blocking; safe from any thread. Fails every pending read, write and connect. */
+    fun kill(reason: String) {
+        val firstKill = synchronized(this) {
+            if (killReason != null) return@synchronized false
+            killReason = reason
+            true
+        }
+        if (firstKill) {
+            log("SSH socket closed by the app: $reason")
+        }
+        runCatching { currentSocket?.close() }
+    }
+
     override fun createSocket(host: String, port: Int): Socket {
         val startedAt = System.currentTimeMillis()
         val deadlineNanos = System.nanoTime() + connectTimeoutMs.coerceAtLeast(1) * NANOS_PER_MILLISECOND
@@ -31,7 +65,9 @@ class VpnProtectedSocketFactory(
             addresses.forEachIndexed { index, address ->
                 val candidate = Socket()
                 socket = candidate
+                currentSocket = candidate
                 try {
+                    throwIfKilled()
                     log("SSH socket: opening TCP socket to ${address.hostAddress}:$port")
                     configureSocket(candidate)
                     route?.bind(candidate)
@@ -43,9 +79,12 @@ class VpnProtectedSocketFactory(
                     if (!protected) {
                         throw IOException("Could not protect SSH socket from VPN routing")
                     }
+                    tuneSocket(candidate)
                     val connectStartedAt = System.currentTimeMillis()
                     val addressTimeoutMs = remainingAddressTimeoutMs(deadlineNanos)
                     candidate.connect(InetSocketAddress(address, port), addressTimeoutMs)
+                    // A kill() that raced connect() may have closed a socket that just connected.
+                    throwIfKilled()
                     log(
                         "SSH socket: TCP connected in ${System.currentTimeMillis() - connectStartedAt}ms; " +
                             "local=${candidate.safeLocalEndpoint()} remote=${candidate.safeRemoteEndpoint()}",
@@ -54,6 +93,7 @@ class VpnProtectedSocketFactory(
                 } catch (error: IOException) {
                     lastError = error
                     runCatching { candidate.close() }
+                    if (isKilled) throw error
                     if (index < addresses.lastIndex) {
                         log(
                             "SSH socket: address ${address.hostAddress} failed " +
@@ -84,9 +124,19 @@ class VpnProtectedSocketFactory(
         }
     }
 
-    override fun getInputStream(socket: Socket): InputStream = socket.getInputStream()
+    override fun getInputStream(socket: Socket): InputStream {
+        val stream = socket.getInputStream()
+        return linkStats?.let { stats -> CountingInputStream(stream, stats) } ?: stream
+    }
 
-    override fun getOutputStream(socket: Socket): OutputStream = socket.getOutputStream()
+    override fun getOutputStream(socket: Socket): OutputStream {
+        val stream = socket.getOutputStream()
+        return linkStats?.let { stats -> CountingOutputStream(stream, stats) } ?: stream
+    }
+
+    private fun throwIfKilled() {
+        killReason?.let { reason -> throw IOException("SSH socket closed by the app: $reason") }
+    }
 
     private fun configureSocket(socket: Socket) {
         runCatching { socket.tcpNoDelay = true }

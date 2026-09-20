@@ -73,8 +73,10 @@ internal fun selectTunResourceProfile(
             maxActiveTcpSessions = 128,
             sshChannelWindowBytes = 4 * 1_024 * 1_024,
             maxPendingUploadBytesPerFlow = 512 * 1_024,
-            tunWriteQueueCapacity = 256,
-            outboundPacketPoolCapacity = 64,
+            // A downlink burst that does not fit here blocks the flow that produced it, and with it
+            // the single JSch thread that feeds every other flow, so the queue buys headroom.
+            tunWriteQueueCapacity = 512,
+            outboundPacketPoolCapacity = 128,
         )
     }
 }

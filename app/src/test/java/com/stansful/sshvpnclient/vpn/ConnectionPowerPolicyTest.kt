@@ -54,8 +54,8 @@ class ConnectionPowerPolicyTest {
                 maxActiveTcpSessions = 128,
                 sshChannelWindowBytes = 4 * 1_024 * 1_024,
                 maxPendingUploadBytesPerFlow = 512 * 1_024,
-                tunWriteQueueCapacity = 256,
-                outboundPacketPoolCapacity = 64,
+                tunWriteQueueCapacity = 512,
+                outboundPacketPoolCapacity = 128,
             ),
             selectTunResourceProfile(isLowRamDevice = false, isPowerSaveMode = false),
         )
