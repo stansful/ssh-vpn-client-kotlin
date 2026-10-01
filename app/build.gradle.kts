@@ -5,7 +5,7 @@ plugins {
     id("io.gitlab.arturbosch.detekt")
 }
 
-val appVersionName = "3.3.1"
+val appVersionName = "3.4.0"
 
 val releaseStoreFilePath = providers.environmentVariable("SSH_VPN_RELEASE_STORE_FILE")
     .orElse(providers.gradleProperty("SSH_VPN_RELEASE_STORE_FILE"))
