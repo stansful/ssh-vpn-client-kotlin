@@ -60,18 +60,25 @@ class InMemoryVpnConnectionRepository(
         configId: String?,
         transport: VpnTransportType,
         sessionOwner: VpnSessionOwner?,
+        clearDiagnostics: Boolean,
     ) {
         synchronized(stateLock) {
-            diagnosticsTouched = true
-            diagnosticsBuffer.clear()
-            diagnosticsPublishJob?.cancel()
+            val diagnostics = if (clearDiagnostics) {
+                diagnosticsTouched = true
+                diagnosticsBuffer.clear()
+                diagnosticsPublishJob?.cancel()
+                enqueuePersistence(emptyList(), force = true)
+                emptyList()
+            } else {
+                mutableState.value.diagnostics
+            }
             mutableState.value = VpnConnectionState(
                 status = VpnConnectionStatus.CONNECTING,
                 activeConfigId = configId,
+                diagnostics = diagnostics,
                 activeTransport = transport,
                 sessionOwner = sessionOwner ?: transport.defaultSessionOwner(),
             )
-            enqueuePersistence(emptyList(), force = true)
         }
     }
 

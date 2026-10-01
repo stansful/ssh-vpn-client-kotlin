@@ -3,6 +3,7 @@ package com.stansful.sshvpnclient.domain.usecase.vpn
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
+import com.stansful.sshvpnclient.data.local.LastVpnSessionStore
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
@@ -26,6 +27,7 @@ class ConnectVpnUseCase(
     private val keyRepository: SshPrivateKeyRepository,
     private val vpnConnectionRepository: VpnConnectionRepository,
     private val appSettingsRepository: AppSettingsRepository,
+    private val lastVpnSessionStore: LastVpnSessionStore,
 ) {
     suspend operator fun invoke(preserveDiagnostics: Boolean = false) {
         val config = configRepository.getSelectedConfig()
@@ -76,6 +78,7 @@ class ConnectVpnUseCase(
             return
         }
 
+        lastVpnSessionStore.record(VpnSessionOwner.SHADOW_SSH)
         if (preserveDiagnostics) {
             vpnConnectionRepository.setReconnecting(config.id)
         } else {

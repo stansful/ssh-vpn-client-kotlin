@@ -155,10 +155,8 @@ class RoomSmartProxyProfileRepository(
                     val rejectedEntities = dao.applyImport(
                         entities = entitiesToUpsert,
                         policyRejectedIds = policyRejectedIds,
-                        remoteSourceUrl = sourceUrl.takeIf { source == ProxyProfileSource.REMOTE },
                         syncStartedAt = syncStartedAt,
                         markRemoteStale = source == ProxyProfileSource.REMOTE &&
-                            sourceUrl != null &&
                             successful.isNotEmpty(),
                     )
                     deleteSecretsBestEffort(rejectedEntities.map(SmartProxyProfileEntity::secretId))

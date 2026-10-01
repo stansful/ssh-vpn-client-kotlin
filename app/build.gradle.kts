@@ -5,28 +5,34 @@ plugins {
     id("io.gitlab.arturbosch.detekt")
 }
 
+val appVersionName = "3.3.1"
+
 val releaseStoreFilePath = providers.environmentVariable("SSH_VPN_RELEASE_STORE_FILE")
     .orElse(providers.gradleProperty("SSH_VPN_RELEASE_STORE_FILE"))
     .orNull
+
 val releaseStorePassword = providers.environmentVariable("SSH_VPN_RELEASE_STORE_PASSWORD")
     .orElse(providers.gradleProperty("SSH_VPN_RELEASE_STORE_PASSWORD"))
     .orNull
 val releaseKeyAlias = providers.environmentVariable("SSH_VPN_RELEASE_KEY_ALIAS")
     .orElse(providers.gradleProperty("SSH_VPN_RELEASE_KEY_ALIAS"))
     .orNull
+
 val releaseKeyPassword = providers.environmentVariable("SSH_VPN_RELEASE_KEY_PASSWORD")
     .orElse(providers.gradleProperty("SSH_VPN_RELEASE_KEY_PASSWORD"))
     .orNull
+
 val releaseSigningConfigured = listOf(
     releaseStoreFilePath,
     releaseStorePassword,
     releaseKeyAlias,
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
+
 val bundleXrayCore = providers.gradleProperty("bundleXrayCore")
     .map(String::toBoolean)
     .orElse(false)
-val appVersionName = "3.3.0"
+
 val appVersionParts = appVersionName.split('.').map(String::toInt)
 require(appVersionParts.size == 3 && appVersionParts.drop(1).all { it in 0..999 }) {
     "versionName must be SemVer with minor/patch in 0..999"

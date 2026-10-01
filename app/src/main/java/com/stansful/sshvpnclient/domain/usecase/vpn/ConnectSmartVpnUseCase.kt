@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.domain.usecase.vpn
 
 import android.content.Context
 import androidx.core.content.ContextCompat
+import com.stansful.sshvpnclient.data.local.LastVpnSessionStore
 import com.stansful.sshvpnclient.data.local.SmartConnectStateStore
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnMode
@@ -22,6 +23,7 @@ class ConnectSmartVpnUseCase(
     private val appSettingsRepository: AppSettingsRepository,
     private val vpnConnectionRepository: VpnConnectionRepository,
     private val smartConnectStateStore: SmartConnectStateStore,
+    private val lastVpnSessionStore: LastVpnSessionStore,
 ) {
     private val appContext = context.applicationContext
 
@@ -66,6 +68,7 @@ class ConnectSmartVpnUseCase(
             return
         }
 
+        lastVpnSessionStore.record(VpnSessionOwner.SMART_CONNECT)
         smartConnectStateStore.begin()
         vpnConnectionRepository.setConnecting(
             configId = null,

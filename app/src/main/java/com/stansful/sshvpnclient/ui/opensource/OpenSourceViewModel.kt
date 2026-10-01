@@ -144,6 +144,20 @@ data class OpenSourceUiState(
             !isChecking &&
             !isRemovingUnavailable &&
             vpnState.status != VpnConnectionStatus.DISCONNECTING
+
+    /**
+     * Errors are published without an owner, so only the route id tells this tab's start and
+     * runtime failures (the quick settings tile's included) apart from another tab's.
+     */
+    val openSourceErrorMessage: String?
+        get() {
+            val profileId = selectedProfile?.id ?: return null
+            return vpnState.errorMessage.takeIf {
+                vpnState.status == VpnConnectionStatus.ERROR &&
+                    vpnState.activeTransport == null &&
+                    vpnState.activeConfigId == profileId
+            }
+        }
 }
 
 data class XrayCoreUpdateUiState(

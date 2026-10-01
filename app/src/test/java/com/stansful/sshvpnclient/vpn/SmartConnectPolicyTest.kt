@@ -67,6 +67,50 @@ class SmartConnectPolicyTest {
     }
 
     @Test
+    fun `requested Smart refresh bypasses the ETag even with a usable catalog`() {
+        val usable = listOf(profile("Netherlands", 20L))
+
+        assertTrue(shouldForceSmartSourceRefresh(forceRequested = true, catalog = usable))
+        assertFalse(shouldForceSmartSourceRefresh(forceRequested = false, catalog = usable))
+    }
+
+    @Test
+    fun `Smart catalog without a usable row forces a full download on failover`() {
+        assertTrue(shouldForceSmartSourceRefresh(forceRequested = false, catalog = emptyList()))
+        assertTrue(
+            shouldForceSmartSourceRefresh(
+                forceRequested = false,
+                catalog = listOf(
+                    profile("stale", 10L, stale = true),
+                    profile("🇷🇺 blocked", 5L),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `session forces the source download until a pass actually reaches the source`() {
+        val schedule = SmartSourceRefreshSchedule()
+        assertTrue(schedule.forceNextPass)
+
+        schedule.onPassSucceeded(sourceSynchronized = false)
+        assertTrue(schedule.forceNextPass)
+
+        schedule.onPassSucceeded(sourceSynchronized = true)
+        assertFalse(schedule.forceNextPass)
+    }
+
+    @Test
+    fun `failed Smart catalog pass forces the next source download`() {
+        val schedule = SmartSourceRefreshSchedule()
+        schedule.onPassSucceeded(sourceSynchronized = true)
+
+        schedule.onPassFailed()
+
+        assertTrue(schedule.forceNextPass)
+    }
+
+    @Test
     fun `verified tunnel needs repeated sustained health failures before failover`() {
         assertFalse(shouldTriggerVerifiedTunnelFailover(1, 60_000L))
         assertFalse(shouldTriggerVerifiedTunnelFailover(3, 29_999L))

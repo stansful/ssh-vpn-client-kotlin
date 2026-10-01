@@ -2453,3 +2453,47 @@ Result:
 - Verified `apksigner verify --verbose build/app/outputs/apk/release/app-release.apk`: success, APK Signature Scheme v2, 1 signer.
 - Debug APK built at `build/app/outputs/apk/debug/app-debug.apk` around 154M.
 - Release APK built at `build/app/outputs/apk/release/app-release.apk` around 134M.
+
+### 2026-09-30 - Block 57
+
+Plan:
+
+- Replace the removed public config source `https://hub.mos.ru/zieng2/wl/raw/main/list_universal.txt` with the new mirror `https://gitverse.ru/api/repos/zieng2/wl/raw/branch/master/list_universal.txt`.
+
+Result:
+
+- Updated `OpenSourcePolicy.SOURCE_URL`, `README.md`, `README_SA.md`, and `docs/TECHNICAL_DOCUMENTATION.md`.
+- Checked the new URL: plain GET returns `200` directly (no redirect, compatible with `instanceFollowRedirects = false`), `text/plain`, sends `ETag`, body around 25 KB (under the 2 MB cap). HEAD returns `405`, which does not affect the synchronizer because it only uses GET.
+- A previously stored ETag from the old host will not match, so the first sync after the update performs a full download.
+- Verified `git diff --check`: success.
+- Verified `./scripts/test.sh`: success.
+
+### 2026-09-30 - Block 58
+
+Plan:
+
+- Quick settings tile: turning it on must restore the last connected mode (SSH, Public/opensource, Smart) instead of always starting SSH.
+- Smart Connect: a manual Start must pick up the current public list; find why it sometimes does not.
+
+Result:
+
+- Diagnosed tile: `SshVpnTileService.connectOrOpenApp()` only checked SSH preconditions and always called `ConnectVpnUseCase`; the only mode identity (`VpnConnectionState.sessionOwner`) is in memory and reset to null on disconnect/error.
+- Added `LastVpnSessionStore` (SharedPreferences `vpn-session-history`, key `last_session_owner`). The three Connect use cases record the owner at their commit point (after validation and `canProceedAfterVpnOwnerStop`, right before `setConnecting`/`begin()`); nothing clears it.
+- Tile now dispatches to the recorded mode through the pure `resolveQuickTileConnectPlan` (`vpn/QuickTilePolicy.kt`) with per-mode preconditions (SSH config/key, OpenSource consent/route/Xray core, Smart consent/Xray core, selected apps, VPN permission). It never starts another mode; on a failed precondition it publishes the reason for that tab, switches `activeGlobalTab` and opens the app. Xray core check runs on IO; double taps are ignored; a use-case throw after its commit point turns the stuck CONNECTING into an error. Subtitle shows `<mode> · <status>`.
+- Public tab now renders the error text for the selected route (the tile's reasons were otherwise invisible there).
+- Diagnosed Smart refresh:
+  - the installed build still requested the dead hub.mos.ru URL (404) and silently fell back to the cached catalog;
+  - a normal Start sent `If-None-Match`, so a `304` imported nothing while Smart had already pruned unavailable rows, and servers pruned earlier never came back until upstream changed; retries after an exhausted pool were stuck on `304` as well;
+  - stale marking matched `sourceUrl`, so rows from the old URL never went stale after the URL change;
+  - the ETag was not tied to its URL;
+  - the "refresh failed" diagnostic was wiped by the in-session `setConnecting`.
+- Smart fixes: `SmartSourceRefreshSchedule` forces a full download on the first pass of every session and after any failed or cache-fallback pass. ETag is accepted only for failover after a pass that reached the source.
+- Stale marking in both DAOs is now `source = 'REMOTE' AND lastSeenAt < syncStartedAt`.
+- ETag is stored with `etag_url` and sent only for the same URL.
+- Refresh outcome is logged, and in-session `setConnecting(clearDiagnostics = false)` keeps the log.
+- Added tests: `QuickTilePolicyTest`, `LastVpnSessionStoreTest`, `PublicProxySourceEtagTest`, new cases in `SmartConnectPolicyTest`, `RoomSmartProxyProfileRepositoryBatchTest`, `OpenSourceUiStatePolicyTest`.
+- Updated `README.md`, `README_SA.md`, `docs/TECHNICAL_DOCUMENTATION.md`.
+- Limits: the Room SQL of the new stale query is covered only through the fake DAO (no Robolectric); tile flow and tab switching were not exercised on a device; detekt could not run locally (JDK 25 toolchain).
+- Verified `git diff --check`: success.
+- Verified `./scripts/test.sh`: success, 332 tests, 0 failures.
+- Verified `./scripts/lint.sh`: success, 0 errors (11 pre-existing dependency-version warnings).

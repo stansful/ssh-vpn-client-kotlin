@@ -59,14 +59,16 @@ abstract class ProxyProfileDao {
     @Query("UPDATE proxy_profiles SET isPinned = :isPinned WHERE id = :id")
     abstract suspend fun setPinned(id: String, isPinned: Boolean)
 
+    // There is exactly one remote source. Matching on sourceUrl would keep rows imported from a
+    // previous source URL fresh forever after the URL changes.
     @Query(
         """
         UPDATE proxy_profiles
         SET isStale = 1
-        WHERE source = 'REMOTE' AND sourceUrl = :sourceUrl AND lastSeenAt < :syncStartedAt
+        WHERE source = 'REMOTE' AND lastSeenAt < :syncStartedAt
         """,
     )
-    abstract suspend fun markRemoteProfilesStale(sourceUrl: String, syncStartedAt: Long)
+    abstract suspend fun markRemoteProfilesStale(syncStartedAt: Long)
 
     @Query(
         """
@@ -108,15 +110,14 @@ abstract class ProxyProfileDao {
     @Transaction
     open suspend fun applyImport(
         entities: List<ProxyProfileEntity>,
-        remoteSourceUrl: String?,
         syncStartedAt: Long,
         markRemoteStale: Boolean,
     ) {
         if (entities.isNotEmpty()) {
             upsertAll(entities)
         }
-        if (markRemoteStale && remoteSourceUrl != null) {
-            markRemoteProfilesStale(remoteSourceUrl, syncStartedAt)
+        if (markRemoteStale) {
+            markRemoteProfilesStale(syncStartedAt)
         }
         if (getSelected() == null) {
             clearSelection()

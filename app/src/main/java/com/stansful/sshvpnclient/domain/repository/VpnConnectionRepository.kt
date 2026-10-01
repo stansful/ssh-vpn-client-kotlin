@@ -12,6 +12,7 @@ interface VpnConnectionRepository {
         configId: String?,
         transport: VpnTransportType = VpnTransportType.SSH,
         sessionOwner: VpnSessionOwner? = null,
+        clearDiagnostics: Boolean = true,
     )
     fun setConnected(
         configId: String,

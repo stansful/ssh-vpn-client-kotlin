@@ -130,10 +130,8 @@ class RoomProxyProfileRepository(
                 withContext(NonCancellable) {
                     dao.applyImport(
                         entities = entitiesToUpsert,
-                        remoteSourceUrl = sourceUrl.takeIf { source == ProxyProfileSource.REMOTE },
                         syncStartedAt = syncStartedAt,
                         markRemoteStale = source == ProxyProfileSource.REMOTE &&
-                            sourceUrl != null &&
                             uniqueProfiles.isNotEmpty(),
                     )
                 }

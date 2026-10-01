@@ -129,6 +129,7 @@ import com.stansful.sshvpnclient.ui.common.AppScreen
 import com.stansful.sshvpnclient.ui.common.AppSheetCornerRadius
 import com.stansful.sshvpnclient.ui.common.AppViewModelFactory
 import com.stansful.sshvpnclient.ui.common.EmptyState
+import com.stansful.sshvpnclient.ui.common.ErrorMessage
 import com.stansful.sshvpnclient.ui.common.InsetGroup
 import com.stansful.sshvpnclient.ui.common.InsetRow
 import com.stansful.sshvpnclient.ui.common.SectionHeader
@@ -1143,6 +1144,8 @@ private fun OpenSourceActions(
                 }
                 StatusCapsule(text = statusText, color = statusColor)
             }
+
+            ErrorMessage(state.openSourceErrorMessage)
 
             Button(
                 onClick = onConnect,

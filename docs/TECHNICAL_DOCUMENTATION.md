@@ -639,20 +639,31 @@ Terminal:
 
 `SshVpnTileService`:
 
-- Показывает статус текущего global VPN state.
+- Показывает статус текущего global VPN state; subtitle (API 29+) — `<mode> · <status>`. Mode — `sessionOwner` живой сессии (connecting/connected/reconnecting/disconnecting), иначе режим, который запустит клик. Tile перерисовывается при изменении и VPN state, и сохранённого режима.
 - По клику:
-  - если VPN connecting/connected/reconnecting/disconnecting, вызывает disconnect;
-  - если disconnected/error, пытается подключить SSH mode.
-- Если нет выбранной SSH config, нет selected apps или не выдано VPN permission, открывает приложение.
+  - если VPN connecting/connected/reconnecting/disconnecting, вызывает `DisconnectVpnUseCase`, который останавливает сессию по её owner (SSH, OpenSource или Smart);
+  - если disconnected/error, запускает последний committed режим из `LastVpnSessionStore`; без сохранённого значения — SSH.
+- Повторный клик, пока предыдущий ещё обрабатывается, игнорируется.
 
-Tile управляет только SSH подключением. OpenSource transport может быть отключен через общий `DisconnectVpnUseCase`, если он активен.
+`LastVpnSessionStore` (SharedPreferences `vpn-session-history`, key `last_session_owner`, значения `shadow-ssh` / `opensource` / `smart-connect`) хранит режим последнего committed старта. `ConnectVpnUseCase`, `ConnectProxyVpnUseCase` и `ConnectSmartVpnUseCase` записывают его в commit point: после всех проверок и успешного `canProceedAfterVpnOwnerStop`, непосредственно перед `setConnecting`/`setReconnecting` (для Smart — перед `smartConnectStateStore.begin()`). Поэтому запись покрывает кнопки вкладок, tile и settings reconnect, но не проваленную валидацию и не прерванное переключение owner. Disconnect, error, revoke и переключение вкладок значение не сбрасывают: `VpnConnectionState.sessionOwner` при отключении обнуляется, а этот store — нет.
+
+Решение о запуске принимает чистая функция `resolveQuickTileConnectPlan` (`vpn/QuickTilePolicy.kt`): либо `Connect(owner)`, либо `OpenApp(tab, reason)`. Tile никогда не запускает другой режим вместо сохранённого. Проверки по режимам:
+
+- SSH: выбрана config; для `PRIVATE_KEY` ключ существует.
+- OpenSource: `openSourceConsentVersion >= OpenSourcePolicy.CONSENT_VERSION`, выбран route, Xray core установлен.
+- Smart: consent по тому же условию, что и в `GlobalTabsHost`; Xray core установлен.
+- Для всех: непустой `Selected apps` в режиме selected apps и выданное VPN permission.
+
+Проверка Xray core выполняется на `Dispatchers.IO`: первая проверка загружает установленный core через class loader. При невыполненном условии tile публикует причину там, где её показывает вкладка режима: `setError(configId/profileId)`, а для Smart дополнительно `smartConnectStateStore.fail(keepDesiredActive = false)`. Затем tile выставляет `activeGlobalTab` (`GlobalTabsHost` следует за ним и в уже запущенной activity) и открывает приложение. Отсутствие consent ошибкой не считается: открывается вкладка, её consent dialog берёт управление на себя.
+
+Публикация ошибки защищена `canPublishQuickTileStartFailure`: при проверке условий она не перетирает старт, успевший прийти из приложения. Если use case бросил исключение уже после commit point, состояние CONNECTING этого owner без сервиса превращается в error, и tile не зависает в Connecting.
 
 ## 19. OpenSource policy и предупреждения
 
 `OpenSourcePolicy`:
 
 - `CONSENT_VERSION = 1`.
-- Public source: `https://hub.mos.ru/zieng2/wl/raw/main/list_universal.txt`.
+- Public source: `https://gitverse.ru/api/repos/zieng2/wl/raw/branch/master/list_universal.txt`.
 - Disclaimer: public configurations are third-party and used at user risk.
 
 При переходе на OpenSource:
@@ -693,7 +704,7 @@ Repository import:
 - Deduplicate по fingerprint.
 - Raw URI сохраняется в Tink secret storage.
 - Metadata сохраняется в Room.
-- Для remote source старые профили, отсутствующие в новом sync, помечаются stale.
+- После импорта хотя бы одного валидного профиля все `REMOTE` профили, отсутствующие в новом sync (`lastSeenAt < syncStartedAt`), помечаются stale. `sourceUrl` в условии не участвует: remote source один, а совпадение по URL оставляло бы вечно свежими строки, импортированные до смены `OpenSourcePolicy.SOURCE_URL`. То же правило действует в изолированной таблице Smart Connect.
 - Если выбранный профиль удален или stale, repository выбирает первый доступный профиль.
 - Fingerprint lookup и массовое удаление разбиваются на SQLite-пакеты максимум по 900 bind-параметров; delete/fallback остаются одной Room-транзакцией даже для импорта/выбора до 10000 профилей.
 
@@ -704,7 +715,7 @@ Public sync:
 - User-Agent: `shadow-ssh-android-opensource-sync`.
 - Timeout: connect 10 секунд, read 15 секунд.
 - Response size limit: 2 MiB.
-- Поддерживается ETag через `If-None-Match`, кроме forced refresh.
+- Поддерживается ETag через `If-None-Match`, кроме forced refresh. ETag хранится вместе с URL, который его выдал (`etag` + `etag_url` в prefs synchronizer-а), и отправляется только если `etag_url` совпадает с текущим source URL. ETag без сохранённого URL (записанный до этого изменения) игнорируется, поэтому первый sync после обновления — одна полная загрузка. Ответ `200` без заголовка ETag удаляет оба ключа.
 - Structured cancellation watcher вызывает `HttpURLConnection.disconnect()` при отмене, поэтому blocking `responseCode`/`read` не удерживает worker до сетевого timeout; normal/error path также всегда закрывает connection и watcher.
 
 Background sync:
@@ -740,6 +751,7 @@ OpenSource экран поддерживает:
 - Scroll-to-top / scroll-to-bottom floating buttons.
 - Logs panel.
 - Settings bottom sheet.
+- Текст ошибки под статусом подключения, если VPN state в `ERROR` и ошибка опубликована для выбранного route (`activeConfigId == selectedProfile.id`). Сюда попадают причины от quick settings tile и runtime ошибки `OpenSourceVpnService`. Ошибки других вкладок и ошибки без route id здесь не показываются.
 
 Pinned behavior:
 
@@ -876,6 +888,8 @@ refresh isolated source
 ```
 
 - Общий budget refresh/check/finalization — 60 секунд; probe-stage оставляет 3 секунды для durable commit. Непроверенный хвост остаётся `NOT_TESTED`.
+- Refresh source и ETag. Finalization удаляет unavailable/stale строки, поэтому `304` по ETag не вернул бы в каталог серверы, удалённые раньше, пока не изменится сам upstream-файл. `SmartSourceRefreshSchedule` (`vpn/SmartConnectPolicy.kt`) передаёт в `refreshCheckPruneAndSelect(forceSourceRefresh = ...)` значение `true` для первого прохода каждой сессии (Start из вкладки или tile, Android restore) и для каждого прохода после неудачного прохода или прохода, чей sync упал и который ушёл в cached catalog (`SmartCatalogSelection.sourceSynchronized = false`). ETag/`304` принимается только в failover после прохода, реально достучавшегося до источника. Каталог без пригодных строк по-прежнему форсирует загрузку (`shouldForceSmartSourceRefresh`). Control request при all-negative snapshot остаётся conditional.
+- Исход refresh пишется в diagnostics: `Smart Connect source refreshed: <import summary>`, `Smart Connect source not modified; ...` или `Smart Connect refresh failed; trying cached catalog: ...`. In-session `publishConnectingState` вызывает `setConnecting(..., clearDiagnostics = false)`, поэтому эти строки не стираются при переходе в Connecting; новая сессия (`ConnectSmartVpnUseCase`, restore) по-прежнему очищает log.
 - До 128 transient probes используют один authenticated batch Xray runtime и timeout до 5 секунд на профиль. Progress публикуется монотонно и coalesced.
 - All-negative/zero-result snapshot не очищает каталог. При массовом отказе выполняется control request через ту же захваченную physical network; без хотя бы одного текущего `AVAILABLE` destructive prune не выполняется.
 - Результаты, удаление unavailable/stale и выбор winner объединены одной guarded Room-транзакцией. Если physical network/settings revision устарела, исключение откатывает всю транзакцию; secrets удаляются только после commit.
@@ -1158,7 +1172,10 @@ Backup:
 - `TunForwarderConfigTest` - normal/low-RAM flow limits и pressure thresholds.
 - `BoundedTerminalOutputBufferTest` - ограничение terminal output по символам и chunks.
 - `ProxySourceSyncNetworkSelectionTest` - выбор физической validated non-VPN unmetered сети для background sync.
-- `SmartConnectPolicyTest`/`SmartConnectViewModelPolicyTest` - ranking, `🇷🇺` exclusion, deadlines и terminal-result accumulation.
+- `SmartConnectPolicyTest`/`SmartConnectViewModelPolicyTest` - ranking, `🇷🇺` exclusion, deadlines, terminal-result accumulation и расписание forced source refresh (первый проход, успех с/без sync, неудачный проход).
+- `PublicProxySourceEtagTest` - `If-None-Match` только для не-forced запроса к тому же URL, который выдал ETag.
+- `QuickTilePolicyTest`/`LastVpnSessionStoreTest` - выбор режима tile, матрица preconditions → `Connect`/`OpenApp(tab, reason)`, guard публикации ошибки, subtitle mode и storage-значения режима.
+- `OpenSourceUiStatePolicyTest` - OpenSource tab показывает текст ошибки только для выбранного route.
 - `VpnTrafficActivityMonitorTest` - RX/TX liveness policy для длинных download/upload.
 - `VpnRuntimeLeaseRegistryTest`/`VpnLifecyclePolicyTest` - logical owner isolation и stale command races.
 - `RoomSmartProxyProfileRepositoryBatchTest` - isolated secrets, batch queries и guarded atomic finalization.
@@ -1230,7 +1247,7 @@ Backup:
 2. `PublicProxySourceSynchronizer` скачивает source.
 3. `ProxyShareLinkParser` парсит конфиги.
 4. `RoomProxyProfileRepository` делает upsert по fingerprint.
-5. Старые remote profiles источника помечаются stale.
+5. Все remote profiles, отсутствующие в новом списке, помечаются stale (независимо от `sourceUrl`).
 6. Выбор active profile нормализуется через `ensureSelection()`.
 
 ### Check all OpenSource configs

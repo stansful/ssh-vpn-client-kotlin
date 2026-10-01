@@ -288,6 +288,7 @@ class SmartConnectVpnService : android.net.VpnService() {
         var catalogRetryAttempt = 0
         var consecutiveRuntimeFailures = 0
         var everVerified = false
+        val sourceRefresh = SmartSourceRefreshSchedule()
 
         while (shouldKeepSessionAlive(runId)) {
             val physicalNetwork = awaitPhysicalNetwork(runId)
@@ -309,6 +310,7 @@ class SmartConnectVpnService : android.net.VpnService() {
                         connectionFactory = ProxySourceConnectionFactory { url ->
                             physicalNetwork.openConnection(url)
                         },
+                        forceSourceRefresh = sourceRefresh.forceNextPass,
                         excludedFingerprints = profileCooldowns.activeFingerprints(),
                         preferredPhysicalNetwork = physicalNetwork,
                         workflowIsCurrent = {
@@ -320,13 +322,15 @@ class SmartConnectVpnService : android.net.VpnService() {
                                     expectedSettingsRevision,
                                 )
                         },
-                    ).also {
+                    ).also { selection ->
                         catalogRetryAttempt = 0
                         consecutiveRuntimeFailures = 0
-                    }
+                        sourceRefresh.onPassSucceeded(selection.sourceSynchronized)
+                    }.profile
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
+                    sourceRefresh.onPassFailed()
                     val exponentialRetryDelayMs = smartCatalogRetryDelayMs(catalogRetryAttempt++)
                     val retryDelayMs = profileCooldowns.remainingUntilNextExpiryMs()
                         ?.let { cooldownRemainingMs ->
@@ -1112,10 +1116,13 @@ class SmartConnectVpnService : android.net.VpnService() {
                 VpnSessionOwner.SMART_CONNECT,
             )
         } else if (repository.currentState.activeConfigId != profile.id) {
+            // The session start already cleared the log; keep the refresh and check lines that
+            // explain how this tunnel was picked.
             repository.setConnecting(
                 profile.id,
                 VpnTransportType.XRAY,
                 VpnSessionOwner.SMART_CONNECT,
+                clearDiagnostics = false,
             )
         }
     }

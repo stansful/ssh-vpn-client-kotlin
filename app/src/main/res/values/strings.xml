@@ -15,6 +15,13 @@
     <string name="qs_tile_no_selected_apps">No apps selected</string>
     <string name="qs_tile_permission_required">VPN permission required</string>
     <string name="qs_tile_unknown_error">Unknown connection error</string>
+    <string name="qs_tile_ssh_key_missing">Selected SSH key not found</string>
+    <string name="qs_tile_no_public_route">No public route selected</string>
+    <string name="qs_tile_xray_core_missing">Xray runtime core is not installed</string>
+    <string name="qs_tile_mode_ssh">SSH</string>
+    <string name="qs_tile_mode_smart">Smart</string>
+    <string name="qs_tile_mode_public">Public</string>
+    <string name="qs_tile_subtitle">%1$s · %2$s</string>
     <string name="error_no_selected_apps">No apps selected</string>
     <string name="open_source_warning_title">Public configurations</string>
     <string name="open_source_warning_message">Public configurations are provided by third-party sources. Use them at your own risk. The app developer is not responsible for their safety or for the safety of your data.</string>

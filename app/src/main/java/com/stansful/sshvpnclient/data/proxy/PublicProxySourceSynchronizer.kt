@@ -71,10 +71,13 @@ class PublicProxySourceSynchronizer(
             instanceFollowRedirects = false
             setRequestProperty("Accept", "text/plain")
             setRequestProperty("User-Agent", userAgent)
-            if (!force) {
-                preferences.getString(KEY_ETAG, null)?.let { etag ->
-                    setRequestProperty("If-None-Match", etag)
-                }
+            proxySourceIfNoneMatch(
+                force = force,
+                storedEtag = preferences.getString(KEY_ETAG, null),
+                storedEtagUrl = preferences.getString(KEY_ETAG_URL, null),
+                sourceUrl = sourceUrl,
+            )?.let { etag ->
+                setRequestProperty("If-None-Match", etag)
             }
         }
 
@@ -94,7 +97,15 @@ class PublicProxySourceSynchronizer(
                         sourceUrl = sourceUrl,
                     )
                     preferences.edit {
-                        getHeaderField("ETag")?.let { putString(KEY_ETAG, it) }
+                        val etag = getHeaderField("ETag")
+                        if (etag != null) {
+                            putString(KEY_ETAG, etag)
+                            putString(KEY_ETAG_URL, sourceUrl)
+                        } else {
+                            // An older ETag no longer describes the list that was just imported.
+                            remove(KEY_ETAG)
+                            remove(KEY_ETAG_URL)
+                        }
                         putLong(KEY_LAST_SUCCESS_AT, System.currentTimeMillis())
                     }
                     ProxySyncResult(result, notModified = false)
@@ -150,6 +161,7 @@ class PublicProxySourceSynchronizer(
     private companion object {
         const val DEFAULT_PREFERENCES_NAME = "open-source-proxy-sync"
         const val KEY_ETAG = "etag"
+        const val KEY_ETAG_URL = "etag_url"
         const val KEY_LAST_SUCCESS_AT = "last_success_at"
         const val DEFAULT_USER_AGENT = "shadow-ssh-android-opensource-sync"
         const val CONNECT_TIMEOUT_MS = 10_000
@@ -159,6 +171,21 @@ class PublicProxySourceSynchronizer(
         const val HTTP_TOO_MANY_REQUESTS = 429
         val HTTP_SERVER_ERROR_RANGE = 500..599
     }
+}
+
+/**
+ * An ETag only identifies a version of the URL that issued it. After a source URL change the stored
+ * one belongs to the previous list, and one stored before URLs were recorded has an unknown origin;
+ * either is dropped so the current source is downloaded in full once.
+ */
+internal fun proxySourceIfNoneMatch(
+    force: Boolean,
+    storedEtag: String?,
+    storedEtagUrl: String?,
+    sourceUrl: String,
+): String? {
+    if (force || storedEtagUrl != sourceUrl) return null
+    return storedEtag
 }
 
 /**

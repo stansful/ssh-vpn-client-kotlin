@@ -233,7 +233,7 @@ private class RecordingProxyProfileDao(
 
     override suspend fun setPinned(id: String, isPinned: Boolean) = Unit
 
-    override suspend fun markRemoteProfilesStale(sourceUrl: String, syncStartedAt: Long) = Unit
+    override suspend fun markRemoteProfilesStale(syncStartedAt: Long) = Unit
 
     override suspend fun updateTestResult(
         id: String,

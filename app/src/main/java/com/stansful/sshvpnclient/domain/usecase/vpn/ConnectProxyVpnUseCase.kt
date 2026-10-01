@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.domain.usecase.vpn
 
 import android.content.Context
 import androidx.core.content.ContextCompat
+import com.stansful.sshvpnclient.data.local.LastVpnSessionStore
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
@@ -22,6 +23,7 @@ class ConnectProxyVpnUseCase(
     private val proxyProfileRepository: ProxyProfileRepository,
     private val appSettingsRepository: AppSettingsRepository,
     private val vpnConnectionRepository: VpnConnectionRepository,
+    private val lastVpnSessionStore: LastVpnSessionStore,
 ) {
     suspend operator fun invoke() {
         val profile = proxyProfileRepository.getSelected()
@@ -59,6 +61,7 @@ class ConnectProxyVpnUseCase(
         ) {
             return
         }
+        lastVpnSessionStore.record(VpnSessionOwner.OPEN_SOURCE)
         vpnConnectionRepository.setConnecting(
             profile.id,
             VpnTransportType.XRAY,

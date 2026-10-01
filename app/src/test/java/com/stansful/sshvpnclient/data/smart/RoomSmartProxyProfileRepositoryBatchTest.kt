@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -344,6 +345,35 @@ class RoomSmartProxyProfileRepositoryBatchTest {
     }
 
     @Test
+    fun `remote import expires rows left over from a previous source URL`() = runBlocking {
+        val leftover = smartProfileEntity(id = "leftover")
+        val dao = RecordingSmartProxyProfileDao(mapOf(leftover.id to leftover))
+        val repository = repository(
+            dao,
+            RecordingSmartSecretStorage(mapOf(leftover.secretId to "uri://${leftover.id}")),
+        )
+        val movedSourceUrl = "https://example.test/moved"
+
+        repository.import(
+            text = "not a share link",
+            source = ProxyProfileSource.REMOTE,
+            sourceUrl = movedSourceUrl,
+        )
+        assertTrue(dao.entity(leftover.id)?.isStale == false)
+
+        repository.import(
+            text = "vless://00000000-0000-4000-8000-000000000005@moved.test:443?security=tls#Moved",
+            source = ProxyProfileSource.REMOTE,
+            sourceUrl = movedSourceUrl,
+        )
+
+        assertTrue(dao.entity(leftover.id)?.isStale == true)
+        val imported = dao.remainingEntities().single { entity -> entity.id != leftover.id }
+        assertEquals(movedSourceUrl, imported.sourceUrl)
+        assertFalse(imported.isStale)
+    }
+
+    @Test
     fun `smart update rejects Russian-flag name before secret save or Room mutation`() = runBlocking {
         val existing = smartProfileEntity(id = "existing")
         val dao = RecordingSmartProxyProfileDao(mapOf(existing.id to existing))
@@ -487,11 +517,10 @@ private class RecordingSmartProxyProfileDao(
         entities[id]?.let { entity -> entities[id] = entity.copy(isPinned = isPinned) }
     }
 
-    override suspend fun markRemoteProfilesStale(sourceUrl: String, syncStartedAt: Long) {
+    override suspend fun markRemoteProfilesStale(syncStartedAt: Long) {
         entities.entries.forEach { entry ->
             val entity = entry.value
             if (entity.source == ProxyProfileSource.REMOTE.name &&
-                entity.sourceUrl == sourceUrl &&
                 entity.lastSeenAt < syncStartedAt
             ) {
                 entry.setValue(entity.copy(isStale = true))

@@ -30,10 +30,11 @@ class SmartConnectCatalogManager(
 ) {
     suspend fun refreshCheckPruneAndSelect(
         connectionFactory: ProxySourceConnectionFactory,
+        forceSourceRefresh: Boolean,
         excludedFingerprints: Set<String> = emptySet(),
         preferredPhysicalNetwork: Network? = null,
         workflowIsCurrent: () -> Boolean = { true },
-    ): ProxyProfile {
+    ): SmartCatalogSelection {
         // Both deadlines use the monotonic clock. Batch probes stop early enough to leave a small
         // reserve for persisting completed results, pruning, and selection inside the same hard
         // user-visible 60-second workflow budget.
@@ -44,6 +45,7 @@ class SmartConnectCatalogManager(
         return withMonotonicDeadlineOrNull(workflowDeadlineNanos) {
             refreshCheckPruneAndSelectWithinBudget(
                 connectionFactory = connectionFactory,
+                forceSourceRefresh = forceSourceRefresh,
                 excludedFingerprints = excludedFingerprints,
                 preferredPhysicalNetwork = preferredPhysicalNetwork,
                 workflowDeadlineNanos = workflowDeadlineNanos,
@@ -54,14 +56,16 @@ class SmartConnectCatalogManager(
 
     private suspend fun refreshCheckPruneAndSelectWithinBudget(
         connectionFactory: ProxySourceConnectionFactory,
+        forceSourceRefresh: Boolean,
         excludedFingerprints: Set<String>,
         preferredPhysicalNetwork: Network?,
         workflowDeadlineNanos: Long,
         workflowIsCurrent: () -> Boolean,
-    ): ProxyProfile {
-        val catalogNeedsFullRefresh = profileRepository.observeSummaries().first().none { profile ->
-            !profile.isStale && !isSmartConnectExcludedProfileName(profile.name)
-        }
+    ): SmartCatalogSelection {
+        val forceSync = shouldForceSmartSourceRefresh(
+            forceRequested = forceSourceRefresh,
+            catalog = profileRepository.observeSummaries().first(),
+        )
         stateStore.publish { state ->
             state.copy(
                 phase = SmartConnectPhase.REFRESHING,
@@ -73,11 +77,16 @@ class SmartConnectCatalogManager(
             )
         }
         val syncFailure = try {
-            sourceSynchronizer.synchronize(
-                // Keep the refresh semantics while avoiding another multi-megabyte download when
-                // ETag says the source is unchanged. An empty local catalog must bypass 304.
-                force = catalogNeedsFullRefresh,
+            val syncResult = sourceSynchronizer.synchronize(
+                force = forceSync,
                 connectionFactory = connectionFactory,
+            )
+            log(
+                if (syncResult.notModified) {
+                    "Smart Connect source not modified; checking the cached catalog"
+                } else {
+                    "Smart Connect source refreshed: ${syncResult.importResult.summary}"
+                },
             )
             null
         } catch (error: CancellationException) {
@@ -292,7 +301,10 @@ class SmartConnectCatalogManager(
                 message = "Selecting the lowest-latency tunnel",
             )
         }
-        return profilesById.getValue(best.id)
+        return SmartCatalogSelection(
+            profile = profilesById.getValue(best.id),
+            sourceSynchronized = syncFailure == null,
+        )
     }
 
     suspend fun markUnavailable(profile: ProxyProfile, message: String) {
@@ -383,6 +395,12 @@ internal suspend fun <T> withMonotonicDeadlineOrNull(
         if (remainingNanos % NANOS_PER_MILLISECOND == 0L) 0L else 1L
     return withTimeoutOrNull(remainingMillisCeiling) { block() }
 }
+
+class SmartCatalogSelection(
+    val profile: ProxyProfile,
+    /** False when the source request failed and the pass fell back to the cached catalog. */
+    val sourceSynchronized: Boolean,
+)
 
 class SmartConnectPoolExhaustedException(
     message: String,

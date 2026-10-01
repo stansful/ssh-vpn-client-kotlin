@@ -10,6 +10,7 @@ import com.stansful.sshvpnclient.data.local.MIGRATION_1_2
 import com.stansful.sshvpnclient.data.local.MIGRATION_2_3
 import com.stansful.sshvpnclient.data.local.MIGRATION_3_4
 import com.stansful.sshvpnclient.data.local.InMemoryVpnConnectionRepository
+import com.stansful.sshvpnclient.data.local.LastVpnSessionStore
 import com.stansful.sshvpnclient.data.local.SmartConnectStateStore
 import com.stansful.sshvpnclient.data.proxy.RoomProxyProfileRepository
 import com.stansful.sshvpnclient.data.proxy.PublicProxySourceSynchronizer
@@ -137,6 +138,9 @@ class AppContainer(
     val smartConnectStateStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         SmartConnectStateStore(appContext)
     }
+    val lastVpnSessionStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        LastVpnSessionStore(appContext)
+    }
     val appUpdateRepository: AppUpdateRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         GitHubAppUpdateRepository(
             context = appContext,
@@ -199,6 +203,7 @@ class AppContainer(
             keyRepository = sshPrivateKeyRepository,
             vpnConnectionRepository = vpnConnectionRepository,
             appSettingsRepository = appSettingsRepository,
+            lastVpnSessionStore = lastVpnSessionStore,
         )
     }
     val connectProxyVpnUseCase by lazy {
@@ -207,6 +212,7 @@ class AppContainer(
             proxyProfileRepository = proxyProfileRepository,
             appSettingsRepository = appSettingsRepository,
             vpnConnectionRepository = vpnConnectionRepository,
+            lastVpnSessionStore = lastVpnSessionStore,
         )
     }
     val connectSmartVpnUseCase by lazy {
@@ -215,6 +221,7 @@ class AppContainer(
             appSettingsRepository = appSettingsRepository,
             vpnConnectionRepository = vpnConnectionRepository,
             smartConnectStateStore = smartConnectStateStore,
+            lastVpnSessionStore = lastVpnSessionStore,
         )
     }
     val disconnectVpnUseCase by lazy {

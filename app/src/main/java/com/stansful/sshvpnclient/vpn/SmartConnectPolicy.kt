@@ -49,6 +49,38 @@ internal fun isSmartConnectExcludedProfileName(name: String): Boolean {
     return SMART_CONNECT_EXCLUDED_NAME_MARKERS.any(name::contains)
 }
 
+/**
+ * Smart deletes unavailable and stale rows after every verified pass, so an ETag 304 would keep
+ * servers pruned earlier out of the pool until the upstream list itself changes. A requested
+ * (user-visible) pass and a catalog without a usable row therefore download the whole list.
+ */
+internal fun shouldForceSmartSourceRefresh(
+    forceRequested: Boolean,
+    catalog: Collection<ProxyProfileSummary>,
+): Boolean {
+    return forceRequested || catalog.none { profile ->
+        !profile.isStale && !isSmartConnectExcludedProfileName(profile.name)
+    }
+}
+
+/**
+ * The first catalog pass of a session (any Start or an Android restore) and every pass after one
+ * that failed or fell back to the cached catalog are what the user waits on, so they bypass the
+ * source ETag. Only failover after a pass that actually reached the source may accept a 304.
+ */
+internal class SmartSourceRefreshSchedule {
+    var forceNextPass: Boolean = true
+        private set
+
+    fun onPassSucceeded(sourceSynchronized: Boolean) {
+        forceNextPass = !sourceSynchronized
+    }
+
+    fun onPassFailed() {
+        forceNextPass = true
+    }
+}
+
 /** A verified tunnel is not destroyed by one short-lived auxiliary endpoint failure. */
 internal fun shouldTriggerVerifiedTunnelFailover(
     confirmedFailureRounds: Int,
