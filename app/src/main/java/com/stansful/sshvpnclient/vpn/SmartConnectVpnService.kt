@@ -1,9 +1,5 @@
 package com.stansful.sshvpnclient.vpn
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -13,8 +9,8 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.SystemClock
-import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.SshVpnApplication
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.ProxyProfile
@@ -24,6 +20,11 @@ import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.repository.ProxySourceConnectionFactory
+import com.stansful.sshvpnclient.ui.system.AutoNotice
+import com.stansful.sshvpnclient.ui.system.NotificationAction
+import com.stansful.sshvpnclient.ui.system.autoNotificationCopy
+import com.stansful.sshvpnclient.ui.system.connectionNotification
+import com.stansful.sshvpnclient.ui.system.ensureConnectionChannel
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
 import com.stansful.sshvpnclient.xray.XrayLiveHealthHandle
 import java.util.concurrent.atomic.AtomicLong
@@ -82,7 +83,7 @@ class SmartConnectVpnService : android.net.VpnService() {
     @Volatile
     private var lastStartId = 0
     @Volatile
-    private var lastNotificationKey: String? = null
+    private var lastNotice: AutoNotice? = null
 
     private var receiverRegistered = false
     private lateinit var powerManager: PowerManager
@@ -140,8 +141,10 @@ class SmartConnectVpnService : android.net.VpnService() {
             }
             intent?.action == ACTION_START || intent == null -> {
                 userRequestedStop = false
-                val text = if (intent == null) "Restoring Smart Connect" else "Starting Smart Connect"
-                startSmartForeground(NotificationPhase.STARTING, text, force = true)
+                startSmartForeground(
+                    notice = if (intent == null) AutoNotice.Restoring else AutoNotice.Starting,
+                    force = true,
+                )
                 underlyingNetworkMonitor.start()
                 startSession(startId)
             }
@@ -149,7 +152,7 @@ class SmartConnectVpnService : android.net.VpnService() {
                 // START_REDELIVER_INTENT normally preserves ACTION_START. This fallback also
                 // restores state on platform/OEM variants that redeliver a null or altered intent.
                 userRequestedStop = false
-                startSmartForeground(NotificationPhase.STARTING, "Restoring Smart Connect", force = true)
+                startSmartForeground(AutoNotice.Restoring, force = true)
                 underlyingNetworkMonitor.start()
                 startSession(startId)
             }
@@ -304,7 +307,7 @@ class SmartConnectVpnService : android.net.VpnService() {
 
             if (activeProfile == null) {
                 cleanupOwnedVpnRuntime()
-                startSmartForeground(NotificationPhase.PREPARING, "Preparing Smart Connect tunnels")
+                startSmartForeground(AutoNotice.Searching)
                 activeProfile = try {
                     appContainer.smartConnectCatalogManager.refreshCheckPruneAndSelect(
                         connectionFactory = ProxySourceConnectionFactory { url ->
@@ -348,10 +351,7 @@ class SmartConnectVpnService : android.net.VpnService() {
                             message = "No verified tunnel; retrying in ${retryDelayMs / 1_000L}s",
                         )
                     }
-                    startSmartForeground(
-                        NotificationPhase.RETRY,
-                        "No verified tunnel; retrying in ${retryDelayMs / 1_000L}s",
-                    )
+                    startSmartForeground(AutoNotice.Retrying(retryDelayMs))
                     drainWorkflowSignals()
                     if (underlyingNetworkMonitor.currentNetwork() != physicalNetwork ||
                         !routingSettingsAreCurrent(
@@ -390,7 +390,7 @@ class SmartConnectVpnService : android.net.VpnService() {
                     message = "Connecting to ${profile.name}",
                 )
             }
-            startSmartForeground(NotificationPhase.CONNECTING, "Connecting to ${profile.name}")
+            startSmartForeground(AutoNotice.Connecting(profile.name))
 
             val outcome = try {
                 connectAndMonitor(
@@ -508,7 +508,7 @@ class SmartConnectVpnService : android.net.VpnService() {
                         )
                     }
                     publishReconnectingState(runId, profile)
-                    startSmartForeground(NotificationPhase.PREPARING, "Selecting a replacement tunnel")
+                    startSmartForeground(AutoNotice.Switching)
                     cleanupOwnedVpnRuntime()
                     activeProfile = null
                     consecutiveRuntimeFailures = 0
@@ -730,9 +730,8 @@ class SmartConnectVpnService : android.net.VpnService() {
                     if (!publishConnectedState(runId, commandId, profile)) return ConnectionOutcome.Stopped
                     onVerified()
                     healthPublished = true
-                    startSmartForeground(NotificationPhase.CONNECTED, "Connected via ${profile.name}")
                 }
-                publishHealthySmartState(profile, firstProbe.latencyMs)
+                publishHealthySmartState(runId, profile, firstProbe.latencyMs)
                 trafficActivityMonitor.sampleSinceLast()
                 disruptionDeferralStartedAtMs = NO_TIMESTAMP
                 nextProbeAtMs = SystemClock.elapsedRealtime() + smartHealthCheckIntervalMs(
@@ -772,9 +771,8 @@ class SmartConnectVpnService : android.net.VpnService() {
                     if (!publishConnectedState(runId, commandId, profile)) return ConnectionOutcome.Stopped
                     onVerified()
                     healthPublished = true
-                    startSmartForeground(NotificationPhase.CONNECTED, "Connected via ${profile.name}")
                 }
-                publishHealthySmartState(profile, confirmation.latencyMs)
+                publishHealthySmartState(runId, profile, confirmation.latencyMs)
                 trafficActivityMonitor.sampleSinceLast()
                 disruptionDeferralStartedAtMs = NO_TIMESTAMP
                 nextProbeAtMs = SystemClock.elapsedRealtime() + smartHealthCheckIntervalMs(
@@ -908,7 +906,7 @@ class SmartConnectVpnService : android.net.VpnService() {
                     message = "Waiting for a physical network",
                 )
             }
-            startSmartForeground(NotificationPhase.WAITING, "Waiting for a physical network")
+            startSmartForeground(AutoNotice.WaitingForNetwork)
         }
         val network = underlyingNetworkMonitor.awaitUsableNetwork()
         if (!shouldKeepSessionAlive(runId)) throw CancellationException("Smart Connect stopped")
@@ -1166,7 +1164,7 @@ class SmartConnectVpnService : android.net.VpnService() {
         true
     }
 
-    private fun publishHealthySmartState(profile: ProxyProfile, healthLatencyMs: Long) {
+    private fun publishHealthySmartState(runId: Long, profile: ProxyProfile, healthLatencyMs: Long) {
         appContainer.smartConnectStateStore.publish { state ->
             state.copy(
                 phase = SmartConnectPhase.CONNECTED,
@@ -1177,6 +1175,11 @@ class SmartConnectVpnService : android.net.VpnService() {
                 retryDelayMs = null,
                 message = "Connected via ${profile.name}",
             )
+        }
+        // Every passed live check refreshes "Live check N ms", but only for the run that is still
+        // live: never after a stop began or a newer run took over.
+        if (shouldKeepSessionAlive(runId)) {
+            startSmartForeground(AutoNotice.Connected(profile.name, healthLatencyMs))
         }
     }
 
@@ -1228,37 +1231,22 @@ class SmartConnectVpnService : android.net.VpnService() {
         }
     }
 
-    private fun startSmartForeground(
-        phase: NotificationPhase,
-        text: String,
-        force: Boolean = false,
-    ) {
-        val notificationKey = "${phase.name}:$text"
-        if (!force && lastNotificationKey == notificationKey) return
-        val manager = getSystemService(Service.NOTIFICATION_SERVICE) as NotificationManager
-        manager.createNotificationChannel(
-            NotificationChannel(
-                CHANNEL_ID,
-                "Smart Connect VPN",
-                NotificationManager.IMPORTANCE_LOW,
+    /** Posts Auto's notice unless it is already showing ([force] re-posts for the start deadline). */
+    private fun startSmartForeground(notice: AutoNotice, force: Boolean = false) {
+        if (!force && lastNotice == notice) return
+        ensureConnectionChannel(CHANNEL_ID, R.string.vpn_notification_channel_auto)
+        val notification = connectionNotification(
+            channelId = CHANNEL_ID,
+            mode = R.string.mode_auto,
+            copy = autoNotificationCopy(notice),
+            action = NotificationAction(
+                label = R.string.notification_action_stop,
+                serviceIntent = stopIntent(this),
+                requestCode = NOTIFICATION_ID,
             ),
         )
-        val stopPendingIntent = PendingIntent.getService(
-            this,
-            NOTIFICATION_ID,
-            stopIntent(this),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
-            .setContentTitle("Smart Connect")
-            .setContentText(text)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .addAction(0, "Stop", stopPendingIntent)
-            .build()
         startForeground(NOTIFICATION_ID, notification)
-        lastNotificationKey = notificationKey
+        lastNotice = notice
     }
 
     private fun AppSettings.hasValidSmartRouting(): Boolean {
@@ -1315,13 +1303,4 @@ private sealed interface ConnectionOutcome {
     data object SettingsChanged : ConnectionOutcome
     data class ConfirmedHealthFailure(val message: String) : ConnectionOutcome
     data class RuntimeFailure(val message: String) : ConnectionOutcome
-}
-
-private enum class NotificationPhase {
-    STARTING,
-    WAITING,
-    PREPARING,
-    CONNECTING,
-    CONNECTED,
-    RETRY,
 }

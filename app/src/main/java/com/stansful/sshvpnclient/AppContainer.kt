@@ -61,6 +61,7 @@ import com.stansful.sshvpnclient.xray.XrayCoreBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class AppContainer(
     context: Context,
@@ -163,6 +164,12 @@ class AppContainer(
     val xrayCoreUpdateRepository: XrayCoreUpdateRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         GitHubXrayCoreUpdateRepository(context = appContext)
     }
+
+    /**
+     * True while an Xray engine download/install runs (Settings › Xray engine or the update sheet, both
+     * through the Routes ViewModel). Auto doesn't start or restore its session meanwhile.
+     */
+    val xrayCoreInstallInProgress = MutableStateFlow(false)
 
     val sshConnectionManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { SshConnectionManager() }
     val vpnRuntimeLeaseRegistry by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { VpnRuntimeLeaseRegistry() }

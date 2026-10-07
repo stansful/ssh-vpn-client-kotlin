@@ -8,11 +8,15 @@ import com.stansful.sshvpnclient.domain.model.SshPrivateKeySummary
 import com.stansful.sshvpnclient.domain.model.ValidationException
 import com.stansful.sshvpnclient.domain.usecase.config.AddSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.GetSshConfigByIdUseCase
+import com.stansful.sshvpnclient.domain.usecase.config.SshConfigValidator
 import com.stansful.sshvpnclient.domain.usecase.config.UpdateSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyListUseCase
+import com.stansful.sshvpnclient.ui.keys.SshKeyTraits
+import com.stansful.sshvpnclient.ui.keys.SshKeyTraitsReader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -33,13 +37,22 @@ data class EditConfigForm(
     val createdAt: Long? = null,
 )
 
+/**
+ * [errors] appear after the first failed save ([attempted]); from then on every edit re-validates, so
+ * fixed fields clear and [validationRound] counts the failed saves (the screen jumps to the first
+ * error on each one).
+ */
 data class EditConfigUiState(
     val form: EditConfigForm = EditConfigForm(),
     val keys: List<SshPrivateKeySummary> = emptyList(),
+    val keyTraits: Map<String, SshKeyTraits> = emptyMap(),
     val errors: Map<String, String> = emptyMap(),
     val message: String? = null,
+    val isSaving: Boolean = false,
     val isSaved: Boolean = false,
     val isEditing: Boolean = false,
+    val attempted: Boolean = false,
+    val validationRound: Int = 0,
 )
 
 class EditConfigViewModel(
@@ -48,83 +61,102 @@ class EditConfigViewModel(
     private val updateSshConfigUseCase: UpdateSshConfigUseCase,
     private val getSshConfigByIdUseCase: GetSshConfigByIdUseCase,
     getSshPrivateKeyListUseCase: GetSshPrivateKeyListUseCase,
+    private val keyTraitsReader: SshKeyTraitsReader,
 ) : ViewModel() {
+    private val validator = SshConfigValidator()
     private val mutableState = MutableStateFlow(EditConfigUiState(isEditing = configId != null))
     val uiState = mutableState.asStateFlow()
 
     init {
         viewModelScope.launch {
-            getSshPrivateKeyListUseCase().collect { keys ->
+            getSshPrivateKeyListUseCase().collectLatest { keys ->
                 mutableState.update { state ->
+                    val form = state.form.withDefaultPrivateKey(keys)
                     state.copy(
                         keys = keys,
-                        form = state.form.withDefaultPrivateKey(keys),
-                        errors = state.errors.clearPrivateKeyErrorIfSelected(
-                            state.form.withDefaultPrivateKey(keys),
-                        ),
+                        form = form,
+                        errors = state.errors.clearPrivateKeyErrorIfSelected(form),
                     )
                 }
+                val traits = keyTraitsReader.read(keys)
+                mutableState.update { it.copy(keyTraits = traits) }
             }
         }
         viewModelScope.launch {
             val existing = configId?.let { getSshConfigByIdUseCase(it) } ?: return@launch
-            mutableState.update {
-                it.copy(
-                    form = existing.toForm(),
+            mutableState.update { state ->
+                val form = existing.toForm()
+                state.copy(
+                    form = form,
                     isEditing = true,
+                    errors = state.revalidated(form),
                 )
             }
         }
     }
 
     fun updateForm(transform: (EditConfigForm) -> EditConfigForm) {
-        mutableState.update { it.copy(form = transform(it.form), errors = emptyMap(), message = null) }
+        mutableState.update { state ->
+            val form = transform(state.form)
+            state.copy(form = form, errors = state.revalidated(form), message = null)
+        }
     }
 
     fun selectAuthType(authType: AuthType) {
         mutableState.update { state ->
             val form = state.form.copy(authType = authType).withDefaultPrivateKey(state.keys)
-            state.copy(form = form, errors = emptyMap(), message = null)
+            state.copy(form = form, errors = state.revalidated(form), message = null)
         }
     }
 
     fun selectPrivateKey(keyId: String) {
         mutableState.update { state ->
-            state.copy(
-                form = state.form.copy(privateKeyId = keyId),
-                errors = state.errors - "privateKeyId",
-                message = null,
-            )
+            val form = state.form.copy(privateKeyId = keyId)
+            val errors = if (state.attempted) state.revalidated(form) else state.errors - "privateKeyId"
+            state.copy(form = form, errors = errors, message = null)
         }
     }
 
     fun save() {
+        val state = mutableState.value
+        if (state.isSaving || state.isSaved) return
+        // A new server gets its id once, so a retried save after a failure cannot create a second copy.
+        val form = state.form.withDefaultPrivateKey(state.keys).let { draft ->
+            draft.copy(id = draft.id ?: UUID.randomUUID().toString())
+        }
+        mutableState.update { it.copy(form = form, isSaving = true, message = null) }
         viewModelScope.launch {
-            val state = mutableState.value
-            val now = System.currentTimeMillis()
-            val form = state.form.withDefaultPrivateKey(state.keys)
-            if (form != state.form) {
-                mutableState.update { it.copy(form = form) }
-            }
-            val config = form.toDomain(now)
-
+            val config = form.toDomain(System.currentTimeMillis())
             try {
                 if (state.isEditing) {
                     updateSshConfigUseCase(config)
                 } else {
                     addSshConfigUseCase(config)
                 }
-                mutableState.update { it.copy(isSaved = true, errors = emptyMap(), message = null) }
+                mutableState.update { it.copy(isSaving = false, isSaved = true, errors = emptyMap(), message = null) }
             } catch (error: ValidationException) {
                 mutableState.update {
-                    it.copy(errors = error.errors.associate { item -> item.field to item.message })
+                    it.copy(
+                        isSaving = false,
+                        attempted = true,
+                        validationRound = it.validationRound + 1,
+                        errors = error.errors.associate { item -> item.field to item.message },
+                    )
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (error: Exception) {
-                mutableState.update { it.copy(message = error.message ?: "Unable to save configuration") }
+                mutableState.update {
+                    it.copy(isSaving = false, message = error.message ?: "Unable to save configuration")
+                }
             }
         }
+    }
+
+    private fun EditConfigUiState.revalidated(form: EditConfigForm): Map<String, String> {
+        if (!attempted) return emptyMap()
+        val candidate = form.withDefaultPrivateKey(keys).toDomain(now = 0L)
+        return validator.validate(candidate).associate { it.field to it.message }
     }
 
     private fun SshConfig.toForm(): EditConfigForm {

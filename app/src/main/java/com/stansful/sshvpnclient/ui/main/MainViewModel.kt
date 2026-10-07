@@ -4,7 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
+import com.stansful.sshvpnclient.domain.model.AppUpdateState
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
+import com.stansful.sshvpnclient.domain.model.GlobalTab
 import com.stansful.sshvpnclient.domain.model.SshConfigSummary
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
@@ -14,10 +16,10 @@ import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.AppUpdateCoordinator
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
+import com.stansful.sshvpnclient.domain.usecase.config.SelectSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
-import com.stansful.sshvpnclient.ui.common.AppUpdateUiState
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
 import com.stansful.sshvpnclient.vpn.SshTerminalSession
 import java.util.ArrayDeque
@@ -47,8 +49,16 @@ data class MainUiState(
     val showNoSelectedAppsDialog: Boolean = false,
     val isTunnelCheckRunning: Boolean = false,
     val tunnelCheckResult: TunnelCheckResult = TunnelCheckResult.IDLE,
+    /** Round trip of the last successful tunnel check, read from its activity line. */
+    val tunnelCheckLatencyMs: Long? = null,
+    /** `host:port` the last successful tunnel check reached on the server side. */
+    val tunnelCheckTarget: String? = null,
     val terminalState: TerminalUiState = TerminalUiState(),
-    val updateState: AppUpdateUiState = AppUpdateUiState(),
+    val updateState: AppUpdateState = AppUpdateState(),
+    /** Every saved server, for Home's "Choose server" sheet. */
+    val configs: List<SshConfigSummary> = emptyList(),
+    /** False until the server list has been read once (avoids flashing the first-run state). */
+    val configsLoaded: Boolean = false,
 ) {
     private val isSshTransportState: Boolean
         get() = vpnState.activeTransport == VpnTransportType.SSH
@@ -104,6 +114,11 @@ data class TerminalUiState(
     val isConnecting: Boolean = false,
     val output: String = "",
     val outputRevision: Long = 0L,
+    /**
+     * Line breaks the bounded buffer has dropped from the front of [output] so far: the number of the
+     * first line of [output] in the whole shell session, so the Terminal can key lines stably.
+     */
+    val firstLineNumber: Long = 0L,
     val input: String = "",
     val errorMessage: String? = null,
 )
@@ -114,13 +129,13 @@ class MainViewModel(
     private val vpnConnectionRepository: VpnConnectionRepository,
     private val connectVpnUseCase: ConnectVpnUseCase,
     private val disconnectVpnUseCase: DisconnectVpnUseCase,
+    private val selectSshConfigUseCase: SelectSshConfigUseCase,
     private val sshConnectionManager: SshConnectionManager,
     observeVpnConnectionStateUseCase: ObserveVpnConnectionStateUseCase,
     private val appUpdateCoordinator: AppUpdateCoordinator,
 ) : ViewModel() {
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
-    private val isTunnelCheckRunning = MutableStateFlow(false)
-    private val tunnelCheckResult = MutableStateFlow(TunnelCheckResult.IDLE)
+    private val tunnelCheck = MutableStateFlow(TunnelCheckState())
     private val terminalState = MutableStateFlow(TerminalUiState())
     private val terminalLock = Any()
     private val terminalOutputBuffer = BoundedTerminalOutputBuffer(MAX_TERMINAL_OUTPUT_CHARACTERS)
@@ -128,8 +143,8 @@ class MainViewModel(
     private var terminalOutputPublishJob: Job? = null
     @Volatile
     private var terminalSession: SshTerminalSession? = null
-    private var settingsReconnectJob: Job? = null
-    private var settingsReconnectStarted = false
+    private var sessionRestartJob: Job? = null
+    private var sessionRestartStarted = false
     private val vpnState = observeVpnConnectionStateUseCase().stateIn(
         scope = viewModelScope,
         started = SharingStarted.Eagerly,
@@ -141,26 +156,30 @@ class MainViewModel(
         configRepository.observeSelectedSummary(),
         appSettingsRepository.settings,
         showNoSelectedAppsDialog,
-    ) { vpnState, selectedConfig, appSettings, showNoSelectedAppsDialog ->
+        configRepository.observeSummaries(),
+    ) { vpnState, selectedConfig, appSettings, showNoSelectedAppsDialog, configs ->
         MainUiState(
             vpnState = vpnState,
             selectedConfig = selectedConfig,
             selectedKeyName = selectedConfig?.keyName,
             appSettings = appSettings,
             showNoSelectedAppsDialog = showNoSelectedAppsDialog,
+            configs = configs,
+            configsLoaded = true,
         )
     }
 
     val uiState = combine(
         baseUiState,
-        isTunnelCheckRunning,
-        tunnelCheckResult,
+        tunnelCheck,
         terminalState,
         appUpdateCoordinator.state,
-    ) { state, isTunnelCheckRunning, tunnelCheckResult, terminalState, updateState ->
+    ) { state, tunnelCheck, terminalState, updateState ->
         state.copy(
-            isTunnelCheckRunning = isTunnelCheckRunning,
-            tunnelCheckResult = tunnelCheckResult,
+            isTunnelCheckRunning = tunnelCheck.isRunning,
+            tunnelCheckResult = tunnelCheck.result,
+            tunnelCheckLatencyMs = tunnelCheck.latencyMs,
+            tunnelCheckTarget = tunnelCheck.target,
             terminalState = terminalState,
             updateState = updateState,
         )
@@ -178,7 +197,7 @@ class MainViewModel(
                 .collect { settings ->
                     val nextSplitTunnelSettings = settings.splitTunnelSettings()
                     if (previousSplitTunnelSettings != nextSplitTunnelSettings) {
-                        applyVpnSettingsChange(settings)
+                        restartSession(settings)
                     }
                     previousSplitTunnelSettings = nextSplitTunnelSettings
                 }
@@ -188,8 +207,7 @@ class MainViewModel(
                 if (state.activeTransport != VpnTransportType.SSH ||
                     state.status != VpnConnectionStatus.CONNECTED
                 ) {
-                    tunnelCheckResult.value = TunnelCheckResult.IDLE
-                    isTunnelCheckRunning.value = false
+                    tunnelCheck.value = TunnelCheckState()
                     closeTerminal()
                 }
             }
@@ -225,34 +243,78 @@ class MainViewModel(
     fun checkTunnel() {
         if (!uiState.value.canCheckTunnel) return
         viewModelScope.launch {
-            isTunnelCheckRunning.value = true
-            tunnelCheckResult.value = TunnelCheckResult.IDLE
+            tunnelCheck.value = TunnelCheckState(isRunning = true)
+            var success: TunnelCheckSuccess? = null
             try {
                 sshConnectionManager.checkTcpForward(
-                    log = vpnConnectionRepository::appendDiagnostic,
+                    log = { line ->
+                        parseTunnelCheckSuccess(line)?.let { success = it }
+                        vpnConnectionRepository.appendDiagnostic(line)
+                    },
                 )
                 if (vpnState.value.isConnectedSsh()) {
-                    tunnelCheckResult.value = TunnelCheckResult.SUCCESS
+                    tunnelCheck.value = TunnelCheckState(
+                        result = TunnelCheckResult.SUCCESS,
+                        latencyMs = success?.latencyMs,
+                        target = success?.target,
+                    )
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
                 // Detailed failure is already written to diagnostics by SshConnectionManager.
                 if (vpnState.value.isConnectedSsh()) {
-                    tunnelCheckResult.value = TunnelCheckResult.FAILURE
+                    tunnelCheck.value = TunnelCheckState(result = TunnelCheckResult.FAILURE)
                 }
             } finally {
-                isTunnelCheckRunning.value = false
+                tunnelCheck.update { it.copy(isRunning = false) }
             }
         }
     }
 
-    fun onVpnPermissionDenied() {
-        vpnConnectionRepository.setError(uiState.value.selectedConfig?.id, "VPN permission denied")
+    /**
+     * Makes [id] the selected server. When an SSH session is running through another server it is
+     * restarted through [id] with the same disconnect → pause → reconnect sequence that re-applies
+     * app-routing changes; with "Only selected apps" and no apps the session is left alone and the
+     * no-selected-apps dialog is raised instead.
+     */
+    /**
+     * Home's "Choose server": stores [id] as the selected server and restarts a running session through
+     * it. When the choice can't be stored (database / secret storage), nothing restarts and [onFailed]
+     * runs on the main thread.
+     */
+    fun selectConfig(id: String, onFailed: () -> Unit = {}) {
+        val previousId = uiState.value.selectedConfig?.id
+        viewModelScope.launch {
+            try {
+                selectSshConfigUseCase(id)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                onFailed()
+                return@launch
+            }
+            if (id != previousId && vpnState.value.canDisconnect()) {
+                restartSession(appSettingsRepository.settings.value)
+            }
+        }
     }
 
-    fun setShowLogsOnMain(show: Boolean) {
-        appSettingsRepository.setShowLogsOnMain(show)
+    /**
+     * Restarts a running Server-mode session through the selected server (Servers: another server was
+     * picked while connected), like [selectConfig] does for Home's "Choose server".
+     */
+    fun reconnectThroughSelectedServer() {
+        if (vpnState.value.canDisconnect()) restartSession(appSettingsRepository.settings.value)
+    }
+
+    /** Persists Home's mode (Auto · Server · Routes). */
+    fun setActiveGlobalTab(tab: GlobalTab) {
+        appSettingsRepository.setActiveGlobalTab(tab)
+    }
+
+    fun onVpnPermissionDenied() {
+        vpnConnectionRepository.setError(uiState.value.selectedConfig?.id, "VPN permission denied")
     }
 
     fun setShowTerminalOnMain(show: Boolean) {
@@ -376,46 +438,35 @@ class MainViewModel(
         showNoSelectedAppsDialog.value = false
     }
 
-    fun checkForUpdates(manual: Boolean = true) {
-        appUpdateCoordinator.checkForUpdates(manual)
-    }
-
-    fun dismissAvailableUpdate() {
-        appUpdateCoordinator.dismissAvailableUpdate()
-    }
-
-    fun downloadAvailableUpdate() {
-        appUpdateCoordinator.downloadAvailableUpdate()
-    }
-
-    fun onUpdateActionFailed(message: String) {
-        appUpdateCoordinator.onActionFailed(message)
-    }
-
     override fun onCleared() {
         val session = invalidateTerminalGeneration()
         runCatching { session?.close() }
     }
 
-    private fun applyVpnSettingsChange(settings: AppSettings) {
+    /**
+     * Restarts a running SSH session (app-routing change or another server): debounce, disconnect,
+     * short pause, reconnect through the server selected at that moment. A restart that already
+     * began finishes first; a pending one is replaced by the newest request.
+     */
+    private fun restartSession(settings: AppSettings) {
         if (settings.requiresSelectedAppsButHasNone()) {
             showNoSelectedAppsDialog.value = true
             return
         }
-        if (settingsReconnectJob?.isActive == true) {
-            if (settingsReconnectStarted) return
-            settingsReconnectJob?.cancel()
+        if (sessionRestartJob?.isActive == true) {
+            if (sessionRestartStarted) return
+            sessionRestartJob?.cancel()
         }
         if (!vpnState.value.canDisconnect()) return
 
-        settingsReconnectJob = viewModelScope.launch {
+        sessionRestartJob = viewModelScope.launch {
             delay(SETTINGS_CHANGE_DEBOUNCE_MS)
             val latestSettings = appSettingsRepository.settings.value
             if (latestSettings.requiresSelectedAppsButHasNone()) {
                 showNoSelectedAppsDialog.value = true
                 return@launch
             }
-            settingsReconnectStarted = true
+            sessionRestartStarted = true
             try {
                 disconnectVpnUseCase()
                 delay(SETTINGS_RECONNECT_DELAY_MS)
@@ -428,7 +479,7 @@ class MainViewModel(
                     )
                 }
             } finally {
-                settingsReconnectStarted = false
+                sessionRestartStarted = false
             }
         }
     }
@@ -482,10 +533,10 @@ class MainViewModel(
     }
 
     private fun publishTerminalOutput(generation: Long) {
-        val output = synchronized(terminalLock) {
+        val (output, firstLineNumber) = synchronized(terminalLock) {
             if (terminalGeneration != generation) return
             terminalOutputPublishJob = null
-            terminalOutputBuffer.snapshot()
+            terminalOutputBuffer.snapshot() to terminalOutputBuffer.droppedLineBreaks
         }
         terminalState.update {
             if (isTerminalGenerationCurrent(generation)) {
@@ -494,6 +545,7 @@ class MainViewModel(
                     isConnecting = false,
                     output = output,
                     outputRevision = it.outputRevision + 1L,
+                    firstLineNumber = firstLineNumber,
                     errorMessage = null,
                 )
             } else {
@@ -509,9 +561,10 @@ class MainViewModel(
             terminalOutputPublishJob = null
             terminalSession = null
             val finalOutput = terminalOutputBuffer.snapshot()
+            val firstLineNumber = terminalOutputBuffer.droppedLineBreaks
             terminalOutputBuffer.clear()
             terminalGeneration += 1
-            ClosedTerminalState(terminalGeneration, finalOutput)
+            ClosedTerminalState(terminalGeneration, finalOutput, firstLineNumber)
         }
         terminalState.update {
             if (isTerminalGenerationCurrent(closedState.generation)) {
@@ -520,6 +573,7 @@ class MainViewModel(
                     isConnecting = false,
                     output = closedState.output,
                     outputRevision = it.outputRevision + 1L,
+                    firstLineNumber = closedState.firstLineNumber,
                     input = "",
                     errorMessage = reason,
                 )
@@ -572,9 +626,31 @@ class MainViewModel(
     }
 }
 
+private data class TunnelCheckState(
+    val isRunning: Boolean = false,
+    val result: TunnelCheckResult = TunnelCheckResult.IDLE,
+    val latencyMs: Long? = null,
+    val target: String? = null,
+)
+
+internal data class TunnelCheckSuccess(
+    val target: String,
+    val latencyMs: Long,
+)
+
+/** Reads `Tunnel check succeeded: <host>:<port> reachable through SSH in <n>ms` (SshConnectionManager). */
+internal fun parseTunnelCheckSuccess(line: String): TunnelCheckSuccess? {
+    val match = TUNNEL_CHECK_SUCCESS.find(line) ?: return null
+    val latencyMs = match.groupValues[2].toLongOrNull() ?: return null
+    return TunnelCheckSuccess(target = match.groupValues[1], latencyMs = latencyMs)
+}
+
+private val TUNNEL_CHECK_SUCCESS = Regex("""Tunnel check succeeded: (\S+) reachable through SSH in (\d+)ms""")
+
 private data class ClosedTerminalState(
     val generation: Long,
     val output: String,
+    val firstLineNumber: Long,
 )
 
 internal class BoundedTerminalOutputBuffer(
@@ -583,6 +659,10 @@ internal class BoundedTerminalOutputBuffer(
     private val chunks = ArrayDeque<StringBuilder>()
     private var characterCount = 0
 
+    /** Line breaks dropped from the front since the last [clear] (the first kept line's number). */
+    var droppedLineBreaks: Long = 0L
+        private set
+
     init {
         require(maxCharacters > 0)
     }
@@ -590,10 +670,13 @@ internal class BoundedTerminalOutputBuffer(
     fun append(value: String) {
         if (value.isEmpty()) return
         if (value.length >= maxCharacters) {
-            clear()
+            val dropped = chunks.sumOf { it.countLineBreaks(it.length).toLong() } +
+                value.countLineBreaks(value.length - maxCharacters)
+            chunks.clear()
             val tail = value.takeLast(maxCharacters)
             appendChunked(tail)
             characterCount = tail.length
+            droppedLineBreaks += dropped
             return
         }
 
@@ -603,9 +686,11 @@ internal class BoundedTerminalOutputBuffer(
         while (charactersToRemove > 0) {
             val first = chunks.removeFirst()
             if (first.length <= charactersToRemove) {
+                droppedLineBreaks += first.countLineBreaks(first.length)
                 charactersToRemove -= first.length
                 characterCount -= first.length
             } else {
+                droppedLineBreaks += first.countLineBreaks(charactersToRemove)
                 first.delete(0, charactersToRemove)
                 chunks.addFirst(first)
                 characterCount -= charactersToRemove
@@ -621,6 +706,14 @@ internal class BoundedTerminalOutputBuffer(
     fun clear() {
         chunks.clear()
         characterCount = 0
+        droppedLineBreaks = 0L
+    }
+
+    /** `\n` in the first [end] characters. */
+    private fun CharSequence.countLineBreaks(end: Int): Int {
+        var count = 0
+        for (index in 0 until end) if (this[index] == '\n') count++
+        return count
     }
 
     private fun appendChunked(value: String) {

@@ -14,9 +14,32 @@ data class AppUpdateInfo(
 data class AppUpdateState(
     val isChecking: Boolean = false,
     val availableUpdate: AppUpdateInfo? = null,
+    /** Text for the status line; [statusKind] says what it reports (null together with it). */
     val statusMessage: String? = null,
     val downloadState: AppUpdateDownloadState = AppUpdateDownloadState.Idle,
+    val statusKind: AppUpdateStatusKind? = null,
 )
+
+/** What [AppUpdateState.statusMessage] reports, so screens can branch without parsing the text. */
+enum class AppUpdateStatusKind {
+    /** A manual check found nothing newer. */
+    UP_TO_DATE,
+
+    /** A manual check failed; the message is the error. */
+    CHECK_FAILED,
+
+    /** Download progress ("Downloading shadow-ssh 3.5.0 · 42%"). */
+    DOWNLOADING,
+
+    /** The download stopped or its file was rejected; the message is the reason. */
+    DOWNLOAD_FAILED,
+
+    /** The verified file is waiting for the installer ("… is ready to install"). */
+    READY_TO_INSTALL,
+
+    /** Opening the installer (or another update action) failed; the message is the reason. */
+    ACTION_FAILED,
+}
 
 sealed interface AppUpdateCheckResult {
     data class Available(val update: AppUpdateInfo) : AppUpdateCheckResult
@@ -45,8 +68,10 @@ sealed interface AppUpdateDownloadState {
         val versionName: String,
         val contentUri: String,
     ) : AppUpdateDownloadState
+    /** [rejected]: the whole file arrived but failed verification (size, SHA-256, package, signature). */
     data class Failed(
         val message: String,
         val canResume: Boolean = false,
+        val rejected: Boolean = false,
     ) : AppUpdateDownloadState
 }

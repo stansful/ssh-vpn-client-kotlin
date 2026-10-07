@@ -3,6 +3,7 @@ package com.stansful.sshvpnclient.data.update
 import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
 import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
 import com.stansful.sshvpnclient.domain.model.AppUpdateState
+import com.stansful.sshvpnclient.domain.model.AppUpdateStatusKind
 import com.stansful.sshvpnclient.domain.repository.AppUpdateCoordinator
 import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
 import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
@@ -11,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +37,8 @@ class DefaultAppUpdateCoordinator(
 
     override val state: StateFlow<AppUpdateState> = mutableState.asStateFlow()
 
+    override val lastSuccessfulCheckAt: Flow<Long?> get() = repository.lastSuccessfulCheckAt()
+
     init {
         applicationScope.launch {
             downloader.state.collect(::applyDownloadState)
@@ -53,7 +57,7 @@ class DefaultAppUpdateCoordinator(
                 if (manual && !activeCheckIsManual) {
                     pendingManualCheck = true
                     mutableState.update {
-                        it.copy(isChecking = true, statusMessage = null)
+                        it.copy(isChecking = true, statusMessage = null, statusKind = null)
                     }
                 }
                 return
@@ -64,6 +68,7 @@ class DefaultAppUpdateCoordinator(
                     current.copy(
                         isChecking = true,
                         statusMessage = if (manual) null else current.statusMessage,
+                        statusKind = if (manual) null else current.statusKind,
                     )
                 }
                 try {
@@ -76,6 +81,7 @@ class DefaultAppUpdateCoordinator(
                                         isChecking = false,
                                         availableUpdate = result.update,
                                         statusMessage = null,
+                                        statusKind = null,
                                     )
                                 } else {
                                     current.copy(isChecking = false, availableUpdate = null)
@@ -89,6 +95,7 @@ class DefaultAppUpdateCoordinator(
                                 } else {
                                     null
                                 },
+                                statusKind = if (manual) AppUpdateStatusKind.UP_TO_DATE else null,
                             )
                             AppUpdateCheckResult.NotDue -> current.copy(isChecking = false)
                         }
@@ -105,6 +112,7 @@ class DefaultAppUpdateCoordinator(
                             } else {
                                 current.statusMessage
                             },
+                            statusKind = if (manual) AppUpdateStatusKind.CHECK_FAILED else current.statusKind,
                         )
                     }
                 } finally {
@@ -133,17 +141,17 @@ class DefaultAppUpdateCoordinator(
             if (update != null) {
                 downloader.download(update)
                 mutableState.update {
-                    it.copy(availableUpdate = null, statusMessage = null)
+                    it.copy(availableUpdate = null, statusMessage = null, statusKind = null)
                 }
             } else {
                 downloader.resume()
-                mutableState.update { it.copy(statusMessage = null) }
+                mutableState.update { it.copy(statusMessage = null, statusKind = null) }
             }
         }
     }
 
     override fun onActionFailed(message: String) {
-        mutableState.update { it.copy(statusMessage = message) }
+        mutableState.update { it.copy(statusMessage = message, statusKind = AppUpdateStatusKind.ACTION_FAILED) }
     }
 
     private fun applyDownloadState(downloadState: AppUpdateDownloadState) {
@@ -151,6 +159,7 @@ class DefaultAppUpdateCoordinator(
             current.copy(
                 downloadState = downloadState,
                 statusMessage = downloadStatusMessage(current, downloadState),
+                statusKind = downloadStatusKind(current, downloadState),
             )
         }
     }
@@ -177,6 +186,19 @@ internal fun downloadStatusMessage(
         } else {
             null
         }
+    }
+}
+
+/** The [AppUpdateStatusKind] of [downloadStatusMessage]'s line. */
+internal fun downloadStatusKind(
+    previous: AppUpdateState,
+    downloadState: AppUpdateDownloadState,
+): AppUpdateStatusKind? = when (downloadState) {
+    is AppUpdateDownloadState.Downloading -> AppUpdateStatusKind.DOWNLOADING
+    is AppUpdateDownloadState.Failed -> AppUpdateStatusKind.DOWNLOAD_FAILED
+    is AppUpdateDownloadState.ReadyToInstall -> AppUpdateStatusKind.READY_TO_INSTALL
+    AppUpdateDownloadState.Idle -> {
+        if (previous.downloadState is AppUpdateDownloadState.Idle) previous.statusKind else null
     }
 }
 

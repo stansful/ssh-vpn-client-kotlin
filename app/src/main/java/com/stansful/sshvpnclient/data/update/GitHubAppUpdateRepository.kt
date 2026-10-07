@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
 import androidx.core.content.edit
+import com.stansful.sshvpnclient.data.local.timestampFlow
 import com.stansful.sshvpnclient.data.network.ValidatedPhysicalNetworkSelector
 import com.stansful.sshvpnclient.domain.model.AndroidAbi
 import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
@@ -16,6 +17,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -59,6 +61,9 @@ class GitHubAppUpdateRepository(
 
         result
     }
+
+    override fun lastSuccessfulCheckAt(): Flow<Long?> =
+        preferences.timestampFlow(KEY_LAST_SUCCESSFUL_CHECK_AT, ioDispatcher)
 
     private fun evaluateRelease(raw: String): AppUpdateCheckResult {
         val update = parseRelease(raw)

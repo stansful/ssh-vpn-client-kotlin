@@ -1,5 +1,7 @@
 package com.stansful.sshvpnclient.vpn
 
+import androidx.annotation.DrawableRes
+import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.domain.model.GlobalTab
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
@@ -120,6 +122,21 @@ internal fun canPublishQuickTileStartFailure(
     return connectAttempted &&
         state.sessionOwner == target &&
         state.status == VpnConnectionStatus.CONNECTING
+}
+
+/**
+ * The tile's icon (System.dc.html): the shield with a check while connected, with an alert for "Check
+ * app", and the plain shield otherwise (Off, Connecting, Reconnecting, Disconnecting).
+ */
+@DrawableRes
+internal fun quickTileIconRes(status: VpnConnectionStatus): Int = when (status) {
+    VpnConnectionStatus.CONNECTED -> R.drawable.ic_shadow_shield_check
+    VpnConnectionStatus.ERROR -> R.drawable.ic_shadow_shield_alert
+    VpnConnectionStatus.DISCONNECTED,
+    VpnConnectionStatus.CONNECTING,
+    VpnConnectionStatus.RECONNECTING,
+    VpnConnectionStatus.DISCONNECTING,
+    -> R.drawable.ic_shadow_shield
 }
 
 /** The mode the tile names: the live session's owner, otherwise the mode a click would start. */

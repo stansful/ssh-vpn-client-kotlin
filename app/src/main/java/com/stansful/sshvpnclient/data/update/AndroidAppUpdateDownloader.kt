@@ -445,30 +445,30 @@ class AndroidAppUpdateDownloader(
 
     private fun validateDownloadedApk(restoring: Boolean) {
         val file = preferences.getString(KEY_FILE_PATH, null)?.let(::File)
-            ?: return failAndClear("Downloaded update path is missing")
+            ?: return rejectDownload("Downloaded update path is missing")
         val expectedVersion = preferences.getString(KEY_VERSION_NAME, null)
-            ?: return failAndClear("Downloaded update version is missing")
+            ?: return rejectDownload("Downloaded update version is missing")
         val expectedSize = preferences.getLong(KEY_EXPECTED_SIZE, INVALID_SIZE)
         if (!file.isFile || file.length() == 0L) {
-            return failAndClear("Downloaded update file is missing")
+            return rejectDownload("Downloaded update file is missing")
         }
         if (expectedSize > 0L && file.length() != expectedSize) {
-            return failAndClear("Downloaded update size does not match the GitHub release")
+            return rejectDownload("Downloaded update size does not match the GitHub release")
         }
 
         val expectedDigest = preferences.getString(KEY_SHA256, null)
         if (!expectedDigest.isNullOrBlank() && sha256(file) != expectedDigest.lowercase()) {
-            return failAndClear("Downloaded update SHA-256 verification failed")
+            return rejectDownload("Downloaded update SHA-256 verification failed")
         }
 
         val archiveInfo = getArchivePackageInfo(file)
-            ?: return failAndClear("Downloaded file is not a valid APK")
+            ?: return rejectDownload("Downloaded file is not a valid APK")
         val installedInfo = getInstalledPackageInfo()
         if (archiveInfo.packageName != appContext.packageName) {
-            return failAndClear("Downloaded APK has an unexpected package name")
+            return rejectDownload("Downloaded APK has an unexpected package name")
         }
         if (SemanticVersion.parse(archiveInfo.versionName) != SemanticVersion.parse(expectedVersion)) {
-            return failAndClear("Downloaded APK version does not match the GitHub release")
+            return rejectDownload("Downloaded APK version does not match the GitHub release")
         }
         val downloadedVersionCode = PackageInfoCompat.getLongVersionCode(archiveInfo)
         val installedVersionCode = PackageInfoCompat.getLongVersionCode(installedInfo)
@@ -479,10 +479,10 @@ class AndroidAppUpdateDownloader(
             return
         }
         appUpdateVersionCodeError(downloadedVersionCode, installedVersionCode)?.let { message ->
-            return failAndClear(message)
+            return rejectDownload(message)
         }
         if (!signaturesMatch(installedInfo, archiveInfo)) {
-            return failAndClear("Downloaded APK signing certificate does not match the installed app")
+            return rejectDownload("Downloaded APK signing certificate does not match the installed app")
         }
 
         val contentUri = FileProvider.getUriForFile(
@@ -578,14 +578,17 @@ class AndroidAppUpdateDownloader(
         )
     }
 
-    private fun failAndClear(message: String) {
+    private fun failAndClear(message: String, rejected: Boolean = false) {
         preferences.getString(KEY_FILE_PATH, null)?.let(::File)?.let { file ->
             runCatching { file.delete() }
             runCatching { file.partialFile().delete() }
         }
         clearPendingMetadata()
-        mutableState.value = AppUpdateDownloadState.Failed(message)
+        mutableState.value = AppUpdateDownloadState.Failed(message, rejected = rejected)
     }
+
+    /** The downloaded file failed verification: it is deleted and the failure is marked as a rejection. */
+    private fun rejectDownload(message: String) = failAndClear(message, rejected = true)
 
     private fun clearPendingMetadata() {
         preferences.edit(commit = true) { clear() }

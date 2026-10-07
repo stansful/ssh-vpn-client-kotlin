@@ -42,6 +42,31 @@ class BoundedTerminalOutputBufferTest {
     }
 
     @Test
+    fun `dropped line breaks number the first kept line`() {
+        val maxCharacters = 64
+        val buffer = BoundedTerminalOutputBuffer(maxCharacters)
+        val expected = StringBuilder()
+
+        repeat(500) { index ->
+            val line = "line $index\n"
+            buffer.append(line)
+            expected.append(line)
+            val dropped = expected.length - maxCharacters
+            val droppedBreaks = if (dropped > 0) expected.substring(0, dropped).count { it == '\n' } else 0
+            assertEquals(droppedBreaks.toLong(), buffer.droppedLineBreaks)
+        }
+        buffer.append("x".repeat(maxCharacters - 1) + "\n" + "tail")
+        assertEquals(
+            (expected.toString() + "x".repeat(maxCharacters - 1) + "\n" + "tail").dropLast(maxCharacters)
+                .count { it == '\n' }.toLong(),
+            buffer.droppedLineBreaks,
+        )
+
+        buffer.clear()
+        assertEquals(0L, buffer.droppedLineBreaks)
+    }
+
+    @Test
     fun `clear releases all retained output`() {
         val buffer = BoundedTerminalOutputBuffer(maxCharacters = 16)
         buffer.append("terminal output")

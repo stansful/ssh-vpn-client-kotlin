@@ -3,6 +3,8 @@ package com.stansful.sshvpnclient.data.update
 import com.stansful.sshvpnclient.domain.model.AppUpdateCheckResult
 import com.stansful.sshvpnclient.domain.model.AppUpdateDownloadState
 import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
+import com.stansful.sshvpnclient.domain.model.AppUpdateState
+import com.stansful.sshvpnclient.domain.model.AppUpdateStatusKind
 import com.stansful.sshvpnclient.domain.repository.AppUpdateDownloader
 import com.stansful.sshvpnclient.domain.repository.AppUpdateRepository
 import java.util.Collections
@@ -11,8 +13,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
@@ -115,7 +119,29 @@ class DefaultAppUpdateCoordinatorTest {
 
         assertEquals(listOf(false, true), repository.forceArguments.toList())
         assertEquals("shadow-ssh is up to date", coordinator.state.value.statusMessage)
+        assertEquals(AppUpdateStatusKind.UP_TO_DATE, coordinator.state.value.statusKind)
         scope.cancel()
+    }
+
+    @Test
+    fun `download states carry a typed status kind next to their message`() {
+        val idle = AppUpdateState(statusMessage = "shadow-ssh is up to date", statusKind = AppUpdateStatusKind.UP_TO_DATE)
+        assertEquals(
+            AppUpdateStatusKind.READY_TO_INSTALL,
+            downloadStatusKind(idle, AppUpdateDownloadState.ReadyToInstall("2.5.8", "content://update")),
+        )
+        assertEquals(
+            AppUpdateStatusKind.DOWNLOADING,
+            downloadStatusKind(idle, AppUpdateDownloadState.Downloading("2.5.8")),
+        )
+        assertEquals(
+            AppUpdateStatusKind.DOWNLOAD_FAILED,
+            downloadStatusKind(idle, AppUpdateDownloadState.Failed("offline", canResume = true)),
+        )
+        // Idle after Idle keeps the check's line; Idle after a download clears it, like the message.
+        assertEquals(AppUpdateStatusKind.UP_TO_DATE, downloadStatusKind(idle, AppUpdateDownloadState.Idle))
+        val ready = AppUpdateState(downloadState = AppUpdateDownloadState.ReadyToInstall("2.5.8", "content://update"))
+        assertNull(downloadStatusKind(ready, AppUpdateDownloadState.Idle))
     }
 
     @Test
@@ -151,6 +177,8 @@ class DefaultAppUpdateCoordinatorTest {
             checkCount += 1
             return result
         }
+
+        override fun lastSuccessfulCheckAt(): Flow<Long?> = flowOf(null)
     }
 
     private class FakeDownloader : AppUpdateDownloader {
@@ -183,6 +211,8 @@ class DefaultAppUpdateCoordinatorTest {
             }
             return AppUpdateCheckResult.UpToDate
         }
+
+        override fun lastSuccessfulCheckAt(): Flow<Long?> = flowOf(null)
     }
 
     private companion object {

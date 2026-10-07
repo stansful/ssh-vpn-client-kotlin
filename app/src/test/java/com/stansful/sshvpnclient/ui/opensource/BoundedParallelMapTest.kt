@@ -188,9 +188,9 @@ class BoundedParallelMapTest {
     }
 
     @Test
-    fun `unavailable cleanup result message handles zero singular and plural`() {
-        assertEquals("No unavailable tunnels to remove", removedUnavailableMessage(0))
-        assertEquals("Removed 1 unavailable tunnel", removedUnavailableMessage(1))
-        assertEquals("Removed 12 unavailable tunnels", removedUnavailableMessage(12))
+    fun `notice wording handles singular and plural`() {
+        assertEquals("route", plural(1, "route", "routes"))
+        assertEquals("routes", plural(0, "route", "routes"))
+        assertEquals("routes", plural(12, "route", "routes"))
     }
 }

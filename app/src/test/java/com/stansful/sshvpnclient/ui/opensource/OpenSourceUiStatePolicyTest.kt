@@ -79,6 +79,25 @@ class OpenSourceUiStatePolicyTest {
         assertNull(OpenSourceUiState(vpnState = ownerlessError).openSourceErrorMessage)
     }
 
+    @Test
+    fun `active route does not depend on the library's search or filter`() {
+        val active = selectedRoute("route")
+        val hidden = OpenSourceUiState(
+            profiles = emptyList(),
+            activeProfile = active,
+            xrayCoreAvailable = true,
+            vpnState = VpnConnectionState(
+                status = VpnConnectionStatus.ERROR,
+                activeConfigId = "route",
+                errorMessage = "No apps selected",
+            ),
+        )
+
+        assertEquals(active, hidden.selectedProfile)
+        assertTrue(hidden.canStartOpenSource)
+        assertEquals("No apps selected", hidden.openSourceErrorMessage)
+    }
+
     private fun selectedRoute(id: String) = ProxyProfileSummary(
         id = id,
         name = "Route",

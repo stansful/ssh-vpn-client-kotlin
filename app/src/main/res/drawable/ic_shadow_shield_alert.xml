@@ -1,0 +1,21 @@
+<!-- Brand shield with an exclamation mark (System.dc.html quick tile, Check app): for the tile's per-state icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M12,3l7,3v5.5c0,4.4 -3,8 -7,9.5c-4,-1.5 -7,-5.1 -7,-9.5V6z"
+        android:strokeWidth="2"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M12,8.5v4.5M12,16.3v0.1"
+        android:strokeWidth="2"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

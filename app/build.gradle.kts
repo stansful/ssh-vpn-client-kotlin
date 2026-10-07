@@ -3,9 +3,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
     id("io.gitlab.arturbosch.detekt")
+    id("io.github.takahirom.roborazzi")
 }
 
-val appVersionName = "3.4.0"
+val appVersionName = "3.4.1"
 
 val releaseStoreFilePath = providers.environmentVariable("SSH_VPN_RELEASE_STORE_FILE")
     .orElse(providers.gradleProperty("SSH_VPN_RELEASE_STORE_FILE"))
@@ -100,6 +101,40 @@ android {
             )
             if (releaseSigningConfigured) {
                 signingConfig = signingConfigs.getByName("release")
+            }
+        }
+    }
+
+    testOptions {
+        unitTests {
+            // Robolectric screenshot tests (src/test/.../screenshots) need the merged resources:
+            // fonts (res/font/onest.ttf, jetbrains_mono.ttf), strings, themes.
+            isIncludeAndroidResources = true
+            all { test ->
+                val screenshotsDir = "$projectDir/build/screenshots"
+                // PNGs land in app/build/screenshots/<Name>.png (stable paths, overwritten each run).
+                test.systemProperty("shadow.screenshots.dir", screenshotsDir)
+                if (test.name.contains("Release")) {
+                    // Rendering once (debug) is enough; `:app:test` would otherwise draw everything twice.
+                    test.exclude("**/screenshots/**")
+                } else {
+                    // Declared so an UP-TO-DATE / FROM-CACHE test task still leaves the PNGs on disk.
+                    test.outputs.dir(screenshotsDir).withPropertyName("shadowScreenshots")
+                }
+                // Screenshots are always (re)recorded, never compared, so a plain `testDebugUnitTest`
+                // cannot fail on pixel diffs. `compareRoborazziDebug` / `verifyRoborazziDebug` (Roborazzi
+                // plugin) override this to diff against the PNGs already on disk.
+                test.systemProperty("roborazzi.test.record", "true")
+                test.systemProperty("robolectric.graphicsMode", "NATIVE")
+                test.maxHeapSize = "3g"
+                // Robolectric (SDK 36 ApplicationSharedMemory) pokes FileDescriptor internals; JDK 17+
+                // needs these opened explicitly.
+                test.jvmArgs(
+                    "--add-exports=java.base/jdk.internal.access=ALL-UNNAMED",
+                    "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
+                    "--add-opens=java.base/java.io=ALL-UNNAMED",
+                    "--enable-native-access=ALL-UNNAMED",
+                )
             }
         }
     }
@@ -253,6 +288,16 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20260522")
+
+    // JVM screenshot rendering (Robolectric native graphics + Roborazzi), see ScreenshotHarness.kt.
+    testImplementation(composeBom)
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    testImplementation("androidx.compose.ui:ui-test-manifest")
+    testImplementation("androidx.test.ext:junit:1.3.0")
+    testImplementation("org.robolectric:robolectric:4.17")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi:1.76.0")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi-compose:1.76.0")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi-junit-rule:1.76.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     androidTestImplementation("androidx.room:room-testing:2.8.4")

@@ -1,11 +1,13 @@
 <resources>
+    <!-- Launch window in the Day palette; values-night/styles.xml holds the Night one, so the first
+         frame matches the default System theme instead of flashing dark on a light system. -->
     <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
-        <item name="android:windowBackground">#000000</item>
-        <item name="android:statusBarColor">#000000</item>
-        <item name="android:navigationBarColor">#000000</item>
-        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">#F4F2EE</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowDrawsSystemBarBackgrounds">true</item>
-        <item name="android:colorAccent">#FF9F1C</item>
+        <item name="android:colorAccent">#9A5200</item>
     </style>
 </resources>

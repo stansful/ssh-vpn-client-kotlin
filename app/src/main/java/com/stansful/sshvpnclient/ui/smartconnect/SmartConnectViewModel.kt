@@ -1,10 +1,12 @@
 package com.stansful.sshvpnclient.ui.smartconnect
 
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.data.local.SmartConnectStateStore
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AppThemeMode
+import com.stansful.sshvpnclient.domain.model.AppUpdateState
 import com.stansful.sshvpnclient.domain.model.CustomThemeColors
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSummary
 import com.stansful.sshvpnclient.domain.model.ProxyTestStatus
@@ -24,7 +26,6 @@ import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.repository.XrayCoreUpdateRepository
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectSmartVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
-import com.stansful.sshvpnclient.ui.common.AppUpdateUiState
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
 import com.stansful.sshvpnclient.xray.XrayCoreInstallResult
 import kotlinx.coroutines.CancellationException
@@ -33,7 +34,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -59,11 +62,15 @@ data class SmartConnectUiState(
     val appSettings: AppSettings = AppSettings(),
     val vpnState: VpnConnectionState = VpnConnectionState(),
     val xrayCoreAvailable: Boolean = false,
+    /** False until the engine has been probed once (avoids flashing "not installed" on launch). */
+    val xrayCoreChecked: Boolean = false,
     val xrayCoreUpdate: SmartXrayCoreUpdateUiState = SmartXrayCoreUpdateUiState(),
-    val updateState: AppUpdateUiState = AppUpdateUiState(),
+    val updateState: AppUpdateState = AppUpdateState(),
     val isStartPending: Boolean = false,
     val showNoSelectedAppsDialog: Boolean = false,
     val actionMessage: String? = null,
+    /** `SystemClock.elapsedRealtime()` when the current "waiting to retry" pause began, else null. */
+    val retryWaitStartedAtMs: Long? = null,
 ) {
     val ownsVpnSession: Boolean
         get() = vpnState.sessionOwner == VpnSessionOwner.SMART_CONNECT &&
@@ -117,10 +124,18 @@ class SmartConnectViewModel(
     private val xrayCoreBridge: XrayCoreBridge,
     private val xrayCoreUpdateRepository: XrayCoreUpdateRepository,
     private val appUpdateCoordinator: AppUpdateCoordinator,
+    /**
+     * Raised while the engine downloads or installs from Settings / the update sheet (the Routes
+     * ViewModel runs it): Auto neither starts nor restores its session until it is done.
+     */
+    private val xrayCoreInstallInProgress: StateFlow<Boolean> = MutableStateFlow(false),
+    private val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
 ) : ViewModel() {
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
+    private val retryWaitStartedAt = MutableStateFlow<Long?>(null)
     private val actionMessage = MutableStateFlow<String?>(null)
-    private val xrayCoreAvailable = MutableStateFlow(false)
+    /** Null until the first probe of the engine finished. */
+    private val xrayCoreAvailable = MutableStateFlow<Boolean?>(null)
     private val xrayCoreUpdate = MutableStateFlow(
         SmartXrayCoreUpdateUiState(runtimeAbi = xrayCoreUpdateRepository.runtimeAbi),
     )
@@ -150,11 +165,20 @@ class SmartConnectViewModel(
             workflow = workflow,
             appSettings = settings,
             vpnState = vpnState,
-            xrayCoreAvailable = coreAvailable,
+            xrayCoreAvailable = coreAvailable == true,
+            xrayCoreChecked = coreAvailable != null,
         )
     }
 
-    private val updateStates = combine(xrayCoreUpdate, appUpdateCoordinator.state, ::SmartUpdateStates)
+    private val updateStates = combine(
+        // An install running elsewhere counts as this tab's own download (canStart, Home's note).
+        combine(xrayCoreUpdate, xrayCoreInstallInProgress) { own, sharedInstall ->
+            if (sharedInstall && !own.isDownloading) own.copy(isDownloading = true) else own
+        },
+        appUpdateCoordinator.state,
+        retryWaitStartedAt,
+        ::SmartUpdateStates,
+    )
 
     val uiState = combine(
         contentState,
@@ -169,6 +193,7 @@ class SmartConnectViewModel(
             isStartPending = startPending,
             xrayCoreUpdate = updates.xrayCore,
             updateState = updates.app,
+            retryWaitStartedAtMs = updates.retryWaitStartedAt,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -178,6 +203,13 @@ class SmartConnectViewModel(
 
     init {
         refreshXrayCoreAvailability()
+        viewModelScope.launch {
+            // Each new pause (phase + delay) restarts Home's retry countdown.
+            smartConnectStateStore.state
+                .map { state -> state.retryDelayMs.takeIf { state.phase == SmartConnectPhase.RETRY_WAIT } }
+                .distinctUntilChanged()
+                .collect { delayMs -> retryWaitStartedAt.value = delayMs?.let { elapsedRealtime() } }
+        }
     }
 
     /** Validates local UI preconditions before Android's VPN permission dialog is opened. */
@@ -193,7 +225,7 @@ class SmartConnectViewModel(
             refreshXrayCoreAvailability()
             return false
         }
-        if (xrayCoreDownloadJob != null || xrayCoreUpdate.value.isDownloading) {
+        if (isEngineInstalling()) {
             actionMessage.value = "Wait until the Xray core installation finishes"
             return false
         }
@@ -231,7 +263,7 @@ class SmartConnectViewModel(
             actionMessage.value = "VPN permission is required to restore Smart Connect"
             return
         }
-        if (xrayCoreDownloadJob != null || xrayCoreUpdate.value.isDownloading) return
+        if (isEngineInstalling()) return
         launchSmartStart()
     }
 
@@ -275,10 +307,6 @@ class SmartConnectViewModel(
 
     fun dismissNoSelectedAppsDialog() {
         showNoSelectedAppsDialog.value = false
-    }
-
-    fun clearActionMessage() {
-        actionMessage.value = null
     }
 
     fun refreshXrayCoreAvailability() {
@@ -413,26 +441,6 @@ class SmartConnectViewModel(
         }
     }
 
-    fun checkForUpdates() {
-        appUpdateCoordinator.checkForUpdates()
-    }
-
-    fun dismissAvailableUpdate() {
-        appUpdateCoordinator.dismissAvailableUpdate()
-    }
-
-    fun downloadAvailableUpdate() {
-        appUpdateCoordinator.downloadAvailableUpdate()
-    }
-
-    fun onUpdateActionFailed(message: String) {
-        appUpdateCoordinator.onActionFailed(message)
-    }
-
-    fun setShowLogsOnSmartConnect(show: Boolean) {
-        appSettingsRepository.setShowLogsOnSmartConnect(show)
-    }
-
     fun setThemeMode(themeMode: AppThemeMode) {
         appSettingsRepository.setThemeMode(themeMode)
     }
@@ -444,6 +452,9 @@ class SmartConnectViewModel(
     fun setVpnMode(vpnMode: VpnMode) {
         appSettingsRepository.setVpnMode(vpnMode)
     }
+
+    private fun isEngineInstalling(): Boolean =
+        xrayCoreDownloadJob != null || xrayCoreUpdate.value.isDownloading || xrayCoreInstallInProgress.value
 
     private fun isXrayRuntimeInUse(): Boolean {
         return smartConnectStateStore.state.value.desiredActive ||
@@ -463,7 +474,8 @@ class SmartConnectViewModel(
 
 private data class SmartUpdateStates(
     val xrayCore: SmartXrayCoreUpdateUiState,
-    val app: AppUpdateUiState,
+    val app: AppUpdateState,
+    val retryWaitStartedAt: Long?,
 )
 
 internal fun rankAvailableSmartProfiles(

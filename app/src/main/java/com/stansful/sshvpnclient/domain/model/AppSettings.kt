@@ -16,7 +16,14 @@ data class AppSettings(
     val openSourceAutoUpdateEnabled: Boolean = false,
     val smartConnectConsentVersion: Int = 0,
     val showSmartConnectWarningOnEnter: Boolean = true,
-)
+) {
+    /**
+     * The single "Show connection activity" switch of the redesign. It is on when any of the three
+     * legacy per-tab log flags is on; `AppSettingsRepository.setShowConnectionActivity` writes all three.
+     */
+    val showConnectionActivity: Boolean
+        get() = showLogsOnMain || showLogsOnOpenSource || showLogsOnSmartConnect
+}
 
 enum class GlobalTab(
     val storageValue: String,
@@ -54,6 +61,62 @@ data class CustomThemeColors(
                 onSurface = 0xFF101214.toInt(),
                 outline = 0xFFCBD3DC.toInt(),
                 error = 0xFFBA1A1A.toInt(),
+            )
+        }
+
+        /** The "shadow" Night tokens (amber · mint on near-black). */
+        fun night(): CustomThemeColors {
+            return CustomThemeColors(
+                primary = 0xFFFFB547.toInt(),
+                secondary = 0xFF46E0A8.toInt(),
+                background = 0xFF0B0D10.toInt(),
+                surface = 0xFF13161B.toInt(),
+                surfaceVariant = 0xFF1A1E25.toInt(),
+                onSurface = 0xFFF3F1EC.toInt(),
+                outline = 0xFF2A303B.toInt(),
+                error = 0xFFFF7A6B.toInt(),
+            )
+        }
+
+        /** The "shadow" Day tokens (warm paper). */
+        fun day(): CustomThemeColors {
+            return CustomThemeColors(
+                primary = 0xFFF5A524.toInt(),
+                secondary = 0xFF2BC48A.toInt(),
+                background = 0xFFF4F2EE.toInt(),
+                surface = 0xFFFFFFFF.toInt(),
+                surfaceVariant = 0xFFF1EEE9.toInt(),
+                onSurface = 0xFF14161A.toInt(),
+                outline = 0xFFD6D1C7.toInt(),
+                error = 0xFFC2392B.toInt(),
+            )
+        }
+
+        /** The pre-redesign dark palette (orange · green on black). */
+        fun shadowClassic(): CustomThemeColors {
+            return CustomThemeColors(
+                primary = 0xFFFF9F1C.toInt(),
+                secondary = 0xFF28C76F.toInt(),
+                background = 0xFF000000.toInt(),
+                surface = 0xFF090909.toInt(),
+                surfaceVariant = 0xFF17110A.toInt(),
+                onSurface = 0xFFF6F1EA.toInt(),
+                outline = 0xFF3A2A18.toInt(),
+                error = 0xFFFF6B6B.toInt(),
+            )
+        }
+
+        /** Deep teal / blue dark palette; all text roles pass WCAG AA on its background. */
+        fun ocean(): CustomThemeColors {
+            return CustomThemeColors(
+                primary = 0xFF5CC8FF.toInt(),
+                secondary = 0xFF3DDBB4.toInt(),
+                background = 0xFF071A21.toInt(),
+                surface = 0xFF0C2530.toInt(),
+                surfaceVariant = 0xFF123241.toInt(),
+                onSurface = 0xFFE6F4F8.toInt(),
+                outline = 0xFF24495A.toInt(),
+                error = 0xFFFF8A80.toInt(),
             )
         }
     }

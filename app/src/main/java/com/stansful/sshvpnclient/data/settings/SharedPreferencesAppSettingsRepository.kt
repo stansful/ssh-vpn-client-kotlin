@@ -45,6 +45,19 @@ class SharedPreferencesAppSettingsRepository(
         currentSettings.value = currentSettings.value.copy(showLogsOnSmartConnect = show)
     }
 
+    override fun setShowConnectionActivity(show: Boolean) {
+        preferences.edit {
+            putBoolean(KEY_SHOW_LOGS_ON_MAIN, show)
+            putBoolean(KEY_SHOW_LOGS_ON_OPEN_SOURCE, show)
+            putBoolean(KEY_SHOW_LOGS_ON_SMART_CONNECT, show)
+        }
+        currentSettings.value = currentSettings.value.copy(
+            showLogsOnMain = show,
+            showLogsOnOpenSource = show,
+            showLogsOnSmartConnect = show,
+        )
+    }
+
     override fun setShowTerminalOnMain(show: Boolean) {
         preferences.edit {
             putBoolean(KEY_SHOW_TERMINAL_ON_MAIN, show)

@@ -1,5 +1,6 @@
 package com.stansful.sshvpnclient.vpn
 
+import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.domain.model.GlobalTab
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
@@ -11,6 +12,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class QuickTilePolicyTest {
+    @Test
+    fun `tile icon is the shield with a check when connected and an alert for Check app`() {
+        assertEquals(R.drawable.ic_shadow_shield_check, quickTileIconRes(VpnConnectionStatus.CONNECTED))
+        assertEquals(R.drawable.ic_shadow_shield_alert, quickTileIconRes(VpnConnectionStatus.ERROR))
+        listOf(
+            VpnConnectionStatus.DISCONNECTED,
+            VpnConnectionStatus.CONNECTING,
+            VpnConnectionStatus.RECONNECTING,
+            VpnConnectionStatus.DISCONNECTING,
+        ).forEach { status -> assertEquals(status.name, R.drawable.ic_shadow_shield, quickTileIconRes(status)) }
+    }
+
     @Test
     fun `tile without a recorded mode keeps starting ssh`() {
         assertEquals(VpnSessionOwner.SHADOW_SSH, quickTileConnectTarget(null))

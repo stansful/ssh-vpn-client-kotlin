@@ -4,18 +4,17 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.stansful.sshvpnclient.AppContainer
 import com.stansful.sshvpnclient.ui.apppicker.AppPickerViewModel
-import com.stansful.sshvpnclient.ui.configedit.EditConfigViewModel
 import com.stansful.sshvpnclient.ui.configs.ConfigListViewModel
-import com.stansful.sshvpnclient.ui.keyedit.EditKeyViewModel
-import com.stansful.sshvpnclient.ui.keys.KeyListViewModel
 import com.stansful.sshvpnclient.ui.main.MainViewModel
 import com.stansful.sshvpnclient.ui.opensource.OpenSourceViewModel
 import com.stansful.sshvpnclient.ui.smartconnect.SmartConnectViewModel
 
+/**
+ * Builds the ViewModels that need only the [container]: the activity-scoped ones and the screen-scoped
+ * Servers list and App routing picker. The editors and the Keys list are built at their routes.
+ */
 class AppViewModelFactory(
     private val container: AppContainer,
-    private val configId: String? = null,
-    private val keyId: String? = null,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -30,6 +29,7 @@ class AppViewModelFactory(
                 xrayCoreBridge = container.xrayCoreBridge,
                 xrayCoreUpdateRepository = container.xrayCoreUpdateRepository,
                 appUpdateCoordinator = container.appUpdateCoordinator,
+                xrayCoreInstallInProgress = container.xrayCoreInstallInProgress,
             )
 
             modelClass.isAssignableFrom(OpenSourceViewModel::class.java) -> OpenSourceViewModel(
@@ -42,6 +42,8 @@ class AppViewModelFactory(
                 vpnConnectionRepository = container.vpnConnectionRepository,
                 appUpdateCoordinator = container.appUpdateCoordinator,
                 xrayCoreUpdateRepository = container.xrayCoreUpdateRepository,
+                xrayCoreInstallInProgress = container.xrayCoreInstallInProgress,
+                isAutoActive = { container.smartConnectStateStore.desiredActive },
             )
 
             modelClass.isAssignableFrom(MainViewModel::class.java) -> MainViewModel(
@@ -50,6 +52,7 @@ class AppViewModelFactory(
                 vpnConnectionRepository = container.vpnConnectionRepository,
                 connectVpnUseCase = container.connectVpnUseCase,
                 disconnectVpnUseCase = container.disconnectVpnUseCase,
+                selectSshConfigUseCase = container.selectSshConfigUseCase,
                 sshConnectionManager = container.sshConnectionManager,
                 observeVpnConnectionStateUseCase = container.observeVpnConnectionStateUseCase,
                 appUpdateCoordinator = container.appUpdateCoordinator,
@@ -64,26 +67,6 @@ class AppViewModelFactory(
                 configRepository = container.sshConfigRepository,
                 selectSshConfigUseCase = container.selectSshConfigUseCase,
                 deleteSshConfigUseCase = container.deleteSshConfigUseCase,
-            )
-
-            modelClass.isAssignableFrom(EditConfigViewModel::class.java) -> EditConfigViewModel(
-                configId = configId,
-                addSshConfigUseCase = container.addSshConfigUseCase,
-                updateSshConfigUseCase = container.updateSshConfigUseCase,
-                getSshConfigByIdUseCase = container.getSshConfigByIdUseCase,
-                getSshPrivateKeyListUseCase = container.getSshPrivateKeyListUseCase,
-            )
-
-            modelClass.isAssignableFrom(KeyListViewModel::class.java) -> KeyListViewModel(
-                getSshPrivateKeyListUseCase = container.getSshPrivateKeyListUseCase,
-                deleteSshPrivateKeyUseCase = container.deleteSshPrivateKeyUseCase,
-            )
-
-            modelClass.isAssignableFrom(EditKeyViewModel::class.java) -> EditKeyViewModel(
-                keyId = keyId,
-                addSshPrivateKeyUseCase = container.addSshPrivateKeyUseCase,
-                updateSshPrivateKeyUseCase = container.updateSshPrivateKeyUseCase,
-                getSshPrivateKeyByIdUseCase = container.getSshPrivateKeyByIdUseCase,
             )
 
             else -> throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

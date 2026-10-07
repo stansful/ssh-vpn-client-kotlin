@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.data.proxy
 
 import android.content.Context
 import androidx.core.content.edit
+import com.stansful.sshvpnclient.data.local.timestampFlow
 import com.stansful.sshvpnclient.domain.model.OpenSourcePolicy
 import com.stansful.sshvpnclient.domain.model.ProxyImportResult
 import com.stansful.sshvpnclient.domain.model.ProxyProfileSource
@@ -22,6 +23,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -55,6 +57,9 @@ class PublicProxySourceSynchronizer(
             synchronizeLocked(force, connectionFactory)
         }
     }
+
+    override fun lastSuccessfulSyncAt(): Flow<Long?> =
+        preferences.timestampFlow(KEY_LAST_SUCCESS_AT, ioDispatcher)
 
     private suspend fun synchronizeLocked(
         force: Boolean,

@@ -6,6 +6,7 @@ import com.stansful.sshvpnclient.domain.model.ProxySyncResult
 import com.stansful.sshvpnclient.domain.repository.ProxySourceConnectionFactory
 import com.stansful.sshvpnclient.domain.repository.SmartProxyProfileRepository
 import com.stansful.sshvpnclient.domain.repository.SmartProxySourceSynchronizer
+import kotlinx.coroutines.flow.Flow
 
 /** Constructs the Smart source client only from the Smart repository type and private namespace. */
 class IsolatedSmartProxySourceSynchronizer(
@@ -23,4 +24,6 @@ class IsolatedSmartProxySourceSynchronizer(
         force: Boolean,
         connectionFactory: ProxySourceConnectionFactory?,
     ): ProxySyncResult = delegate.synchronize(force, connectionFactory)
+
+    override fun lastSuccessfulSyncAt(): Flow<Long?> = delegate.lastSuccessfulSyncAt()
 }

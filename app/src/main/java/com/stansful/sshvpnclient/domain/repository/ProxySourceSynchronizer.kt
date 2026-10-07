@@ -3,6 +3,7 @@ package com.stansful.sshvpnclient.domain.repository
 import com.stansful.sshvpnclient.domain.model.ProxySyncResult
 import java.net.URL
 import java.net.URLConnection
+import kotlinx.coroutines.flow.Flow
 
 fun interface ProxySourceConnectionFactory {
     fun open(url: URL): URLConnection
@@ -13,6 +14,12 @@ interface ProxySourceSynchronizer {
         force: Boolean = false,
         connectionFactory: ProxySourceConnectionFactory? = null,
     ): ProxySyncResult
+
+    /**
+     * When the source list was last downloaded and imported (epoch millis; null = never), then every
+     * later change. Reading it never blocks the caller's thread.
+     */
+    fun lastSuccessfulSyncAt(): Flow<Long?>
 }
 
 /** Marker boundary preventing Smart Connect from being wired to the OpenSource synchronizer. */

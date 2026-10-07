@@ -1,8 +1,6 @@
 package com.stansful.sshvpnclient.vpn
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Service
+import android.app.Notification
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -11,13 +9,18 @@ import android.net.Network
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
-import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.SshVpnApplication
+import com.stansful.sshvpnclient.domain.model.VpnConnectionState
+import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
+import com.stansful.sshvpnclient.ui.system.NotificationAction
+import com.stansful.sshvpnclient.ui.system.connectionNotification
+import com.stansful.sshvpnclient.ui.system.ensureConnectionChannel
+import com.stansful.sshvpnclient.ui.system.routeNotificationCopy
 import com.stansful.sshvpnclient.xray.XrayCoreBridge
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -28,6 +31,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -95,6 +100,7 @@ class OpenSourceVpnService : android.net.VpnService() {
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         screenReceiverRegistered = true
+        observeSessionForNotification()
     }
 
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
@@ -104,7 +110,7 @@ class OpenSourceVpnService : android.net.VpnService() {
         when (intent?.action) {
             ACTION_CONNECT -> {
                 // Meet the foreground-service deadline before repository or native-core I/O.
-                startVpnForeground(profileName = null)
+                startVpnForeground()
                 val profileId = intent.getStringExtra(EXTRA_PROFILE_ID)
                 if (!shouldAcceptVpnConnectCommand(
                         state = appContainer.vpnConnectionRepository.currentState,
@@ -297,7 +303,6 @@ class OpenSourceVpnService : android.net.VpnService() {
                 "Selected public profile: ${profile.protocol.name}/${profile.transport.name} " +
                     "${profile.host}:${profile.port}",
             )
-            startVpnForeground(profile.name)
         }
         if (!publishedStart) return
         val backoff = ReconnectBackoff(INITIAL_RECONNECT_DELAY_MS, MAX_RECONNECT_DELAY_MS)
@@ -737,26 +742,63 @@ class OpenSourceVpnService : android.net.VpnService() {
         return stopped
     }
 
-    private fun startVpnForeground(profileName: String?) {
-        val manager = getSystemService(Service.NOTIFICATION_SERVICE) as NotificationManager
-        manager.createNotificationChannel(
-            NotificationChannel(
-                CHANNEL_ID,
-                getString(R.string.vpn_notification_channel),
-                NotificationManager.IMPORTANCE_LOW,
+    /** Meets the foreground deadline of a connect command before the route is loaded. */
+    private fun startVpnForeground() {
+        startForeground(NOTIFICATION_ID, sessionNotification(status = null, routeName = null))
+    }
+
+    /**
+     * Keeps the notification in step with the published session ("Starting / Connected via /
+     * Reconnecting via <route>"). It runs on the main thread like every state change and
+     * stopForeground() of this service, and re-checks the state after the name lookup, so it never
+     * brings back a notification that a stop has removed.
+     */
+    private fun observeSessionForNotification() {
+        serviceScope.launch(Dispatchers.Main.immediate) {
+            val repository = appContainer.vpnConnectionRepository
+            repository.state
+                .map(::notificationSession)
+                .distinctUntilChanged()
+                .collect { session ->
+                    if (session == null) return@collect
+                    val routeName = session.profileId?.let { profileId -> routeName(profileId) }
+                    if (serviceDestroyed || notificationSession(repository.currentState) != session) {
+                        return@collect
+                    }
+                    startForeground(NOTIFICATION_ID, sessionNotification(session.status, routeName))
+                }
+        }
+    }
+
+    private fun notificationSession(state: VpnConnectionState): RouteNotificationSession? {
+        val live = state.status in NOTIFIED_STATUSES && isVpnSessionOwnedBy(
+            state = state,
+            owner = VpnSessionOwner.OPEN_SOURCE,
+            transport = VpnTransportType.XRAY,
+        )
+        return if (live) RouteNotificationSession(state.status, state.activeConfigId) else null
+    }
+
+    private suspend fun routeName(profileId: String): String? = try {
+        appContainer.proxyProfileRepository.getById(profileId)?.name
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun sessionNotification(status: VpnConnectionStatus?, routeName: String?): Notification {
+        ensureConnectionChannel(CHANNEL_ID, R.string.vpn_notification_channel)
+        return connectionNotification(
+            channelId = CHANNEL_ID,
+            mode = R.string.mode_routes,
+            copy = routeNotificationCopy(status, routeName),
+            action = NotificationAction(
+                label = R.string.notification_action_disconnect,
+                serviceIntent = disconnectIntent(this),
+                requestCode = NOTIFICATION_ID,
             ),
         )
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
-            .setContentTitle(getString(R.string.vpn_notification_title))
-            .setContentText(
-                profileName?.let { getString(R.string.vpn_notification_public_profile_text, it) }
-                    ?: getString(R.string.vpn_notification_text),
-            )
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .build()
-        startForeground(NOTIFICATION_ID, notification)
     }
 
     companion object {
@@ -765,6 +807,11 @@ class OpenSourceVpnService : android.net.VpnService() {
         private const val EXTRA_PROFILE_ID = "com.stansful.sshvpnclient.extra.PROXY_PROFILE_ID"
         private const val CHANNEL_ID = "ssh_vpn_connection"
         private const val NOTIFICATION_ID = 3002
+        private val NOTIFIED_STATUSES = setOf(
+            VpnConnectionStatus.CONNECTING,
+            VpnConnectionStatus.CONNECTED,
+            VpnConnectionStatus.RECONNECTING,
+        )
         private const val VPN_SESSION_NAME = "Secure connection"
         private const val INTERACTIVE_CONNECTION_MONITOR_INTERVAL_MS = 10_000L
         private const val SCREEN_OFF_CONNECTION_MONITOR_INTERVAL_MS = 30_000L
@@ -791,3 +838,6 @@ class OpenSourceVpnService : android.net.VpnService() {
         }
     }
 }
+
+/** The part of the session state the notification shows. */
+private data class RouteNotificationSession(val status: VpnConnectionStatus, val profileId: String?)

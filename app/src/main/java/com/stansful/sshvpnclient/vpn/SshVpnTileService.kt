@@ -20,6 +20,7 @@ import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
+import com.stansful.sshvpnclient.ui.shell.Destinations
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -217,7 +218,7 @@ class SshVpnTileService : TileService() {
         val tile = qsTile ?: return
         val status = state.status
         tile.label = getString(R.string.qs_tile_label)
-        tile.icon = Icon.createWithResource(this, R.drawable.ic_launcher_foreground)
+        tile.icon = Icon.createWithResource(this, quickTileIconRes(status))
         tile.state = when (status) {
             VpnConnectionStatus.CONNECTED,
             VpnConnectionStatus.CONNECTING,
@@ -241,10 +242,12 @@ class SshVpnTileService : TileService() {
 
     @SuppressLint("StartActivityAndCollapseDeprecated")
     private fun openMainActivity(tab: GlobalTab) {
-        // GlobalTabsHost observes the stored tab, so this also switches an already running activity.
+        // Home's mode switch observes the stored tab; the destination extra brings an already
+        // running activity back to Home so the switched mode (and its error) is visible.
         appContainer.appSettingsRepository.setActiveGlobalTab(tab)
         val intent = Intent(this, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .putExtra(MainActivity.EXTRA_DESTINATION, Destinations.HOME)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val pendingIntent = PendingIntent.getActivity(
@@ -260,7 +263,7 @@ class SshVpnTileService : TileService() {
         }
     }
 
-    // Mirrors the gate in GlobalTabsHost: consent the Smart tab would not ask for must not block
+    // Mirrors the shell's ConsentGate (Auto rule): consent the Smart tab would not ask for must not block
     // the tile, or every click would open the app and nothing there would unblock it.
     private fun AppSettings.smartConnectConsentAccepted(): Boolean {
         return !showSmartConnectWarningOnEnter ||

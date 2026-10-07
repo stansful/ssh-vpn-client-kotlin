@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.domain.model.SshPrivateKey
 import com.stansful.sshvpnclient.domain.model.ValidationException
+import com.stansful.sshvpnclient.domain.usecase.config.GetSshConfigListUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.AddSshPrivateKeyUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyByIdUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.UpdateSshPrivateKeyUseCase
@@ -23,12 +24,20 @@ data class EditKeyForm(
     val createdAt: Long? = null,
 )
 
+/**
+ * [usedBy] = names of the servers that sign in with the edited key. [validationRound] counts failed
+ * saves (the screen shakes the invalid fields on each); [savedKeyId] is set once the key is stored.
+ */
 data class EditKeyUiState(
     val form: EditKeyForm = EditKeyForm(),
     val errors: Map<String, String> = emptyMap(),
     val message: String? = null,
+    val isSaving: Boolean = false,
     val isSaved: Boolean = false,
     val isEditing: Boolean = false,
+    val usedBy: List<String> = emptyList(),
+    val validationRound: Int = 0,
+    val savedKeyId: String? = null,
 )
 
 class EditKeyViewModel(
@@ -36,6 +45,7 @@ class EditKeyViewModel(
     private val addSshPrivateKeyUseCase: AddSshPrivateKeyUseCase,
     private val updateSshPrivateKeyUseCase: UpdateSshPrivateKeyUseCase,
     private val getSshPrivateKeyByIdUseCase: GetSshPrivateKeyByIdUseCase,
+    getSshConfigListUseCase: GetSshConfigListUseCase,
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(EditKeyUiState(isEditing = keyId != null))
     val uiState = mutableState.asStateFlow()
@@ -50,6 +60,14 @@ class EditKeyViewModel(
                 )
             }
         }
+        if (keyId != null) {
+            viewModelScope.launch {
+                getSshConfigListUseCase().collect { configs ->
+                    val names = configs.filter { it.privateKeyId == keyId }.map { it.name }
+                    mutableState.update { it.copy(usedBy = names) }
+                }
+            }
+        }
     }
 
     fun updateForm(transform: (EditKeyForm) -> EditKeyForm) {
@@ -57,25 +75,33 @@ class EditKeyViewModel(
     }
 
     fun save() {
+        val state = mutableState.value
+        if (state.isSaving || state.isSaved) return
+        val form = state.form.copy(id = state.form.id ?: UUID.randomUUID().toString())
+        mutableState.update { it.copy(form = form, isSaving = true, message = null) }
         viewModelScope.launch {
-            val now = System.currentTimeMillis()
-            val key = mutableState.value.form.toDomain(now)
-
+            val key = form.toDomain(System.currentTimeMillis())
             try {
-                if (mutableState.value.isEditing) {
+                if (state.isEditing) {
                     updateSshPrivateKeyUseCase(key)
                 } else {
                     addSshPrivateKeyUseCase(key)
                 }
-                mutableState.update { it.copy(isSaved = true, errors = emptyMap(), message = null) }
+                mutableState.update {
+                    it.copy(isSaving = false, isSaved = true, savedKeyId = key.id, errors = emptyMap(), message = null)
+                }
             } catch (error: ValidationException) {
                 mutableState.update {
-                    it.copy(errors = error.errors.associate { item -> item.field to item.message })
+                    it.copy(
+                        isSaving = false,
+                        validationRound = it.validationRound + 1,
+                        errors = error.errors.associate { item -> item.field to item.message },
+                    )
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (error: Exception) {
-                mutableState.update { it.copy(message = error.message ?: "Unable to save SSH key") }
+                mutableState.update { it.copy(isSaving = false, message = error.message ?: "Unable to save SSH key") }
             }
         }
     }

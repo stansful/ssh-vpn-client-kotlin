@@ -16,6 +16,9 @@ interface AppSettingsRepository {
 
     fun setShowLogsOnSmartConnect(show: Boolean)
 
+    /** Sets the global "Show connection activity" switch (all three per-mode log flags at once). */
+    fun setShowConnectionActivity(show: Boolean)
+
     fun setShowTerminalOnMain(show: Boolean)
 
     fun setThemeMode(themeMode: AppThemeMode)
