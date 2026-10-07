@@ -763,7 +763,7 @@ private fun EmptyLibraryCard(
                 modifier = Modifier.padding(top = 16.dp),
             )
             Text(
-                text = "Fetch the public route list, or add a route from a vless, vmess or trojan link.",
+                text = "Fetch the public route list, or add a route from a vless, vmess, trojan or hy2 link.",
                 style = Shadow.type.bodyS,
                 color = colors.ink3,
                 textAlign = TextAlign.Center,

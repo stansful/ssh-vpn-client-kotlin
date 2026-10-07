@@ -314,6 +314,8 @@ class RoomSmartProxyProfileRepositoryBatchTest {
 
         assertEquals(1, result.added)
         assertEquals(1, result.unsupported)
+        // Left out by the Smart Connect policy, not because the engine can't run it.
+        assertEquals(0, result.unsupportedSkipped)
         assertEquals(1, dao.remainingEntities().size)
         assertEquals("Allowed", dao.remainingEntities().single().name)
         assertEquals(1, secrets.savedSecrets.size)
@@ -394,6 +396,128 @@ class RoomSmartProxyProfileRepositoryBatchTest {
         assertTrue(secrets.deletedSecretIds.isEmpty())
     }
 
+    @Test
+    fun `smart hysteria 2 import persists the protocol with QUIC transport and TLS`() = runBlocking {
+        val dao = RecordingSmartProxyProfileDao(emptyMap())
+        val secrets = RecordingSmartSecretStorage(emptyMap())
+        val repository = repository(dao, secrets)
+
+        val result = repository.import(
+            text = HY2_LINK,
+            source = ProxyProfileSource.REMOTE,
+            sourceUrl = "https://example.test/smart",
+        )
+
+        assertEquals(1, result.added)
+        assertEquals(0, result.unsupported)
+        assertEquals(0, result.unsupportedSkipped)
+        val entity = dao.remainingEntities().single()
+        assertEquals(ProxyProtocol.HYSTERIA2.name, entity.protocol)
+        assertEquals(ProxyTransport.HYSTERIA.name, entity.transport)
+        assertEquals(ProxySecurity.TLS.name, entity.security)
+        val profile = repository.getById(entity.id)
+        assertEquals(ProxyProtocol.HYSTERIA2, profile?.protocol)
+        assertEquals(ProxyTransport.HYSTERIA, profile?.transport)
+        assertEquals(ProxySecurity.TLS, profile?.security)
+        assertEquals(HY2_LINK, profile?.rawUri)
+    }
+
+    @Test
+    fun `smart import keeps one profile for hy2 and hysteria2 links of one server`() = runBlocking {
+        val dao = RecordingSmartProxyProfileDao(emptyMap())
+        val secrets = RecordingSmartSecretStorage(emptyMap())
+        val repository = repository(dao, secrets)
+
+        val result = repository.import(
+            text = listOf(HY2_LINK, HY2_ALIAS_LINK).joinToString("\n"),
+            source = ProxyProfileSource.REMOTE,
+            sourceUrl = "https://example.test/smart",
+        )
+
+        assertEquals(1, result.added)
+        assertEquals(1, result.duplicates)
+        assertEquals(0, result.invalid)
+        assertEquals(1, dao.remainingEntities().size)
+        assertEquals(1, secrets.savedSecrets.size)
+    }
+
+    @Test
+    fun `smart import counts a hysteria v1 link as unsupported and never saves it`() = runBlocking {
+        val dao = RecordingSmartProxyProfileDao(emptyMap())
+        val secrets = RecordingSmartSecretStorage(emptyMap())
+        val repository = repository(dao, secrets)
+
+        val result = repository.import(
+            text = HYSTERIA_V1_LINK,
+            source = ProxyProfileSource.REMOTE,
+            sourceUrl = "https://example.test/smart",
+        )
+
+        assertEquals(1, result.unsupported)
+        assertEquals(1, result.unsupportedSkipped)
+        assertEquals(0, result.invalid)
+        assertEquals(0, result.added)
+        assertEquals(1, result.total)
+        assertTrue(dao.remainingEntities().isEmpty())
+        assertTrue(secrets.savedSecrets.isEmpty())
+    }
+
+    @Test
+    fun `smart import counts unknown hysteria 2 obfuscation as unsupported apart from garbage`() = runBlocking {
+        val dao = RecordingSmartProxyProfileDao(emptyMap())
+        val secrets = RecordingSmartSecretStorage(emptyMap())
+        val repository = repository(dao, secrets)
+
+        val result = repository.import(
+            text = listOf(HY2_UNKNOWN_OBFS_LINK, "not a share link").joinToString("\n"),
+            source = ProxyProfileSource.REMOTE,
+            sourceUrl = "https://example.test/smart",
+        )
+
+        assertEquals(1, result.unsupported)
+        assertEquals(1, result.unsupportedSkipped)
+        assertEquals(1, result.invalid)
+        assertEquals(2, result.total)
+        assertTrue(dao.remainingEntities().isEmpty())
+        assertTrue(secrets.savedSecrets.isEmpty())
+    }
+
+    @Test
+    fun `smart update with a hysteria v1 link reports unsupported and keeps the profile`() = runBlocking {
+        val existing = smartProfileEntity(id = "existing")
+        val dao = RecordingSmartProxyProfileDao(mapOf(existing.id to existing))
+        val secrets = RecordingSmartSecretStorage(mapOf(existing.secretId to "uri://${existing.id}"))
+        val repository = repository(dao, secrets)
+
+        val result = repository.update(id = existing.id, rawUri = HYSTERIA_V1_LINK)
+
+        assertEquals(1, result.unsupported)
+        assertEquals(1, result.unsupportedSkipped)
+        assertEquals(0, result.invalid)
+        assertEquals(0, result.updated)
+        assertEquals(existing, dao.entity(existing.id))
+        assertTrue(secrets.savedSecrets.isEmpty())
+        assertTrue(secrets.deletedSecretIds.isEmpty())
+    }
+
+    @Test
+    fun `smart import of a route with an unknown transport is unsupported but not skipped`() = runBlocking {
+        val dao = RecordingSmartProxyProfileDao(emptyMap())
+        val secrets = RecordingSmartSecretStorage(emptyMap())
+        val repository = repository(dao, secrets)
+
+        val result = repository.import(
+            text = listOf(UNKNOWN_TRANSPORT_LINK, UNKNOWN_TRANSPORT_LINK).joinToString("\n"),
+            source = ProxyProfileSource.REMOTE,
+            sourceUrl = "https://example.test/smart",
+        )
+
+        assertEquals(1, result.added)
+        assertEquals(1, result.duplicates)
+        assertEquals(1, result.unsupported)
+        assertEquals(0, result.unsupportedSkipped)
+    }
+
     private fun repository(
         dao: SmartProxyProfileDao,
         secretStorage: SecretStorage,
@@ -403,6 +527,19 @@ class RoomSmartProxyProfileRepositoryBatchTest {
         parser = ProxyShareLinkParser(),
         ioDispatcher = Dispatchers.Unconfined,
     )
+
+    private companion object {
+        const val HY2_LINK = "hysteria2://correct-horse@hy2.example.test:443?sni=hy2.example.test#Hy2"
+
+        // The alias scheme, the default port and `peer` for `sni` describe the same outbound.
+        const val HY2_ALIAS_LINK = "hy2://correct-horse@hy2.example.test/?peer=hy2.example.test#Alias"
+        const val HY2_UNKNOWN_OBFS_LINK =
+            "hysteria2://correct-horse@hy2.example.test:443?obfs=xplus&obfs-password=battery#Xplus"
+        const val HYSTERIA_V1_LINK =
+            "hysteria://hy1.example.test:443?protocol=udp&auth=correct-horse&upmbps=10&downmbps=50#V1"
+        const val UNKNOWN_TRANSPORT_LINK =
+            "vless://00000000-0000-4000-8000-000000000006@quic.example.test:443?type=quic#Quic"
+    }
 }
 
 private class RecordingSmartSecretStorage(

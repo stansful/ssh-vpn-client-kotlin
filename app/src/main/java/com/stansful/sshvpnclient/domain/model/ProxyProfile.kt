@@ -57,14 +57,27 @@ data class ParsedProxyProfile(
     val parameters: Map<String, String>,
 )
 
-enum class ProxyProtocol(val scheme: String) {
+/**
+ * The `name` of each entry is persisted in Room and read back with `enumValueOf`, so it must never
+ * be renamed. [scheme] is the canonical share-link scheme, [aliases] are other accepted schemes and
+ * [xrayProtocol] is the outbound `protocol` value understood by Xray-core.
+ */
+enum class ProxyProtocol(
+    val scheme: String,
+    val xrayProtocol: String = scheme,
+    val aliases: Set<String> = emptySet(),
+) {
     VLESS("vless"),
     VMESS("vmess"),
-    TROJAN("trojan");
+    TROJAN("trojan"),
+
+    /** Hysteria 2 over QUIC: Xray names the outbound `hysteria` and only accepts `version: 2`. */
+    HYSTERIA2(scheme = "hysteria2", xrayProtocol = "hysteria", aliases = setOf("hy2"));
 
     companion object {
-        fun fromScheme(value: String?): ProxyProtocol? = entries.firstOrNull {
-            it.scheme.equals(value, ignoreCase = true)
+        fun fromScheme(value: String?): ProxyProtocol? = entries.firstOrNull { protocol ->
+            protocol.scheme.equals(value, ignoreCase = true) ||
+                protocol.aliases.any { alias -> alias.equals(value, ignoreCase = true) }
         }
     }
 }
@@ -88,7 +101,9 @@ enum class ProxyTransport(val xrayValue: String) {
                 "ws", "websocket" -> WEBSOCKET
                 "httpupgrade", "http-upgrade" -> HTTP_UPGRADE
                 "kcp", "mkcp" -> MKCP
-                "hysteria" -> HYSTERIA
+                // VLESS/VMess/Trojan over the Hysteria transport would need the transport's own auth,
+                // which share links don't carry, so they can't connect. Only Hysteria 2 links use HYSTERIA.
+                "hysteria" -> UNKNOWN
                 else -> UNKNOWN
             }
         }
@@ -134,6 +149,11 @@ data class ProxyImportResult(
     val invalid: Int,
     val unsupported: Int,
     val total: Int,
+    /**
+     * Links recognised but not saved because the engine can't run them (Hysteria v1, say). Unlike
+     * [unsupported], it leaves out the saved routes whose transport the engine doesn't know.
+     */
+    val unsupportedSkipped: Int = 0,
 ) {
     val summary: String
         get() = "Added $added, updated $updated, duplicates $duplicates, invalid $invalid, unsupported $unsupported"

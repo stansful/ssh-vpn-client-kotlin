@@ -80,6 +80,7 @@ class PublicProxySourceSynchronizer(
                 force = force,
                 storedEtag = preferences.getString(KEY_ETAG, null),
                 storedEtagUrl = preferences.getString(KEY_ETAG_URL, null),
+                storedEtagParserRevision = preferences.getInt(KEY_ETAG_PARSER_REVISION, 0).takeIf { it > 0 },
                 sourceUrl = sourceUrl,
             )?.let { etag ->
                 setRequestProperty("If-None-Match", etag)
@@ -106,10 +107,12 @@ class PublicProxySourceSynchronizer(
                         if (etag != null) {
                             putString(KEY_ETAG, etag)
                             putString(KEY_ETAG_URL, sourceUrl)
+                            putInt(KEY_ETAG_PARSER_REVISION, IMPORT_PARSER_REVISION)
                         } else {
                             // An older ETag no longer describes the list that was just imported.
                             remove(KEY_ETAG)
                             remove(KEY_ETAG_URL)
+                            remove(KEY_ETAG_PARSER_REVISION)
                         }
                         putLong(KEY_LAST_SUCCESS_AT, System.currentTimeMillis())
                     }
@@ -167,6 +170,7 @@ class PublicProxySourceSynchronizer(
         const val DEFAULT_PREFERENCES_NAME = "open-source-proxy-sync"
         const val KEY_ETAG = "etag"
         const val KEY_ETAG_URL = "etag_url"
+        const val KEY_ETAG_PARSER_REVISION = "etag_parser_revision"
         const val KEY_LAST_SUCCESS_AT = "last_success_at"
         const val DEFAULT_USER_AGENT = "shadow-ssh-android-opensource-sync"
         const val CONNECT_TIMEOUT_MS = 10_000
@@ -179,17 +183,28 @@ class PublicProxySourceSynchronizer(
 }
 
 /**
+ * Version of the share-link parser whose import a stored ETag stands for. It must be bumped whenever
+ * [com.stansful.sshvpnclient.domain.usecase.proxy.ProxyShareLinkParser] starts accepting new link
+ * types: a 304 for an unchanged list would otherwise keep its newly supported lines un-imported.
+ * Builds that recorded no revision ran revision 1; 2 added Hysteria 2.
+ */
+internal const val IMPORT_PARSER_REVISION = 2
+
+/**
  * An ETag only identifies a version of the URL that issued it. After a source URL change the stored
  * one belongs to the previous list, and one stored before URLs were recorded has an unknown origin;
- * either is dropped so the current source is downloaded in full once.
+ * either is dropped so the current source is downloaded in full once. The same holds for an ETag
+ * whose list was imported by another parser revision ([IMPORT_PARSER_REVISION]), null when none was
+ * recorded: lines that revision skipped may be importable now.
  */
 internal fun proxySourceIfNoneMatch(
     force: Boolean,
     storedEtag: String?,
     storedEtagUrl: String?,
+    storedEtagParserRevision: Int?,
     sourceUrl: String,
 ): String? {
-    if (force || storedEtagUrl != sourceUrl) return null
+    if (force || storedEtagUrl != sourceUrl || storedEtagParserRevision != IMPORT_PARSER_REVISION) return null
     return storedEtag
 }
 

@@ -17,6 +17,7 @@ import com.stansful.sshvpnclient.ui.routes.BarButton
 import com.stansful.sshvpnclient.ui.routes.BatchCategory
 import com.stansful.sshvpnclient.ui.routes.LinkParse
 import com.stansful.sshvpnclient.ui.routes.LinkProblem
+import com.stansful.sshvpnclient.ui.routes.PreviewVerdict
 import com.stansful.sshvpnclient.ui.routes.RouteState
 import com.stansful.sshvpnclient.ui.routes.analyzeBatch
 import com.stansful.sshvpnclient.ui.routes.analyzeLink
@@ -24,8 +25,11 @@ import com.stansful.sshvpnclient.ui.routes.checkAllBlockReason
 import com.stansful.sshvpnclient.ui.routes.connectionBar
 import com.stansful.sshvpnclient.ui.routes.formatAgo
 import com.stansful.sshvpnclient.ui.routes.maskLink
+import com.stansful.sshvpnclient.ui.routes.maskLinks
 import com.stansful.sshvpnclient.ui.routes.namesByFingerprint
 import com.stansful.sshvpnclient.ui.routes.parseLine
+import com.stansful.sshvpnclient.ui.routes.previewPlaceholder
+import com.stansful.sshvpnclient.ui.routes.previewVerdict
 import com.stansful.sshvpnclient.ui.routes.removeUnavailableNote
 import com.stansful.sshvpnclient.ui.routes.routeState
 import org.junit.Assert.assertEquals
@@ -223,6 +227,284 @@ class RouteLibraryLogicTest {
         assertEquals("vless://••••••••@203.0.113.1:443#One", maskLink("vless://secret@203.0.113.1:443#One"))
         assertEquals("vmess://••••••••••••", maskLink("vmess://eyJhIjoxfQ=="))
         assertFalse(maskLink("trojan://pw@h:1").contains("pw"))
+    }
+
+    @Test
+    fun `hysteria 2 links are routes and hysteria v1 links are not supported`() {
+        val short = parser.parseLine("hy2://secret@203.0.113.5:443?sni=hy.example.org#Helsinki") as LinkParse.Route
+        assertEquals(ProxyProtocol.HYSTERIA2, short.profile.protocol)
+        assertEquals(ProxyTransport.HYSTERIA, short.profile.transport)
+        assertEquals(ProxySecurity.TLS, short.profile.security)
+        val long = parser.parseLine("HYSTERIA2://secret@203.0.113.5") as LinkParse.Route
+        assertEquals(ProxyTransport.HYSTERIA, long.profile.transport)
+        assertEquals(443, long.profile.port)
+        assertTrue(long.unnamed)
+
+        assertEquals(LinkParse.UnsupportedScheme("hysteria"), parser.parseLine("hysteria://203.0.113.5:443?auth=pw"))
+        assertEquals(LinkParse.Invalid(LinkProblem.NoPort), parser.parseLine("hy2://secret@203.0.113.5:99999"))
+        assertEquals(LinkParse.Invalid(LinkProblem.NoHost), parser.parseLine("hy2://secret@"))
+        assertEquals(
+            LinkParse.Invalid(LinkProblem.UnsupportedObfs),
+            parser.parseLine("hy2://secret@203.0.113.5:443?obfs=xplus"),
+        )
+        assertEquals(
+            LinkParse.Invalid(LinkProblem.NoObfsPassword),
+            parser.parseLine("hy2://secret@203.0.113.5:443?obfs=salamander"),
+        )
+    }
+
+    @Test
+    fun `a hysteria 2 link that skips certificate checks without a pin is flagged but still acceptable`() {
+        fun analyze(link: String) = parser.analyzeLink(link, emptyMap(), editing = false)
+        val insecure = analyze("hy2://secret@203.0.113.5:443?insecure=1#Self-signed")
+        val pinned = analyze("hy2://secret@203.0.113.5:443?insecure=1&pinSHA256=${"ab".repeat(32)}")
+
+        assertTrue(insecure.acceptable)
+        assertEquals(true, insecure.route?.certificateCheckWarning)
+        assertEquals(false, pinned.route?.certificateCheckWarning)
+        assertEquals(false, analyze("hy2://secret@203.0.113.5:443").route?.certificateCheckWarning)
+        assertEquals(
+            false,
+            analyze("vless://id@203.0.113.5:443?security=tls&allowInsecure=1").route?.certificateCheckWarning,
+        )
+    }
+
+    @Test
+    fun `masking hides hysteria auth and secret query values`() {
+        assertEquals(
+            "hy2://••••••••@203.0.113.5:443?obfs=salamander&obfs-password=••••••••#Me@home",
+            maskLink("hy2://p@ss@203.0.113.5:443?obfs=salamander&obfs-password=hunter2#Me@home"),
+        )
+        assertEquals(
+            "hysteria2://••••••••@[2001:db8::1]:443,20000-50000/?sni=hy.example.org",
+            maskLink("hysteria2://user:pass@[2001:db8::1]:443,20000-50000/?sni=hy.example.org"),
+        )
+        assertEquals(
+            "hysteria://203.0.113.5:443?auth=••••••••&upmbps=10",
+            maskLink("hysteria://203.0.113.5:443?auth=topsecret&upmbps=10"),
+        )
+        val masked = maskLink("HY2://203.0.113.5:443/?OBFS-PASSWORD=hunter2&Auth=letmein")
+        assertFalse(masked.contains("hunter2") || masked.contains("letmein"))
+    }
+
+    @Test
+    fun `batch analysis folds hy2 and hysteria2 copies and sorts out links the engine can't run`() {
+        val batch = parser.analyzeBatch(
+            listOf(
+                "hy2://secret@203.0.113.5:443?sni=hy.example.org#Helsinki",
+                "hysteria2://secret@203.0.113.5:443/?peer=hy.example.org#Helsinki%20copy",
+                "hysteria://203.0.113.6:443?auth=topsecret#Old",
+                "hy2://secret@203.0.113.7:443?obfs=xplus#Xplus",
+            ).joinToString("\n"),
+            emptyMap(),
+        )
+
+        assertEquals(1, batch.newCount)
+        assertEquals("hysteria2 · 203.0.113.5:443", batch.rows[0].subtitle)
+        assertEquals(BatchCategory.Duplicate, batch.rows[1].category)
+        assertEquals("Repeated in this paste", batch.rows[1].subtitle)
+        assertEquals(BatchCategory.Unsupported, batch.rows[2].category)
+        assertEquals("Old", batch.rows[2].name)
+        assertEquals("hysteria:// not supported", batch.rows[2].label)
+        assertFalse(batch.rows[2].subtitle.contains("topsecret"))
+        assertEquals(BatchCategory.Unsupported, batch.rows[3].category)
+        assertEquals("Obfuscation not supported", batch.rows[3].label)
+    }
+
+    @Test
+    fun `search finds hysteria 2 routes by its scheme and the hy2 alias`() {
+        val hysteria = route("h", ProxyTestStatus.NOT_TESTED).copy(
+            protocol = ProxyProtocol.HYSTERIA2,
+            transport = ProxyTransport.HYSTERIA,
+            security = ProxySecurity.TLS,
+        )
+
+        assertTrue(hysteria.matchesNormalized("hy2"))
+        assertTrue(hysteria.matchesNormalized("Hysteria2"))
+        assertTrue(hysteria.matchesNormalized("hysteria"))
+        assertFalse(route("v", ProxyTestStatus.NOT_TESTED).matchesNormalized("hy2"))
+    }
+
+    @Test
+    fun `saving a link the engine can't run says so`() {
+        val unsupported = ProxyImportResult(
+            added = 0,
+            updated = 0,
+            duplicates = 0,
+            invalid = 0,
+            unsupported = 1,
+            total = 1,
+            unsupportedSkipped = 1,
+        )
+        val unreadable = unsupported.copy(invalid = 1, unsupported = 0, unsupportedSkipped = 0)
+
+        assertEquals(
+            "This link type isn’t supported.",
+            editorSaveError(unsupported, editing = false, routeExists = false),
+        )
+        assertEquals(
+            "This link type isn’t supported.",
+            editorSaveError(unsupported.copy(invalid = 1), editing = true, routeExists = true),
+        )
+        // A route with an unknown transport is saved, though it can't connect.
+        assertNull(
+            editorSaveError(unsupported.copy(added = 1, unsupportedSkipped = 0), editing = false, routeExists = false),
+        )
+        assertEquals(
+            "This link can’t be read. Check it and try again.",
+            editorSaveError(unreadable, editing = false, routeExists = false),
+        )
+        assertEquals(
+            "This route was deleted, so the change can’t be saved.",
+            editorSaveError(unreadable, editing = true, routeExists = false),
+        )
+    }
+
+    @Test
+    fun `the import notice calls only links left out not supported`() {
+        // One saved line whose transport the engine doesn't know: imported, nothing skipped.
+        assertEquals(
+            emptyList<String>(),
+            importSkippedNotes(ProxyImportResult(1, 0, 0, 0, unsupported = 1, total = 1)),
+        )
+        // The same line again is a duplicate, not also "not supported".
+        assertEquals(
+            listOf("1 duplicate skipped"),
+            importSkippedNotes(ProxyImportResult(0, 0, 1, 0, unsupported = 1, total = 1)),
+        )
+        assertEquals(
+            listOf("2 duplicates skipped", "1 couldn't be read", "1 not supported"),
+            importSkippedNotes(ProxyImportResult(0, 0, 2, 1, unsupported = 1, total = 4, unsupportedSkipped = 1)),
+        )
+    }
+
+    @Test
+    fun `batch rows flag a hysteria 2 link that skips certificate checks without a pin`() {
+        val batch = parser.analyzeBatch(
+            listOf(
+                "hy2://secret@203.0.113.5:443?insecure=1#Self-signed",
+                "hy2://secret@203.0.113.6:443?insecure=1&pinSHA256=${"ab".repeat(32)}#Pinned",
+                "hy2://secret@203.0.113.5:443/?insecure=1#Copy",
+            ).joinToString("\n"),
+            emptyMap(),
+        )
+
+        assertEquals(2, batch.newCount)
+        assertEquals(BatchCategory.New, batch.rows[0].category)
+        assertTrue(batch.rows[0].certificateCheckWarning)
+        assertEquals("hysteria2 · 203.0.113.5:443 · needs pinSHA256", batch.rows[0].subtitle)
+        assertFalse(batch.rows[1].certificateCheckWarning)
+        assertEquals("hysteria2 · 203.0.113.6:443", batch.rows[1].subtitle)
+        assertEquals(BatchCategory.Duplicate, batch.rows[2].category)
+        assertFalse(batch.rows[2].certificateCheckWarning)
+    }
+
+    @Test
+    fun `the preview checks the certificate warning after duplicates and unknown transports`() {
+        fun verdict(link: String, duplicateOf: String? = null) =
+            (parser.parseLine(link) as LinkParse.Route).previewVerdict(duplicateOf)
+        val insecure = "hy2://secret@203.0.113.5:443?insecure=1#Self-signed"
+
+        assertEquals(PreviewVerdict.CheckCertificate, verdict(insecure))
+        assertEquals("Check certificate", PreviewVerdict.CheckCertificate.text)
+        assertEquals(PreviewVerdict.AlreadyAdded, verdict(insecure, duplicateOf = "Helsinki"))
+        assertEquals(PreviewVerdict.LooksGood, verdict("hy2://secret@203.0.113.5:443#Helsinki"))
+        assertEquals(
+            PreviewVerdict.LooksGood,
+            verdict("hy2://secret@203.0.113.5:443?insecure=1&pinSHA256=${"ab".repeat(32)}"),
+        )
+        assertEquals(PreviewVerdict.CantConnect, verdict("vless://id@h.example:443?type=quic"))
+    }
+
+    @Test
+    fun `masking hides hysteria auth with spaces slashes and other characters`() {
+        assertEquals("hy2://••••••••@203.0.113.5:443", maskLink("hy2://user:pa/ss@203.0.113.5:443"))
+        assertEquals("hy2://••••••••@203.0.113.5:443#Home", maskLink("hy2://my secret@203.0.113.5:443#Home"))
+        assertEquals("hy2://••••••••@203.0.113.5/?sni=a", maskLink("hy2://aB3/x+Yz==@203.0.113.5/?sni=a"))
+        assertEquals(
+            "hysteria2://••••••••@203.0.113.5:443?obfs-password=••••••••",
+            maskLink("hysteria2://pa?ss@203.0.113.5:443?obfs-password=hunter2"),
+        )
+        // Over-masking is fine: an `@` in a plain query value moves the end of the auth mask.
+        assertFalse(maskLink("hy2://secret@203.0.113.5:443?sni=a@b").contains("secret"))
+    }
+
+    @Test
+    fun `masking hides secret query values whole whatever the key spelling`() {
+        assertEquals(
+            "hy2://••••••••@203.0.113.5:443?obfs=salamander&obfs%2Dpassword=••••••••&sni=hy.example.org",
+            maskLink("hy2://pw@203.0.113.5:443?obfs=salamander&obfs%2Dpassword=hunter2&sni=hy.example.org"),
+        )
+        assertEquals(
+            "hy2://••••••••@203.0.113.5:443?obfs-password=••••••••#Home",
+            maskLink("hy2://pw@203.0.113.5:443?obfs-password=correct horse battery#Home"),
+        )
+        // An `@` inside a secret value neither ends the auth mask nor shows the rest of the value.
+        assertEquals(
+            "hy2://••••••••@203.0.113.5:443?auth=••••••••&sni=a",
+            maskLink("hy2://pw@203.0.113.5:443?auth=let@me in&sni=a"),
+        )
+        assertEquals(
+            "hy2://203.0.113.5:443?obfs-password=••••••••&%20Auth+=••••••••",
+            maskLink("hy2://203.0.113.5:443?obfs-password=a?b/c&%20Auth+=x y"),
+        )
+        assertEquals(
+            "vless://••••••••@203.0.113.1:443?security=tls&auth=••••••••#One",
+            maskLink("vless://secret@203.0.113.1:443?security=tls&auth=pw#One"),
+        )
+        // Each line on its own: a secret value can't swallow the next link, which keeps its own mask.
+        assertEquals(
+            "hy2://••••••••@203.0.113.5:443?auth=••••••••\nvless://••••••••@203.0.113.1:443",
+            maskLinks("hy2://pw@203.0.113.5:443?auth=a b\nvless://secret@203.0.113.1:443"),
+        )
+    }
+
+    @Test
+    fun `the preview placeholder explains a link the engine can't run`() {
+        fun placeholder(text: String) = parser.analyzeLink(text, emptyMap(), editing = false).previewPlaceholder()
+
+        assertEquals(
+            "No preview for links the engine can’t run.",
+            placeholder("hy2://secret@203.0.113.7:443?obfs=xplus"),
+        )
+        assertEquals("No preview for hysteria:// links.", placeholder("hysteria://203.0.113.6:443?auth=pw"))
+        assertEquals(
+            "Nothing to preview until the link can be read.",
+            placeholder("hy2://secret@203.0.113.7:443?obfs=salamander"),
+        )
+        assertEquals("A preview appears as soon as the link can be read.", placeholder(""))
+    }
+
+    @Test
+    fun `hysteria 2 links with a short obfs password a bad pin or a bad ech name the problem`() {
+        val short = "hy2://secret@203.0.113.5:443?obfs=salamander&obfs-password=abc"
+        val badPin = "hy2://secret@203.0.113.5:443?pinSHA256=not-hex"
+        val badEch = "hy2://secret@203.0.113.5:443?ech=not*base64"
+
+        assertEquals(LinkParse.Invalid(LinkProblem.ShortObfsPassword), parser.parseLine(short))
+        assertEquals(LinkParse.Invalid(LinkProblem.BadPin), parser.parseLine(badPin))
+        assertEquals(LinkParse.Invalid(LinkProblem.BadEch), parser.parseLine(badEch))
+        val batch = parser.analyzeBatch(listOf(short, badPin, badEch).joinToString("\n"), emptyMap())
+        assertEquals(3, batch.count(BatchCategory.Invalid))
+        assertEquals(listOf("Short obfs-password", "Bad pinSHA256", "Bad ech"), batch.rows.map { it.label })
+    }
+
+    @Test
+    fun `an unnamed hysteria 2 link the engine can't run is named by its scheme`() {
+        val batch = parser.analyzeBatch(
+            listOf(
+                "hy2://secret@203.0.113.7:443?obfs=xplus",
+                "HYSTERIA2://secret@203.0.113.8:443?obfs=xplus",
+                "hy2://secret@203.0.113.9:443?obfs=salamander",
+            ).joinToString("\n"),
+            emptyMap(),
+        )
+
+        assertEquals(BatchCategory.Unsupported, batch.rows[0].category)
+        assertEquals("hy2:// link", batch.rows[0].name)
+        assertEquals("hysteria2:// link", batch.rows[1].name)
+        assertEquals(BatchCategory.Invalid, batch.rows[2].category)
+        assertEquals("Unreadable line", batch.rows[2].name)
     }
 
     private fun xray(owner: VpnSessionOwner, configId: String? = null) = VpnConnectionState(

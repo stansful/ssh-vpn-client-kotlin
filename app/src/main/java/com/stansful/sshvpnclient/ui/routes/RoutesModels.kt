@@ -59,6 +59,7 @@ internal fun ProxyProtocol.displayName(): String = when (this) {
     ProxyProtocol.VLESS -> "VLESS"
     ProxyProtocol.VMESS -> "VMess"
     ProxyProtocol.TROJAN -> "Trojan"
+    ProxyProtocol.HYSTERIA2 -> "Hysteria 2"
 }
 
 /** Added by the user (a link or the clipboard), not from the public list. */

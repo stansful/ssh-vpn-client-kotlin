@@ -573,13 +573,7 @@ class OpenSourceViewModel(
                 updateEditorState { it.copy(saving = false, error = EDITOR_STORAGE_ERROR) }
                 return@launch
             }
-            val error = when {
-                result.duplicates > 0 -> "This link is already in your library. Change it or cancel."
-                editor.profileId != null && result.invalid > 0 && existing == null ->
-                    "This route was deleted, so the change can’t be saved."
-                result.invalid > 0 -> "This link can’t be read. Check it and try again."
-                else -> null
-            }
+            val error = editorSaveError(result, editing = editor.profileId != null, routeExists = existing != null)
             if (error != null) {
                 updateEditorState { it.copy(saving = false, error = error) }
                 return@launch
@@ -1023,12 +1017,7 @@ class OpenSourceViewModel(
                 notify("Couldn’t import routes. Nothing was changed, try again.", tone = RoutesNoticeTone.Error)
                 return@launch
             }
-            val skipped = buildList {
-                if (result.duplicates > 0) {
-                    add("${result.duplicates} ${plural(result.duplicates, "duplicate", "duplicates")} skipped")
-                }
-                if (result.invalid > 0) add("${result.invalid} couldn't be read")
-            }
+            val skipped = importSkippedNotes(result)
             if (result.added == 0 && result.updated == 0) {
                 notify(
                     "Nothing new to import",
@@ -1802,6 +1791,28 @@ internal fun importSummary(result: ProxyImportResult): String = buildList {
     if (result.unsupported > 0) add("${result.unsupported} unsupported")
 }.joinToString(" · ")
 
+/**
+ * "2 duplicates skipped", "1 couldn't be read", "1 not supported": the lines an import left out. A saved
+ * route with a transport the engine doesn't know isn't one of them, so it isn't called "not supported".
+ */
+internal fun importSkippedNotes(result: ProxyImportResult): List<String> = buildList {
+    if (result.duplicates > 0) {
+        add("${result.duplicates} ${plural(result.duplicates, "duplicate", "duplicates")} skipped")
+    }
+    if (result.invalid > 0) add("${result.invalid} couldn't be read")
+    if (result.unsupportedSkipped > 0) add("${result.unsupportedSkipped} not supported")
+}
+
+/** Why saving the editor failed ([editing]: an existing route, [routeExists]: still in the library), or null. */
+internal fun editorSaveError(result: ProxyImportResult, editing: Boolean, routeExists: Boolean): String? = when {
+    result.duplicates > 0 -> "This link is already in your library. Change it or cancel."
+    editing && result.invalid > 0 && !routeExists -> "This route was deleted, so the change can’t be saved."
+    // A known link the engine can't run (Hysteria v1, say) is never saved.
+    result.unsupportedSkipped > 0 -> "This link type isn’t supported."
+    result.invalid > 0 -> "This link can’t be read. Check it and try again."
+    else -> null
+}
+
 /** "41 available · 63 unavailable · 9 unsupported · 15 timed out". */
 internal fun checkSummary(results: List<ProxyTunnelTestResult>): String {
     val available = results.count { it.status == ProxyTestStatus.AVAILABLE }
@@ -1819,10 +1830,13 @@ internal fun checkSummary(results: List<ProxyTunnelTestResult>): String {
 /** 9412 → "9.4 s". */
 internal fun formatSeconds(millis: Long): String = String.format(Locale.US, "%.1f s", millis / 1_000.0)
 
-private fun ProxyProfileSummary.matchesNormalized(query: String): Boolean =
+/** Library search: name, host, protocol (its name, link scheme or alias such as `hy2`), transport or security. */
+internal fun ProxyProfileSummary.matchesNormalized(query: String): Boolean =
     name.contains(query, ignoreCase = true) ||
         host.contains(query, ignoreCase = true) ||
         protocol.name.contains(query, ignoreCase = true) ||
+        protocol.scheme.contains(query, ignoreCase = true) ||
+        protocol.aliases.any { alias -> alias.contains(query, ignoreCase = true) } ||
         transport.name.contains(query, ignoreCase = true) ||
         security.name.contains(query, ignoreCase = true)
 

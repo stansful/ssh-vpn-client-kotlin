@@ -63,13 +63,14 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
 - Глобальные вкладки:
   - `shadow-ssh` - основной SSH VPN режим;
   - `smart` (`Smart Connect`) - полностью автоматический выбор и восстановление публичного Xray-туннеля;
-  - `Public Routes` (внутренний режим `opensource`) - импорт и запуск публичных VLESS/VMess/Trojan конфигураций через Xray-core;
+  - `Public Routes` (внутренний режим `opensource`) - импорт и запуск публичных VLESS/VMess/Trojan/Hysteria 2 конфигураций через Xray-core;
   - активная вкладка сохраняется после перезапуска.
 - `Public Routes` режим:
   - перед первым входом показывает предупреждение о рисках публичных конфигураций;
   - риск-баннер всегда остаётся на экране вкладки;
   - автообновление публичного списка выключено по умолчанию; если включить его в настройках, WorkManager ждёт unmetered-сеть и не низкий заряд, а сам worker дополнительно выбирает физическую `VALIDATED + NOT_VPN + NOT_METERED` сеть;
   - умеет manual refresh, bulk import из clipboard, add/edit/delete/copy конфигураций;
+  - понимает ссылки Hysteria 2 (`hysteria2://`, `hy2://`) с obfuscation Salamander и Gecko, ECH, port hopping, Brutal bandwidth и пином сертификата `pinSHA256`; ссылки Hysteria v1 (`hysteria://`) распознаёт, но считает unsupported и не сохраняет;
   - убирает дубли по canonical fingerprint;
   - поддерживает выбор активного профиля, multi-select, select all и массовое удаление;
   - проверяет выбранный профиль или все профили запросом к YouTube через Xray;
@@ -130,7 +131,7 @@ Android VpnService TUN interface
 Official Xray-core Android binding
         |
         v
-Selected VLESS / VMess / Trojan public profile
+Selected VLESS / VMess / Trojan / Hysteria 2 public profile
         |
         v
 Target websites / services
@@ -154,7 +155,12 @@ https://gitverse.ru/api/repos/zieng2/wl/raw/branch/master/list_universal.txt
 
 Автосинхронизация выключена по умолчанию. Если пользователь включает её в настройках, она планируется через WorkManager каждые 12 часов с flex-окном 4 часа, только после согласия пользователя, при не низком заряде и доступной unmetered-сети. Перед HTTP-запросом worker отдельно выбирает физическую сеть с `INTERNET + VALIDATED + NOT_VPN + NOT_METERED` и открывает соединение через `Network.openConnection`; Android VPN, объявленную как unmetered, worker отфильтровывает. Если подходящей физической сети нет, текущий sync пропускается без retry. Exponential retry от 30 минут применяется только к I/O, HTTP 408/429 и 5xx; постоянные 4xx, oversized/invalid payload и ошибки import повторно устройство не будят. VPN runtime не держит для этой задачи собственный long-lived wake lock, но WorkManager/Android могут кратковременно использовать управляемый ими wake lock на время фактического выполнения worker.
 
-Поддерживаемые share links: `vless://`, `vmess://`, `trojan://`. Parser сохраняет исходную ссылку в Tink-backed secret storage, а в Room кладёт только metadata и fingerprint.
+Поддерживаемые share links: `vless://`, `vmess://`, `trojan://`, `hysteria2://` (и алиас `hy2://`). Parser сохраняет исходную ссылку в Tink-backed secret storage, а в Room кладёт только metadata и fingerprint.
+
+Hysteria 2 запускается через outbound `hysteria` того же Xray-core и всегда работает поверх QUIC с TLS. Порт в ссылке необязателен (по умолчанию `443`), multi-port authority вида `host:443,20000-50000` или `mport`/`ports` включает port hopping (`hop-interval`). Поддерживаются obfuscation Salamander и Gecko (`obfs=salamander` или `obfs=gecko` + `obfs-password` не короче 4 байт), ECH (`ech`), пин сертификата `pinSHA256`, `sni` и Brutal `up`/`down`. Ссылка с испорченным пином или `ech` отвергается, а не подключается без них. Каждый outbound Hysteria 2 раз в 10 секунд шлёт QUIC keep-alive, как официальный клиент, чтобы простаивающий туннель не закрывался по idle timeout. Fingerprint считается по нормализованным параметрам, поэтому `hy2://` и `hysteria2://` одного сервера не дублируются. Ссылки `hysteria://` (Hysteria v1) и ссылки Hysteria 2 с другой obfuscation Xray-core не умеет запускать: они считаются в импорте как `unsupported` и не сохраняются. Ссылки VLESS/VMess/Trojan с транспортом `hysteria` (`type=hysteria`) сохраняются, но не подключаются: share link не передаёт auth этого транспорта.
+Сохранённый ETag публичного источника привязан к ревизии parser'а, поэтому первый sync после обновления, добавившего Hysteria 2, скачивает список целиком и импортирует ссылки, которые старая версия пропускала.
+
+`allowInsecure` из ссылок не передаётся в Xray ни для одного протокола: Xray-core v26 после 2026-06-01 отказывается собирать config с этим полем. Сертификат сервера проверяется всегда; self-signed сервер Hysteria 2 работает только с `pinSHA256` в ссылке.
 
 Smart Connect выполняет HTTP refresh через выбранный физический `Network`, передаёт тот же network в batch Xray probes и затем привязывает к нему live tunnel sockets. Это не даёт проверке случайно уйти через старый validated Wi-Fi, когда фактическим транспортом уже стала мобильная сеть. Smart удаляет недоступные профили после каждой проверки, поэтому ответ `304` по ETag не вернул бы в каталог серверы, удалённые раньше. Поэтому первый проход каждой сессии (Start из приложения или плитки, восстановление Android) и каждый проход после неудачного или ушедшего в кеш refresh скачивают список целиком без `If-None-Match`. Conditional ETag refresh остаётся только для failover внутри сессии, после прохода, который реально достучался до источника. Результат refresh (`source refreshed` с числом добавленных/обновлённых профилей, `source not modified` или `refresh failed`) пишется в diagnostics и не стирается при переходе сессии в Connecting.
 
@@ -232,6 +238,10 @@ Pagination не используется для списка приложени�
 - Публичные `opensource` конфигурации используются на риск пользователя: приложение не может гарантировать безопасность чужого proxy-сервера.
 - Существующее TCP/TLS-соединение нельзя перенести на другой SSH/Xray server только клиентскими средствами. Приложение подавляет ложные и слишком частые rebuild/failover во время активной загрузки, а SSH forwarder перед hot-reconnect явно завершает старые client flows вместо их зависания. При реальной потере сервера или физической сети браузеру всё равно может потребоваться HTTP Range resume (`Продолжить`).
 - Xray runtime core не включается в APK по умолчанию: и Smart Connect, и opensource settings умеют самостоятельно скачать совместимый `libXray` core из release assets этого же репозитория.
+- Hysteria 2 работает только поверх UDP/QUIC: в сетях, где UDP/QUIC заблокирован, маршруты Hysteria 2 не проходят, хотя TCP-маршруты работают. Сервер Hysteria 2 с выключенным UDP relay проходит проверку маршрута, но DNS устройства и другой UDP через него не работают.
+- `insecure=1` без `pinSHA256` не помогает с self-signed сертификатом: Xray-core не умеет пропускать проверку сертификата, такой маршрут работает только с CA-валидным сертификатом.
+- Ранее скачанное старое Xray core может не принять config Hysteria 2 (маршрут получает `Unsupported`); нужно обновить core в настройках.
+- Hysteria v1 (`hysteria://`) не поддерживается.
 
 ## Требования
 

@@ -140,16 +140,174 @@ class RoomProxyProfileRepositoryBatchTest {
         assertTrue(dao.entity(pinned.id)?.isPinned == true)
         assertTrue(dao.entity(fallback.id)?.isSelected == true)
     }
+
+    @Test
+    fun `hysteria 2 import persists the protocol with QUIC transport and TLS`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+
+        val result = repository.import(text = HY2_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+
+        assertEquals(1, result.added)
+        assertEquals(0, result.unsupported)
+        assertEquals(0, result.unsupportedSkipped)
+        val entity = dao.remainingEntities().single()
+        assertEquals(ProxyProtocol.HYSTERIA2.name, entity.protocol)
+        assertEquals(ProxyTransport.HYSTERIA.name, entity.transport)
+        assertEquals(ProxySecurity.TLS.name, entity.security)
+        val profile = repository.getById(entity.id)
+        assertEquals(ProxyProtocol.HYSTERIA2, profile?.protocol)
+        assertEquals(ProxyTransport.HYSTERIA, profile?.transport)
+        assertEquals(ProxySecurity.TLS, profile?.security)
+        assertEquals(HY2_LINK, profile?.rawUri)
+    }
+
+    @Test
+    fun `hy2 and hysteria2 links of one server import once`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+
+        val result = repository.import(
+            text = listOf(HY2_LINK, HY2_ALIAS_LINK).joinToString("\n"),
+            source = ProxyProfileSource.MANUAL,
+            sourceUrl = null,
+        )
+
+        assertEquals(1, result.added)
+        assertEquals(1, result.duplicates)
+        assertEquals(0, result.invalid)
+        assertEquals(1, dao.remainingEntities().size)
+        assertEquals(1, secretStorage.savedSecrets.size)
+    }
+
+    @Test
+    fun `hysteria v1 link is counted as unsupported and never saved`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+
+        val result = repository.import(text = HYSTERIA_V1_LINK, source = ProxyProfileSource.REMOTE, sourceUrl = null)
+
+        assertEquals(1, result.unsupported)
+        assertEquals(1, result.unsupportedSkipped)
+        assertEquals(0, result.invalid)
+        assertEquals(0, result.added)
+        assertEquals(1, result.total)
+        assertTrue(dao.remainingEntities().isEmpty())
+        assertTrue(secretStorage.savedSecrets.isEmpty())
+    }
+
+    @Test
+    fun `unknown hysteria 2 obfuscation is unsupported while a malformed line stays invalid`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+
+        val result = repository.import(
+            text = listOf(HY2_UNKNOWN_OBFS_LINK, "not a share link").joinToString("\n"),
+            source = ProxyProfileSource.MANUAL,
+            sourceUrl = null,
+        )
+
+        assertEquals(1, result.unsupported)
+        assertEquals(1, result.unsupportedSkipped)
+        assertEquals(1, result.invalid)
+        assertEquals(2, result.total)
+        assertTrue(dao.remainingEntities().isEmpty())
+        assertTrue(secretStorage.savedSecrets.isEmpty())
+    }
+
+    @Test
+    fun `update with a hysteria v1 link reports unsupported and keeps the profile`() = runBlocking {
+        val existing = profileEntity(id = "existing")
+        val dao = RecordingProxyProfileDao(mapOf(existing.id to existing))
+        val secretStorage = RecordingSecretStorage(mapOf(existing.secretId to "uri://${existing.id}"))
+        val repository = repository(dao, secretStorage)
+
+        val result = repository.update(id = existing.id, rawUri = HYSTERIA_V1_LINK)
+
+        assertEquals(1, result.unsupported)
+        assertEquals(1, result.unsupportedSkipped)
+        assertEquals(0, result.invalid)
+        assertEquals(0, result.updated)
+        assertEquals(existing, dao.entity(existing.id))
+        assertTrue(secretStorage.savedSecrets.isEmpty())
+        assertTrue(secretStorage.deletedSecretIds.isEmpty())
+    }
+
+    @Test
+    fun `a saved route with an unknown transport is unsupported but not skipped`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+
+        val first = repository.import(UNKNOWN_TRANSPORT_LINK, ProxyProfileSource.MANUAL, sourceUrl = null)
+        val again = repository.import(UNKNOWN_TRANSPORT_LINK, ProxyProfileSource.MANUAL, sourceUrl = null)
+
+        assertEquals(1, first.added)
+        assertEquals(1, first.unsupported)
+        assertEquals(0, first.unsupportedSkipped)
+        // The repeated line is only a duplicate: nothing was left out because the engine can't run it.
+        assertEquals(1, again.duplicates)
+        assertEquals(0, again.unsupportedSkipped)
+        assertEquals(1, dao.remainingEntities().size)
+    }
+
+    @Test
+    fun `update with a hysteria 2 link the engine can't run is skipped as unsupported`() = runBlocking {
+        val existing = profileEntity(id = "existing")
+        val dao = RecordingProxyProfileDao(mapOf(existing.id to existing))
+        val secretStorage = RecordingSecretStorage(mapOf(existing.secretId to "uri://${existing.id}"))
+        val repository = repository(dao, secretStorage)
+
+        val unsupported = repository.update(id = existing.id, rawUri = HY2_UNKNOWN_OBFS_LINK)
+        val malformed = repository.update(id = existing.id, rawUri = "hy2://correct-horse@")
+
+        assertEquals(1, unsupported.unsupportedSkipped)
+        assertEquals(0, malformed.unsupportedSkipped)
+        assertEquals(1, malformed.invalid)
+        assertEquals(existing, dao.entity(existing.id))
+    }
+
+    private fun repository(
+        dao: ProxyProfileDao,
+        secretStorage: SecretStorage,
+    ) = RoomProxyProfileRepository(
+        dao = dao,
+        secretStorage = secretStorage,
+        parser = ProxyShareLinkParser(),
+        ioDispatcher = Dispatchers.Unconfined,
+    )
+
+    private companion object {
+        const val HY2_LINK = "hysteria2://correct-horse@hy2.example.test:443?sni=hy2.example.test#Hy2"
+
+        // The alias scheme, the default port and `peer` for `sni` describe the same outbound.
+        const val HY2_ALIAS_LINK = "hy2://correct-horse@hy2.example.test/?peer=hy2.example.test#Alias"
+        const val HY2_UNKNOWN_OBFS_LINK =
+            "hysteria2://correct-horse@hy2.example.test:443?obfs=xplus&obfs-password=battery#Xplus"
+        const val HYSTERIA_V1_LINK =
+            "hysteria://hy1.example.test:443?protocol=udp&auth=correct-horse&upmbps=10&downmbps=50#V1"
+        const val UNKNOWN_TRANSPORT_LINK =
+            "vless://00000000-0000-4000-8000-000000000001@quic.example.test:443?type=quic#Quic"
+    }
 }
 
 private class RecordingSecretStorage(
-    private val secrets: Map<String, String>,
+    initialSecrets: Map<String, String>,
 ) : SecretStorage {
+    private val secrets = initialSecrets.toMutableMap()
     var getSecretsCalls = 0
         private set
+    val savedSecrets = linkedMapOf<String, String>()
     val deletedSecretIds = hashSetOf<String>()
 
-    override suspend fun saveSecret(id: String, value: String) = Unit
+    override suspend fun saveSecret(id: String, value: String) {
+        secrets[id] = value
+        savedSecrets[id] = value
+    }
 
     override suspend fun getSecret(id: String): String? = secrets[id]
 
@@ -159,6 +317,7 @@ private class RecordingSecretStorage(
     }
 
     override suspend fun deleteSecret(id: String) {
+        secrets.remove(id)
         deletedSecretIds += id
     }
 }
@@ -186,9 +345,13 @@ private class RecordingProxyProfileDao(
         return entities[id]
     }
 
-    override suspend fun getByFingerprint(fingerprint: String): ProxyProfileEntity? = null
+    override suspend fun getByFingerprint(fingerprint: String): ProxyProfileEntity? {
+        return entities.values.firstOrNull { entity -> entity.fingerprint == fingerprint }
+    }
 
-    override suspend fun getByFingerprints(fingerprints: List<String>): List<ProxyProfileEntity> = emptyList()
+    override suspend fun getByFingerprints(fingerprints: List<String>): List<ProxyProfileEntity> {
+        return entities.values.filter { entity -> entity.fingerprint in fingerprints }
+    }
 
     override suspend fun getSelected(): ProxyProfileEntity? {
         return entities.values.firstOrNull { entity -> entity.isSelected && !entity.isStale }
@@ -201,9 +364,13 @@ private class RecordingProxyProfileDao(
             ?.id
     }
 
-    override suspend fun upsert(entity: ProxyProfileEntity) = Unit
+    override suspend fun upsert(entity: ProxyProfileEntity) {
+        entities[entity.id] = entity
+    }
 
-    override suspend fun upsertAll(entities: List<ProxyProfileEntity>) = Unit
+    override suspend fun upsertAll(entities: List<ProxyProfileEntity>) {
+        entities.forEach { entity -> this.entities[entity.id] = entity }
+    }
 
     override suspend fun deleteByIds(ids: List<String>) {
         deleteByIdsBatches += ids
@@ -256,6 +423,8 @@ private class RecordingProxyProfileDao(
     }
 
     fun remainingIds(): Set<String> = entities.keys
+
+    fun remainingEntities(): Collection<ProxyProfileEntity> = entities.values
 
     fun entity(id: String): ProxyProfileEntity? = entities[id]
 }

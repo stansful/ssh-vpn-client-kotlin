@@ -6,7 +6,7 @@ plugins {
     id("io.github.takahirom.roborazzi")
 }
 
-val appVersionName = "3.4.1"
+val appVersionName = "3.4.2"
 
 val releaseStoreFilePath = providers.environmentVariable("SSH_VPN_RELEASE_STORE_FILE")
     .orElse(providers.gradleProperty("SSH_VPN_RELEASE_STORE_FILE"))

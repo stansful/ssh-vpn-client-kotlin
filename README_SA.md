@@ -31,7 +31,7 @@ flowchart TD
     E --> F["Target websites and services"]
     C --> G["Diagnostics UI"]
     B --> H["Official Xray-core binding"]
-    H --> I["Selected public VLESS/VMess/Trojan profile"]
+    H --> I["Selected public VLESS/VMess/Trojan/Hysteria 2 profile"]
     I --> F
 ```
 
@@ -75,8 +75,13 @@ flowchart TD
 - VPN runtime не держит для sync собственный long-lived wake lock; WorkManager/Android могут использовать кратковременный управляемый ими wake lock только во время фактического выполнения worker.
 - Пользователь может нажать `Refresh` вручную.
 - Пользователь может добавить один share link вручную или импортировать bulk-текст из clipboard.
-- Поддерживаются share links `vless://`, `vmess://`, `trojan://`.
-- Дубли удаляются по canonical fingerprint.
+- Поддерживаются share links `vless://`, `vmess://`, `trojan://`, `hysteria2://` и его алиас `hy2://` (Hysteria 2).
+- Ссылки `hysteria://` (Hysteria v1) распознаются, но Xray-core их не запускает: в итогах импорта они считаются `unsupported` и не сохраняются. Так же считаются ссылки Hysteria 2 с obfuscation, отличной от Salamander и Gecko.
+- Hysteria 2: порт в ссылке необязателен (по умолчанию `443`), список портов в адресе (`host:443,20000-50000`) или параметр `mport`/`ports` включает port hopping, auth может быть пустым или вида `user:pass`. Поддерживаются obfuscation Salamander и Gecko (`obfs=salamander` или `obfs=gecko` + `obfs-password` не короче 4 байт), ECH (`ech`), пин сертификата `pinSHA256`, `sni`, `hop-interval` и Brutal `up`/`down`.
+- Ссылка Hysteria 2 с испорченным `pinSHA256` или `ech`, без `obfs-password` или со слишком коротким `obfs-password` считается `invalid` и не сохраняется: подключение без пина или ECH, которые просит ссылка, молча ослабило бы её.
+- Ссылки VLESS/VMess/Trojan с транспортом `hysteria` (`type=hysteria`) сохраняются, но считаются `unsupported` и не подключаются: share link не передаёт auth этого транспорта.
+- Сохранённый ETag источника привязан к URL и к ревизии parser'а: после обновления, научившего parser новым ссылкам (например, Hysteria 2), первый sync скачивает список целиком, а не получает `304`.
+- Дубли удаляются по canonical fingerprint. У Hysteria 2 он считается по нормализованным параметрам, поэтому `hy2://` и `hysteria2://` одного сервера, а также ссылки, отличающиеся только алиасами параметров (`peer`/`sni`, `pcs`/`pinSHA256`), — один профиль.
 - Исходный share link хранится как секрет; Room хранит metadata, fingerprint и UI-состояние.
 
 Работа со списком:
@@ -325,6 +330,11 @@ Metadata проверки, незавершённой загрузки и про
 - SSH-серверная часть не меняется.
 - SSH TUN использует MTU 8500/MSS 8460, bounded upload backpressure и единый TUN writer; JSch channel/socket/input windows равны 4 MiB во всех режимах. Battery Saver/low-RAM больше не уменьшают transport credit. Все изменения находятся на клиенте.
 - Для `opensource` используется официальный Xray-core Android binding, собранный из закреплённых исходников.
+- Hysteria 2 работает только поверх UDP/QUIC. В сетях, где UDP/QUIC заблокирован, маршруты Hysteria 2 не работают, хотя TCP-маршруты VLESS/VMess/Trojan проходят.
+- Сервер Hysteria 2 с выключенным UDP relay проходит проверку маршрута (она идёт по TCP), но DNS устройства и другой UDP через него не работают.
+- Ссылка не может отключить проверку TLS-сертификата: `allowInsecure` не передаётся в Xray ни для одного протокола (Xray-core v26 после 2026-06-01 не собирает config с этим полем). `insecure=1` без `pinSHA256` работает только с CA-валидным сертификатом; self-signed серверу Hysteria 2 нужен пин в ссылке.
+- Ранее скачанное старое Xray core может не принять config Hysteria 2 — маршрут получает `Unsupported` до обновления core.
+- Hysteria v1 не поддерживается.
 - Публичные proxy-серверы не контролируются приложением. Пользователь принимает риск до входа во вкладку, риск-баннер остаётся всегда.
 - Автосинхронизация публичных конфигов выключена по умолчанию; при включении планируется раз в 12 часов с flex 4 часа при unmetered-сети и не низком заряде, затем worker требует физическую `VALIDATED + NOT_VPN + NOT_METERED` сеть и привязывает HTTP к ней через `Network.openConnection`.
 - Производительность зависит от:
@@ -388,6 +398,11 @@ Release APK:
 - Пользователь может открыть вкладку `opensource` только после принятия предупреждения.
 - Вкладка `opensource` сохраняет active tab после перезапуска.
 - Публичные профили импортируются из remote source, clipboard и manual add.
+- Ссылки `hysteria2://` и `hy2://` импортируются как Hysteria 2; `hy2://` и `hysteria2://` одного сервера дают один профиль.
+- Ссылка `hysteria://` (v1) не сохраняется и попадает в итог импорта как `unsupported`, а не `invalid`.
+- Connect в `opensource` через профиль Hysteria 2 (в том числе с Salamander, Gecko, ECH, port hopping и `pinSHA256`) пропускает трафик через Xray-core.
+- Ссылка Hysteria 2 с испорченным `pinSHA256` или `ech` или с `obfs-password` короче 4 байт не сохраняется.
+- В форме редактирования ссылка открывается замаскированной: auth Hysteria 2 и значения `obfs-password`/`auth` скрыты. Форма добавления показывает ссылку так, как её ввели, маску включает кнопка-глаз. При `insecure=1` без `pinSHA256` форма добавления показывает предупреждение, но ссылку сохраняет.
 - Дубли публичных профилей не размножаются в списке.
 - Пользователь может выбрать, скопировать, отредактировать и удалить публичный профиль.
 - Multi-select позволяет удалить несколько публичных профилей и выбрать все.

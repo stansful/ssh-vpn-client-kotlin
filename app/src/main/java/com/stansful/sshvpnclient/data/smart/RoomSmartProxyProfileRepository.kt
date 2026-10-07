@@ -105,7 +105,9 @@ class RoomSmartProxyProfileRepository(
             var added = 0
             var updated = 0
             var duplicates = policyAllowedProfiles.size - uniqueProfiles.size
-            var unsupported = successful.size - policyAllowedProfiles.size
+            // Well-known links the engine can't run (Hysteria v1…) are reported apart from malformed ones.
+            val unsupportedSkipped = parsedResults.count { it is ProxyParseResult.Failure && it.unsupported }
+            var unsupported = successful.size - policyAllowedProfiles.size + unsupportedSkipped
 
             val existingByFingerprint = successful
                 .map(ParsedProxyProfile::fingerprint)
@@ -176,9 +178,10 @@ class RoomSmartProxyProfileRepository(
                 added = added,
                 updated = updated,
                 duplicates = duplicates,
-                invalid = parsedResults.count { it is ProxyParseResult.Failure },
+                invalid = parsedResults.count { it is ProxyParseResult.Failure && !it.unsupported },
                 unsupported = unsupported,
                 total = parsedResults.size,
+                unsupportedSkipped = unsupportedSkipped,
             )
         }
     }
@@ -187,8 +190,14 @@ class RoomSmartProxyProfileRepository(
         mutationMutex.withLock {
             withContext(ioDispatcher) {
                 val existing = dao.getById(id) ?: return@withContext emptyImportResult(invalid = 1)
-                val parsed = parser.parse(rawUri) as? ProxyParseResult.Success
-                    ?: return@withContext emptyImportResult(invalid = 1)
+                val parsed = when (val result = parser.parse(rawUri)) {
+                    is ProxyParseResult.Success -> result
+                    is ProxyParseResult.Failure -> return@withContext if (result.unsupported) {
+                        emptyImportResult(unsupported = 1, unsupportedSkipped = 1)
+                    } else {
+                        emptyImportResult(invalid = 1)
+                    }
+                }
                 if (parsed.profile.name.contains(SMART_EXCLUDED_NAME_MARKER)) {
                     return@withContext emptyImportResult(unsupported = 1)
                 }
@@ -349,6 +358,7 @@ class RoomSmartProxyProfileRepository(
         duplicates: Int = 0,
         invalid: Int = 0,
         unsupported: Int = 0,
+        unsupportedSkipped: Int = 0,
     ) = ProxyImportResult(
         added = 0,
         updated = updated,
@@ -356,6 +366,7 @@ class RoomSmartProxyProfileRepository(
         invalid = invalid,
         unsupported = unsupported,
         total = 1,
+        unsupportedSkipped = unsupportedSkipped,
     )
 
     private companion object {

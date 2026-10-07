@@ -87,7 +87,9 @@ class RoomProxyProfileRepository(
             var added = 0
             var updated = 0
             var duplicates = successful.size - uniqueProfiles.size
-            var unsupported = 0
+            // Well-known links the engine can't run (Hysteria v1…) are reported apart from malformed ones.
+            val unsupportedSkipped = parsedResults.count { it is ProxyParseResult.Failure && it.unsupported }
+            var unsupported = unsupportedSkipped
 
             val existingByFingerprint = uniqueProfiles
                 .map(ParsedProxyProfile::fingerprint)
@@ -150,9 +152,10 @@ class RoomProxyProfileRepository(
                 added = added,
                 updated = updated,
                 duplicates = duplicates,
-                invalid = parsedResults.count { it is ProxyParseResult.Failure },
+                invalid = parsedResults.count { it is ProxyParseResult.Failure && !it.unsupported },
                 unsupported = unsupported,
                 total = parsedResults.size,
+                unsupportedSkipped = unsupportedSkipped,
             )
         }
     }
@@ -160,8 +163,14 @@ class RoomProxyProfileRepository(
     override suspend fun update(id: String, rawUri: String): ProxyImportResult = mutationMutex.withLock {
         withContext(ioDispatcher) {
             val existing = dao.getById(id) ?: return@withContext emptyImportResult(invalid = 1)
-            val parsed = parser.parse(rawUri) as? ProxyParseResult.Success
-                ?: return@withContext emptyImportResult(invalid = 1)
+            val parsed = when (val result = parser.parse(rawUri)) {
+                is ProxyParseResult.Success -> result
+                is ProxyParseResult.Failure -> return@withContext if (result.unsupported) {
+                    emptyImportResult(unsupported = 1, unsupportedSkipped = 1)
+                } else {
+                    emptyImportResult(invalid = 1)
+                }
+            }
             val duplicate = dao.getByFingerprint(parsed.profile.fingerprint)
             if (duplicate != null && duplicate.id != id) {
                 return@withContext emptyImportResult(duplicates = 1)
@@ -271,13 +280,16 @@ class RoomProxyProfileRepository(
         updated: Int = 0,
         duplicates: Int = 0,
         invalid: Int = 0,
+        unsupported: Int = 0,
+        unsupportedSkipped: Int = 0,
     ) = ProxyImportResult(
         added = 0,
         updated = updated,
         duplicates = duplicates,
         invalid = invalid,
-        unsupported = 0,
+        unsupported = unsupported,
         total = 1,
+        unsupportedSkipped = unsupportedSkipped,
     )
 
 }

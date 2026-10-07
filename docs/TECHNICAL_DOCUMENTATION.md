@@ -10,7 +10,7 @@
 
 - `shadow-ssh`: VPN поверх SSH. Android `VpnService` поднимает TUN-интерфейс, а пользовательский TCP/DNS forwarder прокидывает трафик через SSH `direct-tcpip` каналы.
 - `smart` (`Smart Connect`): изолированно обновляет и проверяет публичный Xray-каталог, удаляет подтверждённо недоступные профили, выбирает минимальный ping и автоматически восстанавливает VPN при подтверждённом отказе.
-- `Public Routes` (persisted/internal id `opensource`): VPN поверх публичных VLESS/VMess/Trojan конфигураций. Android `VpnService` поднимает TUN-интерфейс, а runtime Xray core обрабатывает TUN и выбранный proxy profile.
+- `Public Routes` (persisted/internal id `opensource`): VPN поверх публичных VLESS/VMess/Trojan/Hysteria 2 конфигураций. Android `VpnService` поднимает TUN-интерфейс, а runtime Xray core обрабатывает TUN и выбранный proxy profile.
 
 Все режимы используют общий routing mode, общий выбор приложений, общую тему, updater приложения и process-wide VPN state/lease. Smart-каталог, его Room rows, selection, sync metadata и Tink secrets не пересекаются с OpenSource. Одновременно активной может быть только одна VPN-сессия.
 
@@ -203,6 +203,7 @@ Entities:
 Хранит public/manual proxy profiles:
 
 - `id`, `name`, `protocol`, `host`, `port`.
+- `protocol` хранится именем enum `ProxyProtocol` (`VLESS`, `VMESS`, `TROJAN`, `HYSTERIA2`) и читается обратно через `enumValueOf`, поэтому имена entries нельзя переименовывать.
 - `transport`, `security`, `flow`.
 - `source`: `MANUAL`, `CLIPBOARD`, `REMOTE`.
 - `sourceUrl`.
@@ -495,6 +496,9 @@ SSH не умеет форвардить UDP: `direct-tcpip` - это тольк
   сетей). Звонки через такой сервер не поднимутся, остальной Telegram не затронут.
 - Полноценный UDP (звонки не-Telegram, игры, QUIC) доступен только в режиме `opensource`: TUN-
   инбаунд Xray несёт TCP и UDP, а VLESS/VMess/Trojan-аутбаунд умеет UDP поверх своего протокола.
+  Hysteria 2 сама работает поверх UDP/QUIC и передаёт UDP приложений через UDP relay сервера. Если
+  relay на сервере выключен, TCP проходит (и проверки маршрута зелёные), а UDP, включая DNS
+  устройства, не работает (раздел 33).
 - Relay работает только для рефлекторов Telegram: у других протоколов нет TCP-транспорта с той же
   семантикой датаграмм.
 - Если Telegram договорился о версии стека без reflector-поддержки, звонок всё равно может не
@@ -689,19 +693,54 @@ Terminal:
 - `vless://`.
 - `vmess://`.
 - `trojan://`.
+- `hysteria2://` и его алиас `hy2://` (Hysteria 2).
+
+`hysteria://` (Hysteria v1) распознаётся, но не поддерживается: Xray-core реализует только Hysteria 2. Parser возвращает `Failure("Hysteria v1 is not supported", unsupported = true)`, такая ссылка никогда не сохраняется.
 
 Parser:
 
 - Максимальная длина одной ссылки: 65 536 символов.
 - Максимум строк при bulk import: 10000.
 - Пустые строки и строки `#...` игнорируются.
+- Схема определяется без учёта регистра. `ProxyProtocol.fromScheme` сопоставляет и `scheme`, и `aliases` (`hy2` у `HYSTERIA2`).
 - Для VLESS/Trojan используется URI parser.
 - Для VMess используется base64 JSON.
+- Для Hysteria 2 используется отдельный `Hysteria2LinkParser` без `java.net.URI`: тот не читает multi-port authority (`host:443,20000-50000`), а порт в ссылке Hysteria 2 необязателен.
 - Canonical fingerprint считается через SHA-256 по нормализованной конфигурации.
+- `ProxyParseResult.Failure(reason, unsupported)`: `unsupported = true` помечает известную ссылку, которую движок не может запустить. Причины, которые Add sheet превращает в свои сообщения, собраны в `ProxyParseReasons`: `Host is missing`, `Port is invalid`, `Hysteria v1 is not supported`, `Obfuscation is not supported`, `Obfuscation password is missing`, `Obfuscation password is too short`, `Certificate pin is invalid`, `ECH config is invalid`.
+
+Hysteria 2 (`Hysteria2LinkParser`):
+
+- Формат: `hysteria2://[auth@]host[:port[,port|from-to]...][/]?query#name`.
+- Порт необязателен, по умолчанию `443`. Multi-port authority (`host:443,20000-50000` или `host:20000-50000`): `port` профиля — первый порт так, как он записан в ссылке, а весь список становится hop list. Каждый порт `1..65535`, в списке не больше 64 элементов, иначе `Port is invalid`.
+- IPv6 хранится в квадратных скобках, как его отдаёт `URI.host`. Невалидный хост — `Host is missing`.
+- `auth` — percent-decoded userinfo целиком (до последнего `@`): как у официального клиента (Go `url.Userinfo`), `user:pass` остаётся одной строкой с `:`, а литеральный `+` остаётся `+` и не превращается в пробел, как в query (официальный `hysteria share` выдаёт, например, `abc+def@`). Без userinfo берётся query `auth`. Пустой auth допустим.
+- Ключи query читаются без учёта регистра. Секреты (`obfs-password`, query `auth`, `ech`) не обрезаются, как у `url.Values.Get` в официальном клиенте; остальные значения обрезаются. Пустое значение считается отсутствующим и не перекрывает свой алиас: `sni=&peer=x` даёт `sni` = `x`.
+- Всегда `protocol = HYSTERIA2`, `transport = HYSTERIA`, `security = TLS`, `flow = null`.
+- Имя — `#fragment`, иначе `HYSTERIA2 host:port` (то же правило `${protocol.name} host:port`, что у остальных протоколов).
+- Отказы. Настройки, которые не принимает официальный клиент, ломают ссылку, а не отбрасываются: подключение без пина или ECH, которые просит ссылка, молча ослабило бы её.
+  - `obfs`, отличный от `salamander`, `gecko`, `none`, `plain` или пустого значения, даёт `Obfuscation is not supported` (`unsupported = true`, не сохраняется). `none`, `plain` и пусто означают «без obfuscation»; `obfs-password` без `obfs` тоже ничего не включает.
+  - `salamander` и `gecko` требуют `obfs-password`: без него — `Obfuscation password is missing`, пароль короче 4 байт (UTF-8) — `Obfuscation password is too short`. Xray и официальный клиент отвергают такой пароль только при подключении.
+  - Задан `pinSHA256`/`pcs`, но хоть один пин после нормализации не состоит из 64 hex-символов — `Certificate pin is invalid` (fail closed: официальный клиент такую ссылку тоже отвергает).
+  - Непустой `ech`, который не читается как непустой base64, — `ECH config is invalid` (fail closed; значение с `://` Xray принял бы за DNS-сервер и запрашивал бы ECH config через DNS).
+  - Все эти отказы, кроме неподдерживаемого `obfs`, — обычные невалидные ссылки.
+- В `parameters` попадают только нормализованные ключи `Hysteria2Parameters`, поэтому builder выдаёт их как есть:
+  - `sni` — из `sni`, иначе из `peer`;
+  - `pinsha256` — из `pinSHA256`, иначе из `pcs`: разделители `:`, `-` и пробельные символы удаляются, нижний регистр, повторы убираются, каждый пин ровно 64 hex-символа, список через запятую;
+  - `insecure` = `1`, если `insecure`, `allowInsecure` или `allow_insecure` равен `1`/`true`/`t`/`yes`. В Xray config он не попадает (раздел 22), его читает только Add sheet для предупреждения;
+  - `obfs` = `salamander` или `gecko` вместе с `obfs-password`;
+  - `ech` — ECH config list: base64 обычный или URL-safe, паддинг необязателен, `+`, который декодирование query превратило в пробел, восстанавливается. Значение перекодируется в standard base64 с паддингом: другой формат Xray-core не декодирует;
+  - `ports` — hop list из multi-port authority, иначе из query `mport`, иначе из `ports` (диапазоны через `-` или `:`); невалидный query-список игнорируется, ссылка остаётся валидной без hopping. Диапазоны сортируются, пересекающиеся и соседние сливаются (как `PortUnion` официального клиента), поэтому в списке не больше 65 535 портов: Xray разворачивает hop list порт за портом, и без слияния короткая ссылка с 64 повторами `1-65535` заняла бы память миллионами адресов. `port` профиля слияние не меняет;
+  - `hop-interval` — из `hop-interval`, `hopInterval` или `hop_interval`: `30` или `10-30`, суффикс `s` допускается. `0` (и `0-0`) означает «не задан», как у остальных клиентов: ключ не сохраняется, и Xray берёт свой default 30 секунд; граница `0` внутри диапазона читается как `30`. Положительные значения меньше 5 поднимаются до 5 секунд (меньшие Xray отвергает). Сохраняется только вместе с `ports`;
+  - `up`/`down` — из `up`/`upmbps` и `down`/`downmbps`. Число без единиц означает Mbps; принимаются единицы Xray `b`/`k`/`m`/`g`/`t` (плюс `b`/`bps`). Значения меньше 65 536 байт/с отбрасываются: Xray их отвергает, congestion control тогда остаётся BBR.
+- Прочие параметры (`alpn`, `fp`, `security`, `type`, `fastopen`, …) игнорируются.
+- Fingerprint: SHA-256 от `hysteria2://` + auth + `@` + host в нижнем регистре + `:` + port + отсортированных `|key=value` нормализованных параметров. Auth и каждое значение экранируются (`%` → `%25`, `|` → `%7C`, `=` → `%3D`, `@` → `%40`), чтобы секрет с `|` или `=` не мог изобразить другой параметр: `obfs-password=x%7Csni%3Dy` и `obfs-password=x&sni=y` дают разные fingerprint. Так как в fingerprint входят только нормализованные параметры, `hy2://` и `hysteria2://` одного сервера, а также ссылки, отличающиеся только алиасами параметров (`peer`/`sni`, `pcs`/`pinSHA256`, `mport`/`ports`, `upmbps`/`up`), записью пинов или порядком hop-диапазонов и игнорируемыми параметрами (`fp`, `alpn`, …), считаются дубликатами.
+- Нормализацию нужно держать стабильной. Room хранит fingerprint, посчитанный при импорте, и любое изменение правил нормализации меняет fingerprint тех же ссылок, то есть ключ уже сохранённых строк: прежние профили перестают совпадать со своими ссылками при следующем импорте, refresh добавит их заново, а старые remote rows уйдут в stale.
 
 Repository import:
 
 - Deduplicate по fingerprint.
+- `Failure(unsupported = true)` (Hysteria v1, Hysteria 2 с неподдерживаемым `obfs`) считается в сводке как `unsupported`, а не `invalid`, и не сохраняется. Edit такой ссылкой возвращает `unsupported = 1` и не меняет профиль. Профили с `UNKNOWN` transport/security (в том числе VLESS/VMess/Trojan с транспортом `hysteria`) по-прежнему сохраняются и тоже считаются `unsupported`. Так же считает изолированный repository Smart Connect.
 - Raw URI сохраняется в Tink secret storage.
 - Metadata сохраняется в Room.
 - После импорта хотя бы одного валидного профиля все `REMOTE` профили, отсутствующие в новом sync (`lastSeenAt < syncStartedAt`), помечаются stale. `sourceUrl` в условии не участвует: remote source один, а совпадение по URL оставляло бы вечно свежими строки, импортированные до смены `OpenSourcePolicy.SOURCE_URL`. То же правило действует в изолированной таблице Smart Connect.
@@ -715,7 +754,7 @@ Public sync:
 - User-Agent: `shadow-ssh-android-opensource-sync`.
 - Timeout: connect 10 секунд, read 15 секунд.
 - Response size limit: 2 MiB.
-- Поддерживается ETag через `If-None-Match`, кроме forced refresh. ETag хранится вместе с URL, который его выдал (`etag` + `etag_url` в prefs synchronizer-а), и отправляется только если `etag_url` совпадает с текущим source URL. ETag без сохранённого URL (записанный до этого изменения) игнорируется, поэтому первый sync после обновления — одна полная загрузка. Ответ `200` без заголовка ETag удаляет оба ключа.
+- Поддерживается ETag через `If-None-Match`, кроме forced refresh. ETag хранится вместе с URL, который его выдал (`etag` + `etag_url` в prefs synchronizer-а), и отправляется только если `etag_url` совпадает с текущим source URL. ETag без сохранённого URL (записанный до этого изменения) игнорируется, поэтому первый sync после обновления — одна полная загрузка. ETag также привязан к ревизии parser'а, импортировавшей список (`etag_parser_revision`, `IMPORT_PARSER_REVISION`; сборки без записанной ревизии считаются ревизией 1, ревизия 2 добавила Hysteria 2): при другой или отсутствующей ревизии `If-None-Match` не отправляется. Иначе `304` для неизменённого списка оставил бы неимпортированными строки, которые старый parser пропускал. `IMPORT_PARSER_REVISION` нужно поднимать каждый раз, когда parser начинает принимать новые типы ссылок. Ответ `200` без заголовка ETag удаляет все три ключа.
 - Structured cancellation watcher вызывает `HttpURLConnection.disconnect()` при отмене, поэтому blocking `responseCode`/`read` не удерживает worker до сетевого timeout; normal/error path также всегда закрывает connection и watcher.
 
 Background sync:
@@ -804,6 +843,7 @@ Supported outbound protocols:
 - VLESS.
 - VMess.
 - Trojan.
+- Hysteria 2: `ProxyProtocol.HYSTERIA2`, в Xray outbound `protocol: "hysteria"` (`ProxyProtocol.xrayProtocol`).
 
 Supported transports:
 
@@ -813,7 +853,7 @@ Supported transports:
 - WebSocket.
 - HTTP Upgrade.
 - mKCP.
-- Hysteria.
+- Hysteria: только у профилей Hysteria 2, которые собираются отдельной веткой (ниже). VLESS/Trojan с `type=hysteria` (VMess с `net=hysteria`) parser сводит к `UNKNOWN`: такому транспорту нужна собственная auth транспорта, которую share link не передаёт. Такой профиль сохраняется, но считается unsupported и не подключается; общая ветка `buildStreamSettings` для `HYSTERIA` ничего не выдаёт.
 
 Supported security:
 
@@ -822,6 +862,49 @@ Supported security:
 - Reality.
 
 Unknown transport/security считаются unsupported для checks и не должны запускаться в Xray.
+
+TLS settings (`buildTlsSettings`, все протоколы кроме Hysteria 2): `serverName` из `sni` или `host`, `fingerprint` из `fp`, `alpn`. Параметр `allowInsecure` из ссылки намеренно игнорируется для любого протокола: Xray-core v26 после 2026-06-01 отказывается собирать любой config, где есть `allowInsecure` (`The feature allowInsecure has been removed and migrated to pinnedPeerCertSha256`). Раньше такая ссылка ломала весь маршрут; теперь сертификат проверяется обычным образом, и маршрут работает, если сертификат сервера валиден.
+
+Hysteria 2 outbound (`buildHysteria2StreamSettings`). Parser уже нормализовал `Hysteria2Parameters`, поэтому builder выдаёт только значения, которые принимает Xray-core v26. Например, неизвестное имя congestion заставило бы native dialer паниковать и уронило бы весь процесс приложения.
+
+```text
+{
+  "protocol": "hysteria",
+  "settings": { "version": 2, "address": <host>, "port": <port> },
+  "streamSettings": {
+    "network": "hysteria",
+    "security": "tls",
+    "tlsSettings": {
+      "serverName": <sni или host без []>,
+      "pinnedPeerCertSha256": <pinsha256>,           // только если есть пины
+      "echConfigList": <ech>                         // только если есть ech
+    },
+    "hysteriaSettings": { "version": 2, "auth": <auth> },
+    "finalmask": {                                   // есть всегда
+      "udp": [{                                      // только с obfs
+        "type": "salamander",
+        "settings": { "password": <obfs-password>, "packetSize": "512-1200" }  // packetSize только у gecko
+      }],
+      "quicParams": {
+        "keepAlivePeriod": 10,                       // всегда
+        "brutalUp": <up>, "brutalDown": <down>,      // только заданные направления
+        "udpHop": { "ports": <ports>, "interval": <hop-interval> }  // только с ports, interval только если задан
+      }
+    }
+  }
+}
+```
+
+- `version` всегда `2` (`HYSTERIA_VERSION`): Xray-core реализует только Hysteria 2 и отвергает другие версии.
+- TLS обязателен: Hysteria 2 всегда работает поверх QUIC с TLS, `security` из ссылки не читается.
+- `serverName` задаётся всегда. Hysteria dialer строит TLS config без destination, и без явного `serverName` quic-go отправил бы и проверял бы placeholder-хост `hysteria`.
+- Self-signed сертификат сервера Xray-core принимает только через пин `pinnedPeerCertSha256`; `allowInsecure` не выдаётся (см. выше), поэтому `insecure=1` без `pinSHA256` работает лишь с CA-валидным сертификатом.
+- `alpn`, `fingerprint`, `congestion` и `allowInsecure` не выдаются. Без явного congestion Xray использует Brutal, когда обе стороны объявили bandwidth, и BBR в остальных случаях, как официальный клиент.
+- `echConfigList` — ECH config list из ссылки в standard base64 с паддингом. Невалидный `ech` parser отвергает (`ECH config is invalid`), поэтому ссылка с ECH никогда не подключается без него.
+- `finalmask.udp` — obfuscation. Salamander выдаётся как есть. Gecko (Salamander плюс фрагментация handshake) Xray запускает как маску `salamander` с диапазоном размеров пакетов; в URI официального клиента размеров нет, поэтому builder явно пишет его defaults `packetSize: "512-1200"` (они же defaults Xray).
+- `finalmask.quicParams.keepAlivePeriod: 10` выдаётся всегда (`HYSTERIA_KEEP_ALIVE_SECONDS`, default официального клиента; Xray принимает 2..60). Без него Xray не шлёт QUIC keep-alive, и простаивающий туннель (например, push-соединение мессенджера при выключенном экране) упирался бы в 30-секундный idle timeout и сбрасывал бы все потоки. Поэтому `finalmask` с `quicParams` есть у каждого outbound Hysteria 2.
+- `quicParams.brutalUp`/`brutalDown` — Brutal bandwidth, только для заданных в ссылке направлений; `quicParams.udpHop` — port hopping, только с hop list, `interval` только если он задан в ссылке (иначе default Xray 30 секунд).
+- `auth` и `obfs-password` — секреты: они есть только в raw URI (Tink) и в inline JSON для native core и не должны попадать в diagnostics. В UI маскированный вид ссылки скрывает auth Hysteria 2 и значения `obfs-password`, `auth`, `auth_str`, `obfsparam`. Форма Edit открывается замаскированной, а Add показывает ссылку так, как её ввели, пока пользователь не нажмёт иконку-глаз.
 
 ## 23. Xray runtime core
 
@@ -1091,6 +1174,7 @@ Backup:
 - Xray core download URL ограничен GitHub release path.
 - Xray core asset проверяется на наличие `classes.dex` и native library под runtime ABI.
 - Public configs имеют explicit warning/consent.
+- Ссылка не может отключить проверку TLS-сертификата: `allowInsecure` не выдаётся ни для одного протокола, а self-signed сервер Hysteria 2 принимается только по пину `pinSHA256`.
 
 Риски и ограничения:
 
@@ -1154,8 +1238,11 @@ Backup:
 
 Основные unit test suites:
 
-- `ProxyShareLinkParserTest` - parser VLESS/VMess/Trojan, limits, failures.
-- `XrayConfigBuilderTest` - генерация Xray JSON.
+- `ProxyShareLinkParserTest` - parser VLESS/VMess/Trojan/Hysteria 2, limits, failures; для Hysteria 2 - canonical fingerprint и общий fingerprint алиасов, bulk import, `hysteria://` v1 как `unsupported`.
+- `Hysteria2LinkParserTest` - сама ссылка `Hysteria2LinkParser`: схемы `hysteria2://`/`hy2://` в любом регистре, порт по умолчанию, IPv6, multi-port authority и слияние hop-диапазонов, auth (`+` в userinfo, `@` и `:` в auth, query `auth`), имя, экранирование в fingerprint.
+- `Hysteria2ParametersTest` - параметры `Hysteria2LinkParser`: пустые значения и алиасы, `sni`/`peer`, пины (разделители, fail closed), `insecure`, Salamander/Gecko и слишком короткий `obfs-password`, неподдерживаемый `obfs` как `unsupported`, ECH (нормализация, fail closed), hop ports и `hop-interval` (включая `0`), Brutal bandwidth, отбрасывание прочих параметров.
+- `XrayConfigBuilderTest` - генерация Xray JSON, включая Hysteria 2 outbound (`serverName`, пины, Salamander, Gecko `packetSize`, `echConfigList`, `keepAlivePeriod`, Brutal, port hopping) и отсутствие `allowInsecure` у всех протоколов.
+- `RouteLibraryLogicTest` - анализ ссылок в Add sheet (Hysteria 2 и v1, новые причины отказа, предупреждение `insecure=1` без пина, batch rows), маскирование секретов, поиск по `hysteria2`/`hy2`, `editorSaveError` для неподдерживаемых ссылок.
 - `GitHubAppUpdateRepositoryTest` - выбор APK asset по ABI/universal fallback.
 - `AndroidAbiTest` - runtime ABI и asset matching.
 - `SemanticVersionTest` - SemVer parsing/comparison.
@@ -1173,7 +1260,8 @@ Backup:
 - `BoundedTerminalOutputBufferTest` - ограничение terminal output по символам и chunks.
 - `ProxySourceSyncNetworkSelectionTest` - выбор физической validated non-VPN unmetered сети для background sync.
 - `SmartConnectPolicyTest`/`SmartConnectViewModelPolicyTest` - ranking, `🇷🇺` exclusion, deadlines, terminal-result accumulation и расписание forced source refresh (первый проход, успех с/без sync, неудачный проход).
-- `PublicProxySourceEtagTest` - `If-None-Match` только для не-forced запроса к тому же URL, который выдал ETag.
+- `PublicProxySourceEtagTest` - `If-None-Match` только для не-forced запроса к тому же URL, который выдал ETag, и при той же ревизии parser'а (`IMPORT_PARSER_REVISION`).
+- `RoomProxyProfileRepositoryBatchTest`/`RoomSmartProxyProfileRepositoryBatchTest` - в том числе импорт Hysteria 2 (protocol, QUIC transport, TLS), один профиль для `hy2://` и `hysteria2://`, подсчёт неподдерживаемых ссылок (`hysteria://` v1, неизвестный `obfs`) как `unsupported`, а не `invalid`, без сохранения, и Edit такой ссылкой без изменения профиля.
 - `QuickTilePolicyTest`/`LastVpnSessionStoreTest` - выбор режима tile, матрица preconditions → `Connect`/`OpenApp(tab, reason)`, guard публикации ошибки, subtitle mode и storage-значения режима.
 - `OpenSourceUiStatePolicyTest` - OpenSource tab показывает текст ошибки только для выбранного route.
 - `VpnTrafficActivityMonitorTest` - RX/TX liveness policy для длинных download/upload.
@@ -1182,6 +1270,8 @@ Backup:
 - `XrayCoreDownloadGateTest` - process-wide single-flight core downloads.
 
 Что проверено стендом вне репозитория (при изменениях SSH-транспорта стоит повторить): настоящий JSch и OpenSSH через `tools/blackhole_proxy.py` - idle half-open, half-open под аплоадом, дедлайн handshake, abort зависшего connect, head-of-line, отсутствие ложных вердиктов под нагрузкой.
+
+Hysteria 2 (при изменениях parser/builder Hysteria 2 стоит повторить): configs, сгенерированные `XrayConfigBuilder`, запускались в настоящем Xray v26.6.1, собранном из закреплённого commit, против двух серверов: Hysteria 2 сервера на том же Xray v26.6.1 и официального сервера apernet/hysteria. Plain, Salamander, Gecko, ECH (с чужим ECH config подключение не проходит, значит ECH действительно используется), auth `user:pass` и `+` в auth (ссылки сгенерированы официальным `hysteria share`), port hopping (диапазон в authority и `mport`, 25 секунд трафика с hop каждые 5 секунд через UDP-forwarder, работающий как DNAT), Brutal up/down, пин без `sni`, а также batch config приложения с отдельным SOCKS-пользователем на каждый профиль - трафик до `https://www.google.com/generate_204` проходит (HTTP 204). Неверный пароль, неверный `obfs-password` и `insecure=1` без пина при self-signed сертификате ожидаемо не проходят.
 
 Что не покрыто автоматикой:
 
@@ -1200,6 +1290,11 @@ Backup:
 - Smart Connect также зависит от Xray core, но установить/обновить его можно прямо из Smart settings без перехода в OpenSource.
 - Обновление уже загруженного Xray native core может требовать restart приложения.
 - Public source может отдавать stale/unsupported configs. Они импортируются с metadata и помечаются status checks.
+- Hysteria v1 (`hysteria://`) не поддерживается: Xray-core реализует только Hysteria 2. Такие ссылки считаются `unsupported` и не сохраняются.
+- Hysteria 2 работает только поверх UDP/QUIC. В сетях, которые блокируют или душат UDP/QUIC, маршруты Hysteria 2 не проходят проверку и не подключаются, хотя TCP-маршруты VLESS/VMess/Trojan работают. TCP-пинг endpoint для них бессмыслен (TCP listener у сервера нет), поэтому исключение в `OpenSourceViewModel.tcpPingCanRejectTunnel` привязано к transport `HYSTERIA`, который parser ставит всегда.
+- Сервер Hysteria 2 с выключенным UDP relay проходит проверку маршрута (она идёт по TCP), но UDP приложений, включая DNS устройства, через такой маршрут не работает.
+- `insecure=1` без `pinSHA256` не работает с self-signed сертификатом: Xray-core не умеет пропускать проверку сертификата. Маршрут не блокируется и работает, если сертификат сервера CA-валиден; для self-signed сервера в ссылке нужен пин.
+- Старое скачанное Xray core может не принять config Hysteria 2; тогда проверка показывает `UNSUPPORTED`, а помогает обновление core.
 - При реальном обрыве physical network или proxy уже существующий TCP download невозможно бесшовно перенести на другой tunnel; приложение избегает ложного teardown при живом RX, но окончательное продолжение реального разрыва зависит от HTTP Range/resume сервера и браузера.
 - Автоматический public sync не должен запускаться без consent и отключается настройкой auto-refresh.
 - App updater зависит от GitHub releases и корректной публикации APK assets.

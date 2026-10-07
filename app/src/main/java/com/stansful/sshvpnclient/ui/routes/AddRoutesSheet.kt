@@ -450,14 +450,7 @@ private fun PastePanel(
         if (route != null) {
             PreviewCard(route = route, duplicateOf = analysis.duplicateOf)
         } else {
-            PreviewPlaceholder(
-                when {
-                    analysis.linkCount == 0 -> "A preview appears as soon as the link can be read."
-                    analysis.linkCount > 1 -> "Several links here. Review them together in the batch view."
-                    analysis.parse is LinkParse.UnsupportedScheme -> "No preview for ${analysis.parse.scheme}:// links."
-                    else -> "Nothing to preview until the link can be read."
-                },
-            )
+            PreviewPlaceholder(analysis.previewPlaceholder())
         }
     }
     if (!editing) {
@@ -536,7 +529,11 @@ private fun pasteHelper(analysis: LinkAnalysis, editing: Boolean, error: String?
             HelperTone.Info,
         )
         parse is LinkParse.UnsupportedScheme -> Helper(
-            "Only vless://, vmess:// and trojan:// links are supported.",
+            if (parse.scheme == HYSTERIA_V1_SCHEME) {
+                HYSTERIA_V1_HELP
+            } else {
+                "Only vless://, vmess://, trojan:// and hy2:// links are supported."
+            },
             HelperTone.Error,
         )
         parse is LinkParse.Invalid -> Helper(parse.problem.message, HelperTone.Error)
@@ -553,6 +550,7 @@ private fun pasteHelper(analysis: LinkAnalysis, editing: Boolean, error: String?
             "This transport isn’t supported yet. The route will be saved but can’t connect.",
             HelperTone.Error,
         )
+        analysis.route?.certificateCheckWarning == true -> Helper(CERTIFICATE_CHECK_WARNING, HelperTone.Warn)
         else -> Helper(
             if (editing) {
                 "Checked as you type. Changes apply when you save."
@@ -601,7 +599,7 @@ private fun LinkField(
         Column {
             if (masked) {
                 Text(
-                    text = text.lineSequence().joinToString("\n") { maskLink(it) },
+                    text = maskLinks(text),
                     style = textStyle,
                     overflow = TextOverflow.Clip,
                     modifier = Modifier
@@ -625,7 +623,7 @@ private fun LinkField(
                         .semantics { contentDescription = "Route link" },
                     decorationBox = { inner ->
                         if (text.isEmpty()) {
-                            Text("vless://, vmess:// or trojan://…", style = textStyle, color = colors.ink3)
+                            Text("vless://, vmess://, trojan:// or hy2://…", style = textStyle, color = colors.ink3)
                         }
                         inner()
                     },
@@ -768,7 +766,7 @@ private fun Overline(text: String) {
     )
 }
 
-/** Live preview: name, host, protocol and transport tags, and "Looks good" / "Already added" / "Can't connect". */
+/** Live preview: name, host, protocol and transport tags, and a [PreviewVerdict] pill ("Looks good"…). */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PreviewCard(route: LinkParse.Route, duplicateOf: String?) {
@@ -813,20 +811,13 @@ private fun PreviewCard(route: LinkParse.Route, duplicateOf: String?) {
                     if (route.unknownTransport) colors.coralText else colors.ink2,
                 )
                 Spacer(Modifier.weight(1f))
-                when {
-                    duplicateOf != null -> PreviewStatus(
-                        "Already added",
-                        ShadowIcons.Warning,
-                        colors.amberText,
-                        colors.amberTint,
-                    )
-                    route.unknownTransport -> PreviewStatus(
-                        "Can’t connect",
-                        ShadowIcons.Warning,
-                        colors.coralText,
-                        colors.coralTint,
-                    )
-                    else -> PreviewStatus("Looks good", BoldCheck, colors.mintText, colors.mintTint)
+                val verdict = route.previewVerdict(duplicateOf)
+                when (verdict) {
+                    PreviewVerdict.AlreadyAdded, PreviewVerdict.CheckCertificate ->
+                        PreviewStatus(verdict.text, ShadowIcons.Warning, colors.amberText, colors.amberTint)
+                    PreviewVerdict.CantConnect ->
+                        PreviewStatus(verdict.text, ShadowIcons.Warning, colors.coralText, colors.coralTint)
+                    PreviewVerdict.LooksGood -> PreviewStatus(verdict.text, BoldCheck, colors.mintText, colors.mintTint)
                 }
             }
             if (route.unnamed) {
@@ -1249,7 +1240,11 @@ private fun BatchRowItem(row: BatchRow) {
             Text(
                 row.subtitle,
                 style = if (row.subtitleMono) Shadow.type.monoS else Shadow.type.caption,
-                color = if (row.unknownTransport) colors.coralText else colors.ink3,
+                color = when {
+                    row.unknownTransport -> colors.coralText
+                    row.certificateCheckWarning -> colors.amberText
+                    else -> colors.ink3
+                },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -1389,6 +1384,35 @@ private fun ClipboardEmpty(file: Boolean, text: String, onReadAgain: () -> Unit,
     }
 }
 
+/** The line under the Edit field: the error, else the certificate warning, else the encryption note. */
+@Composable
+private fun EditLinkNote(error: String?, warning: String?) {
+    val colors = Shadow.colors
+    Row(modifier = Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        val noteInk = when {
+            error != null -> colors.coralText
+            warning != null -> colors.amberText
+            else -> colors.ink3
+        }
+        if (error != null || warning != null) {
+            Icon(
+                ShadowIcons.Warning,
+                contentDescription = null,
+                tint = noteInk,
+                modifier = Modifier
+                    .padding(top = 1.dp)
+                    .size(14.dp),
+            )
+        }
+        SwapText(
+            text = error ?: warning ?: "Links stay encrypted on this device.",
+            style = Shadow.type.caption,
+            color = noteInk,
+            maxLines = 3,
+        )
+    }
+}
+
 /** TabletRoutes.dc.html's 560 dp "Edit route" dialog. */
 @Composable
 private fun EditRouteDialog(
@@ -1402,6 +1426,8 @@ private fun EditRouteDialog(
     val known = remember(routes.library, editor.profileId) { routes.library.namesByFingerprint(editor.profileId) }
     val analysis = remember(editor.rawUri, known) { linkParser.analyzeLink(editor.rawUri, known, editing = true) }
     val error = editor.error ?: tabletEditError(analysis)
+    // Not an error: the route still works when the server certificate is valid.
+    val warning = CERTIFICATE_CHECK_WARNING.takeIf { error == null && analysis.route?.certificateCheckWarning == true }
     var reveal by rememberSaveable { mutableStateOf(false) }
     val carrying = route != null && route.id == routes.tunnelRoute()?.id
     ShadowDialogContainer(onDismissRequest = actions.onDismissAddSheet, modifier = Modifier.widthIn(max = 560.dp)) {
@@ -1409,7 +1435,7 @@ private fun EditRouteDialog(
             Column(modifier = Modifier.weight(1f)) {
                 Text("Edit route", style = Shadow.type.titleM, color = colors.ink1)
                 Text(
-                    "${route?.name ?: "Route"} · one vless://, vmess:// or trojan:// link",
+                    "${route?.name ?: "Route"} · one vless://, vmess://, trojan:// or hy2:// link",
                     style = Shadow.type.bodyS,
                     color = colors.ink3,
                     maxLines = 1,
@@ -1446,7 +1472,7 @@ private fun EditRouteDialog(
         val fieldStyle = Shadow.type.monoS.copy(lineHeight = 18.sp)
         if (!reveal || editor.loading) {
             Text(
-                text = if (editor.loading) "Decrypting link…" else maskLink(editor.rawUri),
+                text = if (editor.loading) "Decrypting link…" else maskLinks(editor.rawUri),
                 style = fieldStyle,
                 color = colors.ink2,
                 modifier = Modifier
@@ -1474,24 +1500,7 @@ private fun EditRouteDialog(
                     .semantics { contentDescription = "Route link" },
             )
         }
-        Row(modifier = Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (error != null) {
-                Icon(
-                    ShadowIcons.Warning,
-                    contentDescription = null,
-                    tint = colors.coralText,
-                    modifier = Modifier
-                        .padding(top = 1.dp)
-                        .size(14.dp),
-                )
-            }
-            SwapText(
-                text = error ?: "Links stay encrypted on this device.",
-                style = Shadow.type.caption,
-                color = if (error != null) colors.coralText else colors.ink3,
-                maxLines = 3,
-            )
-        }
+        EditLinkNote(error = error, warning = warning)
         InfoNote(
             text = buildString {
                 append(
@@ -1535,13 +1544,18 @@ private fun tabletEditError(analysis: LinkAnalysis): String? {
     return when {
         analysis.linkCount == 0 -> "Paste a route link."
         analysis.linkCount > 1 -> "Edit takes one link. To add several, use Add routes."
-        parse is LinkParse.UnsupportedScheme -> "Use a vless://, vmess:// or trojan:// link."
+        parse is LinkParse.UnsupportedScheme -> if (parse.scheme == HYSTERIA_V1_SCHEME) HYSTERIA_V1_HELP else USE_LINK
         parse is LinkParse.Invalid -> when (parse.problem) {
             LinkProblem.TooLong -> "This link is too long to be a route."
-            LinkProblem.NotLink, LinkProblem.Subscription -> "Use a vless://, vmess:// or trojan:// link."
+            LinkProblem.NotLink, LinkProblem.Subscription -> USE_LINK
             LinkProblem.NoUserId, LinkProblem.NoPassword, LinkProblem.NoVmessId ->
                 "The link is missing its UUID or password."
             LinkProblem.NoHost, LinkProblem.NoPort -> "The link needs a host and a port, like @host:443."
+            LinkProblem.UnsupportedObfs -> "Only Salamander and Gecko obfuscation are supported for Hysteria 2."
+            LinkProblem.NoObfsPassword -> "The link turns on obfuscation but has no obfs-password."
+            LinkProblem.ShortObfsPassword -> "The obfs-password must be at least 4 characters."
+            LinkProblem.BadPin -> "The pinSHA256 must be the server certificate’s SHA-256, 64 hex characters."
+            LinkProblem.BadEch -> "The ech value must be the server’s ECH config in base64."
             else -> parse.problem.message
         }
         analysis.duplicateOf != null ->
@@ -1556,6 +1570,16 @@ private val ClipTextSaver = Saver<String?, String>(
     restore = { it },
 )
 private const val MAX_SAVED_CLIP_CHARS = 16_000
+
+private const val USE_LINK = "Use a vless://, vmess://, trojan:// or hy2:// link."
+
+/** Hysteria v1 (`hysteria://`) is a different protocol; the engine runs only Hysteria 2. */
+private const val HYSTERIA_V1_SCHEME = "hysteria"
+private const val HYSTERIA_V1_HELP = "Hysteria v1 links aren’t supported. Use a Hysteria 2 (hy2://) link."
+
+/** Xray-core always verifies the server certificate, so `insecure=1` alone can't reach a self-signed server. */
+private const val CERTIFICATE_CHECK_WARNING = "The link turns off certificate checks, which the engine can’t do. " +
+    "A server with a self-signed certificate needs a pinSHA256 in the link."
 
 private const val SOURCE_CLIPBOARD = "From your clipboard"
 private const val SOURCE_PASTED = "Pasted text"

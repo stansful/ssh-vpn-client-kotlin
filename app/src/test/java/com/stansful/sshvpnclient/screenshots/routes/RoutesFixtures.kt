@@ -39,6 +39,8 @@ internal object RoutesFixtures {
     const val CLIPBOARD_FILE = "content://com.android.providers.media.documents/document/image%3A1042"
     const val TALLINN_LINK = "trojan://p3Rt8vYw1QxZ6nKd@198.51.100.119:443?security=tls&sni=tll.example.net" +
         "#Tallinn%20%C2%B7%20EE%2004"
+    const val HELSINKI_HY2 = "hy2://fake-auth-7Qm2@198.51.100.42:443?sni=hy.example.net&obfs=salamander" +
+        "&obfs-password=fake-obfs-3Kp9#Helsinki%20%C2%B7%20FI%2002"
 
     private fun fingerprint(link: String): String =
         (parser.parse(link) as ProxyParseResult.Success).profile.fingerprint
@@ -107,7 +109,12 @@ internal object RoutesFixtures {
         ProxySecurity.TLS, ProxyTestStatus.UNAVAILABLE, stale = true, fingerprint = fingerprint(TALLINN_LINK),
     )
 
-    val library = listOf(frankfurt, amsterdam, paris, vilnius, riga, home, tallinn)
+    val helsinki = route(
+        "hel", "Helsinki · FI 02", ProxyProtocol.HYSTERIA2, "198.51.100.42", 443, ProxyTransport.HYSTERIA,
+        ProxySecurity.TLS, ProxyTestStatus.AVAILABLE, latency = 64, fingerprint = fingerprint(HELSINKI_HY2),
+    )
+
+    val library = listOf(frankfurt, amsterdam, paris, helsinki, vilnius, riga, home, tallinn)
     val counts = RouteCounts(
         total = 128,
         available = 41,
@@ -237,6 +244,8 @@ internal object RoutesFixtures {
         AMSTERDAM_COPY,
         "trojan://Zr4m8LqA@198.51.100.140:443?security=tls&type=grpc#Zurich%20%C2%B7%20CH%2006",
         "ss://YWVzLTI1Ni1nY206c2VjcmV0@203.0.113.9:8388#Kyiv%20%C2%B7%20UA%2001",
+        "hy2://fake-auth-Lw8r@203.0.113.66:8443?sni=hy.example.com#Tampere%20%C2%B7%20FI%2003",
+        "hysteria://203.0.113.70:443?protocol=udp&auth=fake-auth-v1&upmbps=50#Turku%20%C2%B7%20FI%2004",
         "vless://71fdb2e4-71fd-4b2e-a71f-db2e471fdb2e@203.0.113.52:8443?security=reality&type=xhttp" +
             "#Reykjavik%20%C2%B7%20IS%2001",
         "vless://c07a9e3d-3d58-4c07-9e3d-58c07a9e3d58@198.51.100.31:443?security=reality&type=xhttp#Copenhagen%20copy",
