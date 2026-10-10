@@ -1,0 +1,322 @@
+name: Release
+
+# Push/merge to master -> ./scripts/build-release.sh -> tag <appVersionName> on the pushed commit ->
+# GitHub release "ssh-vpn-client-kotlin-<version>-release" with everything from build/app/outputs/apk/release.
+# A push that does not bump appVersionName is a no-op: the tag already exists, build and publish are skipped.
+#
+# Jobs:
+#   gate     reads appVersionName and decides whether there is anything to release.
+#   xray     builds libXray.aar from the pinned sources. No secrets: it runs third-party Go code.
+#   build    signs with the release key (repository secrets). No write token.
+#   publish  creates the tag and the release: draft -> upload assets -> publish.
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build only: no tag, no release"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  # Releases queue up and are never cancelled half-way. Dry runs get their own group.
+  group: ${{ inputs.dry_run && format('release-dry-run-{0}', github.run_id) || 'release' }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gate:
+    name: Decide
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+      build: ${{ steps.decide.outputs.build }}
+      publish: ${{ steps.decide.outputs.publish }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read appVersionName and compare with tags
+        id: decide
+        env:
+          DRY_RUN: ${{ inputs.dry_run == true }}
+        run: |
+          set -euo pipefail
+          # Same pattern as scripts/package-xray-core-assets.sh. Two matches leave a newline and fail the check.
+          version="$(sed -nE 's/.*val[[:space:]]+appVersionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle.kts)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=app/build.gradle.kts::Expected one appVersionName in X.Y.Z format, got '${version}'."
+            exit 1
+          fi
+
+          build=true
+          publish=true
+          [[ "$DRY_RUN" == "true" ]] && publish=false
+          if [[ "$publish" == "true" && "$GITHUB_REF" != "refs/heads/master" ]]; then
+            echo "::error::Releases are published only from master. Use dry_run to build another branch."
+            exit 1
+          fi
+
+          tags="$(git ls-remote --tags --refs origin | sed -E 's#^.*refs/tags/##')"
+          newest="$({ sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' <<<"$tags"; echo "$version"; } | sort -V | tail -n 1)"
+          if grep -qxF -e "$version" -e "v$version" <<<"$tags"; then
+            if [[ "$publish" == "true" ]]; then
+              build=false
+              publish=false
+              echo "::notice title=Nothing to release::Tag ${version} already exists. Bump appVersionName in app/build.gradle.kts to release."
+            fi
+          elif [[ "$newest" != "$version" && "$publish" == "true" ]]; then
+            echo "::error file=app/build.gradle.kts::appVersionName ${version} is lower than the newest tag ${newest}."
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            echo "build=$build"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version $version, build $build, publish $publish"
+
+  xray:
+    name: Build libXray.aar
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # The NDK local builds use. gomobile prefers ANDROID_NDK_HOME, which the runner points to NDK 27.
+      ANDROID_NDK_VERSION: "29.0.14206865"
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # libXray at the pinned commit requires go 1.26.3.
+          go-version: "1.26"
+          cache: false
+
+      - name: Build libXray.aar from pinned sources
+        run: |
+          set -euo pipefail
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
+          if [[ ! -d "$ANDROID_NDK_HOME" ]]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$ANDROID_NDK_VERSION"
+          fi
+          ./scripts/build-xray-core.sh
+
+      - name: Upload libXray.aar
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: libxray-aar
+          path: app/libs/libXray.aar
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    name: Build signed APKs
+    needs: [gate, xray]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Ensure Android SDK packages
+        run: |
+          set -euo pipefail
+          # compileSdk 37 and the build-tools local builds use. Already present on ubuntu-24.04.
+          for package in "platforms;android-37.0" "build-tools;37.0.0"; do
+            if [[ ! -d "$ANDROID_HOME/${package//;//}" ]]; then
+              "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "$package"
+            fi
+          done
+
+      - name: Download libXray.aar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libxray-aar
+          path: ${{ runner.temp }}/libxray
+
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SSH_VPN_RELEASE_STORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.SSH_VPN_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SSH_VPN_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.SSH_VPN_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Without all four secrets build-release.sh would sign with a throwaway key that installed apps reject.
+          for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error title=Release signing is not configured::Secret for $name is missing."
+              exit 1
+            fi
+          done
+          umask 077
+          mkdir -p "$RUNNER_TEMP/signing"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/signing/release.keystore"
+
+      - name: Build release
+        env:
+          SSH_VPN_RELEASE_STORE_FILE: ${{ runner.temp }}/signing/release.keystore
+          SSH_VPN_RELEASE_STORE_PASSWORD: ${{ secrets.SSH_VPN_RELEASE_STORE_PASSWORD }}
+          SSH_VPN_RELEASE_KEY_ALIAS: ${{ secrets.SSH_VPN_RELEASE_KEY_ALIAS }}
+          SSH_VPN_RELEASE_KEY_PASSWORD: ${{ secrets.SSH_VPN_RELEASE_KEY_PASSWORD }}
+          # The packaging script must use the AAR from the xray job, never start its own Go build here.
+          SSH_VPN_XRAY_CORE_AAR: ${{ runner.temp }}/libxray/libXray.aar
+        run: |
+          set -euo pipefail
+          ./scripts/build-release.sh
+          if [[ -e .local/signing ]]; then
+            echo "::error::build-release.sh fell back to a throwaway keystore."
+            exit 1
+          fi
+
+      - name: Verify signer matches the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Installed apps accept an update only when it is signed like the release they already have.
+          build_tools="$(printf '%s\n' "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
+          signers() {
+            "$build_tools/apksigner" verify --print-certs "$1" \
+              | sed -nE 's/^.*certificate SHA-256 digest: ([0-9a-f]{64})$/\1/p' | sort -u
+          }
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern 'app-universal-release-*.apk' \
+            --dir "$RUNNER_TEMP/latest-release"
+          expected="$(signers "$RUNNER_TEMP"/latest-release/*.apk)"
+          if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Cannot read the signing certificate of the latest release."
+            exit 1
+          fi
+          for apk in build/app/outputs/apk/release/*.apk; do
+            actual="$(signers "$apk")"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error title=Wrong signing key::$(basename "$apk") is signed by ${actual}, the latest release by ${expected}."
+              exit 1
+            fi
+          done
+          echo "All APKs are signed by $expected"
+
+      - name: Upload build outputs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ env.VERSION }}
+          path: build/app/outputs/apk/release/
+          if-no-files-found: error
+          retention-days: ${{ needs.gate.outputs.publish == 'true' && 7 || 1 }}
+          compression-level: 0
+
+      - name: Remove signing material
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/signing"
+
+  publish:
+    name: Tag and publish release
+    needs: [gate, build]
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out (full history for release notes)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download build outputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ env.VERSION }}
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Create tag and release
+        run: |
+          set -euo pipefail
+          # A re-run of an old run must not tag a commit that master has already moved past.
+          tip="$(git ls-remote origin refs/heads/master | cut -f 1)"
+          if [[ "$tip" != "$GITHUB_SHA" ]]; then
+            echo "::notice title=Not published::master moved to ${tip}; the run for that commit releases ${VERSION}."
+            exit 0
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" > /dev/null; then
+            echo "::error::Tag ${VERSION} already exists."
+            exit 1
+          fi
+
+          # A run interrupted before publishing leaves a draft. Remove our own, never one a person made.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.draft and .tag_name == \"$VERSION\") | \"\(.id) \(.author.login)\"" \
+            | while read -r release_id author; do
+                if [[ "$author" != "github-actions[bot]" ]]; then
+                  echo "::error::Draft release ${VERSION} by ${author} already exists. Publish or delete it, then re-run."
+                  exit 1
+                fi
+                gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+              done
+
+          # Notes: commit subjects since the previous version tag, like earlier releases.
+          notes="$RUNNER_TEMP/release-notes.md"
+          previous="$(git tag --merged "$GITHUB_SHA" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+          if [[ -n "$previous" ]]; then
+            git log --no-merges --pretty='%s' "$previous..$GITHUB_SHA" > "$notes"
+          else
+            git log --no-merges --pretty='%s' --max-count=50 "$GITHUB_SHA" > "$notes"
+          fi
+          [[ -s "$notes" ]] || echo "Release $VERSION" > "$notes"
+          cat "$notes"
+
+          # 1) Draft with all assets: invisible to /releases/latest, which the in-app updaters poll.
+          gh release create "$VERSION" "$RUNNER_TEMP"/release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title "ssh-vpn-client-kotlin-$VERSION-release" \
+            --notes-file "$notes"
+          # 2) Publish: GitHub creates the tag on GITHUB_SHA now. A separate call on purpose: if this request
+          #    fails, gh's one-shot create would delete the release even when it already went live.
+          gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')"
+          if [[ "$latest" != "$VERSION" ]]; then
+            echo "::error::/releases/latest returns ${latest}, not ${VERSION}."
+            exit 1
+          fi
+          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$VERSION"
