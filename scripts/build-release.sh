@@ -172,6 +172,12 @@ for apk_path in "${release_apks[@]}"; do
 done
 
 if ((${#signed_apks[@]} > 0)); then
+  # Keep only signed APKs and Xray core AARs in the release output directory.
+  find "$release_output_dir" -mindepth 1 -maxdepth 1 \
+    ! \( -type f -name '*.apk' ! -name '*-unsigned*.apk' \) \
+    ! \( -type f -name 'libXray-*.aar' \) \
+    -exec rm -rf {} +
+
   echo "Release APKs:"
   printf '  %s\n' "${signed_apks[@]}"
 elif ((${#unsigned_apks[@]} > 0)); then
