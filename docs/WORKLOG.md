@@ -2526,3 +2526,20 @@ Result:
 - Verified `bash scripts/check-cancellation.sh`: success.
 - Verified `./scripts/test.sh`: success, 618 tests, 0 failures.
 - Verified `./scripts/lint.sh`: success, 0 errors (13 pre-existing warnings, none in changed files).
+
+### 2026-10-10 - Block 60
+
+Plan:
+
+- Replace the 482-line root `README.md` (a spec and changelog, partly stale after the redesign) with a short bilingual (Russian / English) README, as `docs/IMPROVEMENT_PLAN.md` suggests: a disclaimer at the very top that the app tests whether today's neural networks can build applications with minimal developer involvement (answer: yes), the three modes, features, screenshots, install, limits, build, how it was made, links to docs.
+- Keep the old README as `docs/LEGACY_README.md` (moved with `git mv`): it is the only place with the original prompt, the dev quick start, the script list and the Gradle commands. Add an archive banner listing what is stale against the 3.6.0 code, fix its relative links, and repoint the `README.md:N` references in `docs/DESIGN_FUNCTIONAL_SPEC.md`.
+- Screenshots: render with `./scripts/screenshots.sh` (Roborazzi, no emulator) and turn a few renders into README images in `docs/screenshots/` with a committed script.
+
+Result:
+
+- New root `README.md`: shared header, `[!IMPORTANT]` disclaimer in both languages, hero image of the Auto / Server / Routes home screens, then a Russian and an English section, each with three rows of screenshots and a tablet shot. The README has no raw HTML (only GitHub's `[!IMPORTANT]` alert): the first version used `<img>` tags in an HTML table, and local previews (IDE, app file panes) did not show those images, so every image is now Markdown `![](...)` and the in-page links point at heading anchors. Facts were taken from - New `scripts/readme-screenshots.py` (Pillow): turns renders from `app/build/screenshots/` into `docs/screenshots/` as full-colour RGBA PNGs (palette quantization banded the orb glows and broke the transparent corners). Markdown can't size or tile images, so each row of three phones is one picture that scales to the page width: `hero.png` (`Home_Auto/Server/Routes_Connected_Night`), `gallery-1.png` (`Servers_Connected_Night`, `Routes_Library_Day`, `Home_Auto_Testing_Night`), `gallery-2.png` (`Routes_AddPaste_Night`, `AppRouting_Selected_Night`, `Terminal_Active_Night`), `gallery-3.png` (`Activity_Server_Night`, `Settings_Idle_Phone_Night`, `Appearance_CustomSaved_Night` top 1688 px), `tablet.png` (`Home_Tablet_Server_Night`), and `logo.svg` (the launcher icon `resources/icons/icon.svg` at 112 px).-routing.png` (`AppRouting_Selected_Night`), `terminal.png` (`Terminal_Active_Night`), `activity.png` (`Activity_Server_Night`), `settings.png` (`Settings_Idle_Phone_Night`), `appearance.png` (`Appearance_CustomSaved_Night`, top 1688 px), `tablet.png` (`Home_Tablet_Server_Night`).
+- `docs/LEGACY_README.md`: the old README with an archive banner (app name, modes and tabs, `Check tunnel` target, DNS without DoH, App routing and the empty-list dialog, Activity and Terminal screens, single Settings screen, Auto failover, screen-off reconnect backoff and wake lock, `ui/` tree, signing files, test count) and `../` link fixes. The banner keeps the old line numbers shifted by exactly 16.
+- `docs/DESIGN_FUNCTIONAL_SPEC.md`: README line references now point to `docs/LEGACY_README.md` lines 35, 41, 66, 205, 256 and 321.
+- An adversarial review (six reviewers by lens, one verifier) checked README claims against the code, links, images, both languages and the archive banner; the confirmed findings are fixed.
+- Limits: docs-only change, no app code touched. `README_SA.md` and `docs/TECHNICAL_DOCUMENTATION.md` still use pre-redesign names and some stale statements (the new README and the banner say so); they were not rewritten in this block.
+- Verified `./scripts/screenshots.sh`: success, 281 PNGs re-rendered.
