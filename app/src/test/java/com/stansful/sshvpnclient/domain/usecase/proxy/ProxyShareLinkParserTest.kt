@@ -202,6 +202,42 @@ class ProxyShareLinkParserTest {
         assertEquals(links.size, links.map(::fingerprintOf).toSet().size)
     }
 
+    @Test
+    fun `a plus in a trojan password or a vless id stays a plus`() {
+        assertEquals("abc+def", success("trojan://abc+def@example.net:443?security=tls#Trojan").credential)
+        assertEquals("my+id", success("vless://my+id@example.com:443?security=tls&type=ws").credential)
+    }
+
+    @Test
+    fun `a literal plus and an escaped plus are the same credential`() {
+        val literal = success("trojan://abc+def@example.net:8443?security=tls&sni=example.net#One")
+        val escaped = success("trojan://abc%2Bdef@example.net:8443?security=tls&sni=example.net#Two")
+
+        assertEquals("abc+def", escaped.credential)
+        assertEquals(literal.fingerprint, escaped.fingerprint)
+        // trojan://abc+def@example.net:8443|security=tls|sni=example.net
+        assertEquals(sha256("trojan://abc+def@example.net:8443|security=tls|sni=example.net"), literal.fingerprint)
+    }
+
+    @Test
+    fun `escaped characters in a credential are still decoded`() {
+        assertEquals("abc def", success("trojan://abc%20def@example.net:443").credential)
+        assertEquals("p@ss:w/rd", success("trojan://p%40ss%3Aw%2Frd@example.net:443").credential)
+    }
+
+    @Test
+    fun `query values and the name keep form decoding`() {
+        // Panels write the query with URLSearchParams or Go's url.Values, which turn a space into `+`.
+        val profile = success(
+            "vless://id@example.com:443?type=xhttp&security=tls&path=%2Fa+b" +
+                "&extra=%7B%22xPaddingBytes%22%3A+%22100-1000%22%7D#My+Route",
+        )
+
+        assertEquals("/a b", profile.parameters["path"])
+        assertEquals("{\"xPaddingBytes\": \"100-1000\"}", profile.parameters["extra"])
+        assertEquals("My Route", profile.name)
+    }
+
     private fun fingerprintOf(link: String): String = success(link).fingerprint
 
     private fun success(link: String): ParsedProxyProfile {

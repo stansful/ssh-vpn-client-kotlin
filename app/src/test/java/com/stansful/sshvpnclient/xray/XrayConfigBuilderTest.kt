@@ -439,6 +439,15 @@ class XrayConfigBuilderTest {
         assertEquals("vmess", outboundOf(vmess).getString("protocol"))
     }
 
+    @Test
+    fun `a stored link with a plus in its credential connects with the plus`() {
+        val trojan = outboundOf("trojan://abc+def@example.com:443?security=tls")
+        val vless = outboundOf("vless://my+id@example.com:443?security=tls&type=ws")
+
+        assertEquals("abc+def", trojan.getJSONObject("settings").getString("password"))
+        assertEquals("my+id", vless.getJSONObject("settings").getString("id"))
+    }
+
     /** The builder re-parses [ProxyProfile.rawUri]; the stored summary fields don't affect the outbound. */
     private fun outboundOf(link: String): JSONObject {
         val config = JSONObject(builder.buildSocksTestConfig(profile().copy(rawUri = link), socksPort = 10_808))
