@@ -79,7 +79,8 @@ class ProxyShareLinkParser {
             ?: return ProxyParseResult.Failure(ProxyParseReasons.HOST_MISSING)
         val port = uri.port.takeIf { it in 1..65_535 }
             ?: return ProxyParseResult.Failure(ProxyParseReasons.PORT_INVALID)
-        val credential = uri.rawUserInfo?.let(::decodeShareLinkUserInfo)?.takeIf(String::isNotBlank)
+        val rawUserInfo = uri.rawUserInfo
+        val credential = rawUserInfo?.let(::decodeShareLinkUserInfo)?.takeIf(String::isNotBlank)
             ?: return ProxyParseResult.Failure(
                 if (protocol == ProxyProtocol.TROJAN) "Password is missing" else "UUID is missing",
             )
@@ -89,13 +90,20 @@ class ProxyShareLinkParser {
         val name = uri.rawFragment?.let(::decodeShareLinkComponent)?.trim().orEmpty().ifBlank {
             "${protocol.name} $host:$port"
         }
-        val canonical = buildString {
-            append(protocol.scheme).append("://")
-            append(credential).append('@').append(host.lowercase()).append(':').append(port)
-            parameters.toSortedMap().forEach { (key, parameterValue) ->
-                append('|').append(key.lowercase()).append('=').append(parameterValue)
-            }
-        }
+        fun fingerprintOf(credential: String): String = sha256Hex(
+            buildString {
+                append(protocol.scheme).append("://")
+                append(credential).append('@').append(host.lowercase()).append(':').append(port)
+                parameters.toSortedMap().forEach { (key, parameterValue) ->
+                    append('|').append(key.lowercase()).append('=').append(parameterValue)
+                }
+            },
+        )
+        // Older builds form-decoded the credential, a `+` into a space, and saved that fingerprint.
+        val legacyFingerprint = rawUserInfo?.takeIf { '+' in it }
+            ?.let(::decodeShareLinkComponent)
+            ?.takeIf(String::isNotBlank)
+            ?.let(::fingerprintOf)
         return ProxyParseResult.Success(
             ParsedProxyProfile(
                 name = name,
@@ -107,8 +115,9 @@ class ProxyShareLinkParser {
                 flow = parameters["flow"],
                 credential = credential,
                 rawUri = value,
-                fingerprint = sha256Hex(canonical),
+                fingerprint = fingerprintOf(credential),
                 parameters = parameters,
+                legacyFingerprint = legacyFingerprint,
             ),
         )
     }

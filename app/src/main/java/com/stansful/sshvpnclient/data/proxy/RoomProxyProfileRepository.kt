@@ -93,15 +93,28 @@ class RoomProxyProfileRepository(
             var unsupported = unsupportedSkipped
 
             val existingByFingerprint = uniqueProfiles
-                .map(ParsedProxyProfile::fingerprint)
+                .flatMap { parsed -> listOfNotNull(parsed.fingerprint, parsed.legacyFingerprint) }
+                .distinct()
                 .chunked(SQLITE_QUERY_BATCH_SIZE)
                 .flatMap { fingerprints -> dao.getByFingerprints(fingerprints) }
                 .associateBy(ProxyProfileEntity::fingerprint)
+            // A row saved before a `+` in a VLESS or Trojan credential was kept has an older
+            // fingerprint; it is found by that one and takes the current fingerprint below.
+            val legacyRows = legacyFingerprintMatches(
+                profiles = uniqueProfiles,
+                rowsByFingerprint = existingByFingerprint,
+                secretIdOf = ProxyProfileEntity::secretId,
+                secretStorage = secretStorage,
+                parser = parser,
+            )
+            val existingFor = { fingerprint: String ->
+                existingByFingerprint[fingerprint] ?: legacyRows[fingerprint]
+            }
             // A row can outlive its link: the secret store starts over when its Keystore key is
             // gone. Such a row takes the link from this import, or it would stay unusable for good.
             // A store that can't be read right now fails the import here, before anything changes.
             val readableSecretIds = secretStorage.readableSecretIds(
-                uniqueProfiles.mapNotNull { parsed -> existingByFingerprint[parsed.fingerprint]?.secretId },
+                uniqueProfiles.mapNotNull { parsed -> existingFor(parsed.fingerprint)?.secretId },
             )
             val entitiesToUpsert = ArrayList<ProxyProfileEntity>(uniqueProfiles.size)
             val secretsToSave = LinkedHashMap<String, String>(uniqueProfiles.size)
@@ -111,11 +124,14 @@ class RoomProxyProfileRepository(
                 if (parsed.transport == ProxyTransport.UNKNOWN || parsed.security == ProxySecurity.UNKNOWN) {
                     unsupported += 1
                 }
-                val existing = existingByFingerprint[parsed.fingerprint]
+                val existing = existingFor(parsed.fingerprint)
                 val existingReadable = existing != null && existing.secretId in readableSecretIds
                 if (existing != null && (source != ProxyProfileSource.REMOTE || existing.source != source.name)) {
                     if (existingReadable) {
                         duplicates += 1
+                        if (existing.fingerprint != parsed.fingerprint) {
+                            entitiesToUpsert += existing.copy(fingerprint = parsed.fingerprint)
+                        }
                         return@forEach
                     }
                     // Still a duplicate of that row, so the row keeps its source and state; only
@@ -124,7 +140,7 @@ class RoomProxyProfileRepository(
                         profileId = existing.id,
                         revisionId = UUID.randomUUID().toString(),
                     ).also { newSecretId -> secretsToSave[newSecretId] = parsed.rawUri }
-                    entitiesToUpsert += existing.copy(secretId = secretId)
+                    entitiesToUpsert += existing.copy(secretId = secretId, fingerprint = parsed.fingerprint)
                     unreadableSecretIds += existing.secretId
                     updated += 1
                     return@forEach
@@ -198,6 +214,7 @@ class RoomProxyProfileRepository(
                 }
             }
             val duplicate = dao.getByFingerprint(parsed.profile.fingerprint)
+                ?: legacyRowOf(parsed.profile, exceptId = id)
             if (duplicate != null && duplicate.id != id) {
                 return@withContext emptyImportResult(duplicates = 1)
             }
@@ -290,6 +307,19 @@ class RoomProxyProfileRepository(
                 )
             }
         }
+    }
+
+    /** A row other than [exceptId] that [profile] was saved to under its older fingerprint. */
+    private suspend fun legacyRowOf(profile: ParsedProxyProfile, exceptId: String): ProxyProfileEntity? {
+        val legacyFingerprint = profile.legacyFingerprint ?: return null
+        val row = dao.getByFingerprint(legacyFingerprint)?.takeIf { row -> row.id != exceptId } ?: return null
+        return legacyFingerprintMatches(
+            profiles = listOf(profile),
+            rowsByFingerprint = mapOf(legacyFingerprint to row),
+            secretIdOf = ProxyProfileEntity::secretId,
+            secretStorage = secretStorage,
+            parser = parser,
+        )[profile.fingerprint]
     }
 
     private suspend fun deleteSecretsBestEffort(ids: Collection<String>) {
