@@ -73,7 +73,9 @@ class AppContainer(
     context: Context,
 ) {
     private val appContext = context.applicationContext
-    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** Work that must outlive any screen, e.g. a Server-mode restart that has already stopped its session. */
+    val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val applicationContext: Context
         get() = appContext
 
