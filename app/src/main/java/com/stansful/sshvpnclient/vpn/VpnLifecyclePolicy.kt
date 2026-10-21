@@ -4,6 +4,7 @@ import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
+import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 
 /**
  * Pure precondition for a service lifecycle mutation. The final Android-side guard is
@@ -42,6 +43,22 @@ internal fun shouldAcceptVpnConnectCommand(
     return isVpnSessionOwnedBy(state, owner, transport) &&
         state.status in CONNECT_COMMAND_STATUSES &&
         (expectedConfigId == null || state.activeConfigId == expectedConfigId)
+}
+
+/**
+ * A service's own CONNECTING for a connect command it accepted ([shouldAcceptVpnConnectCommand]). The
+ * use case that sent the command (the only sender: ConnectVpnUseCase, ConnectProxyVpnUseCase, also for
+ * the quick tile and Always-on VPN) has published this session and cleared the log for it just before,
+ * so the log is kept here. A second clear would drop what was written in between: a notice
+ * ([VpnConnectionRepository.appendNotice], e.g. the secret store reset that the connect's own reads
+ * found) and Always-on VPN's "started by Android" line.
+ */
+internal fun VpnConnectionRepository.publishAcceptedConnect(
+    configId: String,
+    transport: VpnTransportType,
+    owner: VpnSessionOwner,
+) {
+    setConnecting(configId, transport, owner, clearDiagnostics = false)
 }
 
 /** A validation failure must not replace the state of an already running/starting owner. */

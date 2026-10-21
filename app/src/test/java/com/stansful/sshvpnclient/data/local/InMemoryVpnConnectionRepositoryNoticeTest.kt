@@ -2,6 +2,11 @@ package com.stansful.sshvpnclient.data.local
 
 import android.app.Application
 import androidx.test.core.app.ApplicationProvider
+import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
+import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
+import com.stansful.sshvpnclient.domain.model.VpnTransportType
+import com.stansful.sshvpnclient.vpn.alwaysOnStartedDiagnostic
+import com.stansful.sshvpnclient.vpn.publishAcceptedConnect
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -65,6 +70,52 @@ class InMemoryVpnConnectionRepositoryNoticeTest {
     }
 
     @Test
+    fun `a second clearing connect in a row drops the notice`() {
+        // Why a service must not clear again after the use case that sent it its connect command.
+        repository.appendNotice(NOTICE)
+        repository.setConnecting(configId = CONFIG_ID)
+
+        repository.setConnecting(configId = CONFIG_ID)
+
+        assertEquals(emptyList<String>(), diagnostics())
+    }
+
+    @Test
+    fun `a service's start publication keeps the notice and the lines written since the connect`() {
+        repository.appendDiagnostic("Earlier session ended")
+        // The connect's own config read found the secret store reset.
+        repository.appendNotice(NOTICE)
+        // ConnectVpnUseCase: the one clear of this start.
+        repository.setConnecting(configId = CONFIG_ID)
+        // AlwaysOnVpnStarter, once the use case returned.
+        repository.appendDiagnostic(alwaysOnStartedDiagnostic(VpnSessionOwner.SHADOW_SSH))
+
+        // SshVpnService accepts the command and publishes the start itself.
+        repository.publishAcceptedConnect(CONFIG_ID, VpnTransportType.SSH, VpnSessionOwner.SHADOW_SSH)
+        repository.appendDiagnostic("Starting VPN connection")
+        assertEquals(VpnConnectionStatus.CONNECTING, repository.currentState.status)
+        assertEquals(VpnSessionOwner.SHADOW_SSH, repository.currentState.sessionOwner)
+        repository.setError(CONFIG_ID, "Authentication failed")
+
+        assertEquals(
+            listOf(NOTICE, "Always-on VPN: Server started by Android", "Starting VPN connection"),
+            diagnostics(),
+        )
+    }
+
+    @Test
+    fun `a routes service's start publication keeps the log of its connect`() {
+        repository.appendNotice(NOTICE)
+        repository.setConnecting(ROUTE_ID, VpnTransportType.XRAY, VpnSessionOwner.OPEN_SOURCE)
+        repository.appendDiagnostic(alwaysOnStartedDiagnostic(VpnSessionOwner.OPEN_SOURCE))
+
+        repository.publishAcceptedConnect(ROUTE_ID, VpnTransportType.XRAY, VpnSessionOwner.OPEN_SOURCE)
+        repository.setError(ROUTE_ID, "Xray core stopped unexpectedly")
+
+        assertEquals(listOf(NOTICE, "Always-on VPN: Routes started by Android"), diagnostics())
+    }
+
+    @Test
     fun `clearing the log by hand drops the notice`() {
         repository.appendNotice(NOTICE)
         repository.clearDiagnostics()
@@ -90,6 +141,7 @@ class InMemoryVpnConnectionRepositoryNoticeTest {
 
     private companion object {
         const val CONFIG_ID = "config"
+        const val ROUTE_ID = "route"
         const val NOTICE = "Saved passwords and keys can't be decrypted"
     }
 }
