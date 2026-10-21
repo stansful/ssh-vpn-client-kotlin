@@ -72,13 +72,21 @@ class FlowWriterExecutorTest {
     @Test
     fun `every flow the table allows can have its writer`() {
         listOf(true to false, false to true, false to false).forEach { (lowRam, powerSave) ->
-            val sessions = selectTunResourceProfile(isLowRamDevice = lowRam, isPowerSaveMode = powerSave)
-                .maxActiveTcpSessions
-            assertTrue("$sessions sessions", flowWriterLimit(sessions) >= sessions)
+            listOf(true, false).forEach { is64Bit ->
+                val sessions = selectTunResourceProfile(
+                    isLowRamDevice = lowRam,
+                    isPowerSaveMode = powerSave,
+                    is64BitProcess = is64Bit,
+                ).maxActiveTcpSessions
+                assertTrue("$sessions sessions", flowWriterLimit(sessions) >= sessions)
+            }
         }
         // Low-RAM devices keep a small table, and with it a small ceiling on writer threads.
-        val lowRamSessions = selectTunResourceProfile(isLowRamDevice = true, isPowerSaveMode = false)
-            .maxActiveTcpSessions
+        val lowRamSessions = selectTunResourceProfile(
+            isLowRamDevice = true,
+            isPowerSaveMode = false,
+            is64BitProcess = true,
+        ).maxActiveTcpSessions
         assertTrue(flowWriterLimit(lowRamSessions) <= 2 * lowRamSessions)
     }
 
