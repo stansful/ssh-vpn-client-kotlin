@@ -93,6 +93,18 @@ class ChannelCloserTest {
         assertEquals(emptyList<Throwable>(), uncaught.toList())
     }
 
+    @Test
+    fun `a disconnect whose closer thread can't be started runs in place`() {
+        // What Android throws when pthread_create fails; the JVM pool asks the factory first.
+        val outOfThreads = ThreadFactory { throw OutOfMemoryError("pthread_create (1040KB stack) failed: Try again") }
+        val closer = ChannelCloser(outOfThreads, keepAliveMs = 1_000L).also(closers::add)
+        var ranOn: Thread? = null
+
+        closer.disconnectLater { ranOn = Thread.currentThread() }
+
+        assertEquals(Thread.currentThread(), ranOn)
+    }
+
     private fun closer(threads: Int = 4): ChannelCloser {
         val factory = ThreadFactory { task ->
             Thread(task, "test-channel-closer").apply {

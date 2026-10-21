@@ -570,6 +570,40 @@ internal fun flowWriterLimit(maxActiveTcpSessions: Int): Int = maxActiveTcpSessi
 
 private const val FLOW_WRITER_THREAD_SLACK = 16
 
+/** Why a worker pool did not take a task. */
+internal enum class PoolRefusal {
+    /** The pool is full or shut down: it threw [RejectedExecutionException]. */
+    SATURATED,
+
+    /**
+     * The pool had to start a thread and the system would not create one. On Android
+     * `Thread.start` throws [OutOfMemoryError] when `pthread_create` fails: the process is out of
+     * threads, or of address space for their stacks. The heap is fine, and once threads expire the
+     * next task can get one again.
+     */
+    NO_THREAD,
+}
+
+/**
+ * Hands a task to a pool with [submit] and returns what it returned, or null when the pool refused
+ * the task, after telling [onRefused] why. Neither refusal may escape: the pools are fed from the
+ * TUN read thread and from pool threads, and an exception that leaves any of them ends the process.
+ * A pool that queued the task before its thread failed to start may still run it later, which the
+ * tasks here tolerate: a flow's task checks the flow's state first, a DNS query its deadline, and a
+ * channel disconnect may run twice.
+ */
+internal inline fun <T : Any> submitToPool(onRefused: (PoolRefusal) -> Unit, submit: () -> T): T? {
+    return try {
+        submit()
+    } catch (_: RejectedExecutionException) {
+        onRefused(PoolRefusal.SATURATED)
+        null
+    } catch (_: OutOfMemoryError) {
+        onRefused(PoolRefusal.NO_THREAD)
+        null
+    }
+}
+
 /**
  * Disconnects SSH channels for a thread that must not wait on one.
  *
@@ -577,8 +611,8 @@ private const val FLOW_WRITER_THREAD_SLACK = 16
  * session's socket behind every other uploading flow, and while that socket drains at the speed of
  * the uplink. A disconnect needs that monitor first and then the socket for its CLOSE message, so
  * under upload congestion it can take a while. The closer threads only ever wait, so a few are
- * enough, and they expire when idle. A disconnect is never lost: once the closer is shut down it
- * runs on the caller, and [shutdown] runs the ones still queued.
+ * enough, and they expire when idle. A disconnect is never lost: once the closer is shut down, or
+ * when it can't start a thread, it runs on the caller, and [shutdown] runs the ones still queued.
  */
 internal class ChannelCloser(
     threadFactory: ThreadFactory,
@@ -599,9 +633,8 @@ internal class ChannelCloser(
 
     /** A failed disconnect has nobody to tell; on a pool thread it must not end the process either. */
     fun disconnectLater(disconnect: () -> Unit) {
-        try {
-            executor.execute { runCatching(disconnect) }
-        } catch (_: RejectedExecutionException) {
+        val handedOver = submitToPool(onRefused = {}) { executor.execute { runCatching(disconnect) } }
+        if (handedOver == null) {
             runCatching(disconnect)
         }
     }
@@ -1871,11 +1904,8 @@ internal class KotlinTunForwarder(
             delayMs: Long,
             task: () -> Unit,
         ): ScheduledFuture<*>? {
-            return try {
+            return submitToPool(onRefused = { refusal -> logRefusal(CLEANUP_POOL_NAME, refusal) }) {
                 cleanupExecutor.schedule({ task() }, delayMs, TimeUnit.MILLISECONDS)
-            } catch (_: RejectedExecutionException) {
-                diagnostics.logWorkerRejected(CLEANUP_POOL_NAME)
-                null
             }
         }
 
@@ -1884,10 +1914,11 @@ internal class KotlinTunForwarder(
             delayMs: Long,
             task: () -> Unit,
         ): ScheduledFuture<*>? {
-            return try {
+            val onRefused = { refusal: PoolRefusal ->
+                if (refusal == PoolRefusal.NO_THREAD) logRefusal(CLEANUP_POOL_NAME, refusal)
+            }
+            return submitToPool(onRefused) {
                 cleanupExecutor.schedule({ task() }, delayMs, TimeUnit.MILLISECONDS)
-            } catch (_: RejectedExecutionException) {
-                null
             }
         }
 
@@ -1895,11 +1926,8 @@ internal class KotlinTunForwarder(
             delayMs: Long,
             task: () -> Unit,
         ): ScheduledFuture<*>? {
-            return try {
+            return submitToPool(onRefused = { refusal -> logRefusal(DNS_TIMEOUT_POOL_NAME, refusal) }) {
                 dnsTimeoutExecutor.schedule({ task() }, delayMs, TimeUnit.MILLISECONDS)
-            } catch (_: RejectedExecutionException) {
-                diagnostics.logWorkerRejected(DNS_TIMEOUT_POOL_NAME)
-                null
             }
         }
 
@@ -1915,17 +1943,21 @@ internal class KotlinTunForwarder(
             channelCloser.shutdown()
         }
 
+        /** False when [executor] refused [task]: the caller then gives up on it, e.g. resets the flow. */
         private fun execute(
             poolName: String,
             executor: ThreadPoolExecutor,
             task: () -> Unit,
         ): Boolean {
-            return try {
+            return submitToPool(onRefused = { refusal -> logRefusal(poolName, refusal) }) {
                 executor.execute { task() }
-                true
-            } catch (_: RejectedExecutionException) {
-                diagnostics.logWorkerRejected(poolName)
-                false
+            } != null
+        }
+
+        private fun logRefusal(poolName: String, refusal: PoolRefusal) {
+            when (refusal) {
+                PoolRefusal.SATURATED -> diagnostics.logWorkerRejected(poolName)
+                PoolRefusal.NO_THREAD -> diagnostics.logWorkerThreadUnavailable(poolName)
             }
         }
     }
@@ -3154,6 +3186,7 @@ internal class KotlinTunForwarder(
         private val dnsFailureCount = AtomicInteger(0)
         private val silentResolverCount = AtomicInteger(0)
         private val workerRejectedCount = AtomicInteger(0)
+        private val workerThreadUnavailableCount = AtomicInteger(0)
         private val sessionLimitCount = AtomicInteger(0)
         private val udpRelayOpenCount = AtomicInteger(0)
         private val udpRelayFailureCount = AtomicInteger(0)
@@ -3338,6 +3371,15 @@ internal class KotlinTunForwarder(
                 counter = workerRejectedCount,
                 message = "Kotlin TUN forwarding $poolName worker pool is saturated; rejecting background task",
                 suppressedMessage = "Kotlin TUN forwarding worker saturation logs suppressed",
+            )
+        }
+
+        fun logWorkerThreadUnavailable(poolName: String) {
+            logLimited(
+                counter = workerThreadUnavailableCount,
+                message = "Kotlin TUN forwarding $poolName worker thread could not be started " +
+                    "(process out of threads); rejecting background task",
+                suppressedMessage = "Kotlin TUN forwarding thread start failure logs suppressed",
             )
         }
 
