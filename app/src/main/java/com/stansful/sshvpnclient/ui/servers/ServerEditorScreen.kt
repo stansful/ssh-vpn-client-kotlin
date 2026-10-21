@@ -79,6 +79,15 @@ internal enum class ServerField(val key: String, val label: String, val message:
 internal enum class SavePhase { Idle, Saving, Saved, Failed }
 
 /**
+ * Save is offered unless a save runs or ran, or "Accept new key" is in flight: both write the
+ * fingerprint, so EditConfigViewModel.save() drops a tap meanwhile, which an enabled button would
+ * swallow without a word.
+ */
+internal fun isServerSaveEnabled(phase: SavePhase, acceptingHostKey: Boolean): Boolean {
+    return phase != SavePhase.Saving && phase != SavePhase.Saved && !acceptingHostKey
+}
+
+/**
  * Server editor ("New server" / "Edit server"): profile, connection, sign-in (password or a saved key),
  * host fingerprint, keepalive and note, with Save in the top bar and in the pinned footer.
  */
@@ -126,6 +135,7 @@ internal fun ServerEditorScreen(
         else -> SavePhase.Idle
     }
     val busy = phase == SavePhase.Saving || phase == SavePhase.Saved
+    val saveEnabled = isServerSaveEnabled(phase, state.isAcceptingHostKey)
 
     Column(
         modifier = modifier
@@ -140,7 +150,7 @@ internal fun ServerEditorScreen(
             // ServerEditor.dc.html: the title has a 4 px left margin (60 dp from the start).
             titleStartPadding = 4.dp,
         ) {
-            ShadowTextButton(text = "Save", onClick = onSave, size = ShadowButtonSize.Medium, enabled = !busy)
+            ShadowTextButton(text = "Save", onClick = onSave, size = ShadowButtonSize.Medium, enabled = saveEnabled)
         }
         Box(
             modifier = Modifier
@@ -185,6 +195,7 @@ internal fun ServerEditorScreen(
         }
         EditorFooter(
             phase = phase,
+            saveEnabled = saveEnabled,
             invalid = invalid,
             savedLabel = "${form.name.trim().ifEmpty { "Server" }} is now first in Servers",
             onFix = ::nudge,

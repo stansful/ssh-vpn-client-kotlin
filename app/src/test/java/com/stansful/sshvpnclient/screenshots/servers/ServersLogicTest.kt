@@ -3,12 +3,15 @@ package com.stansful.sshvpnclient.screenshots.servers
 import com.stansful.sshvpnclient.ui.keys.SshKeyFormat
 import com.stansful.sshvpnclient.ui.keys.sshKeyFormatOf
 import com.stansful.sshvpnclient.ui.servers.FingerprintKind
+import com.stansful.sshvpnclient.ui.servers.SavePhase
 import com.stansful.sshvpnclient.ui.servers.fingerprintKind
 import com.stansful.sshvpnclient.ui.servers.formatShortDate
+import com.stansful.sshvpnclient.ui.servers.isServerSaveEnabled
 import com.stansful.sshvpnclient.ui.servers.keyUsageLabel
 import com.stansful.sshvpnclient.ui.servers.serversCountLabel
 import com.stansful.sshvpnclient.vpn.matchesSshHostKeyFingerprint
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -58,6 +61,17 @@ class ServersLogicTest {
         )
         assertNull(sshKeyFormatOf("-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"))
         assertNull(sshKeyFormatOf(ServersFixtures.PUBLIC_KEY))
+    }
+
+    @Test
+    fun saveWaitsForAnAcceptedHostKey() {
+        assertTrue(isServerSaveEnabled(SavePhase.Idle, acceptingHostKey = false))
+        assertTrue(isServerSaveEnabled(SavePhase.Failed, acceptingHostKey = false))
+        assertFalse(isServerSaveEnabled(SavePhase.Saving, acceptingHostKey = false))
+        assertFalse(isServerSaveEnabled(SavePhase.Saved, acceptingHostKey = false))
+        // "Accept new key" writes the fingerprint too; the view model would drop the tap.
+        assertFalse(isServerSaveEnabled(SavePhase.Idle, acceptingHostKey = true))
+        assertFalse(isServerSaveEnabled(SavePhase.Failed, acceptingHostKey = true))
     }
 
     @Test

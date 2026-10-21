@@ -33,6 +33,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -43,6 +44,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.stansful.sshvpnclient.ui.designsystem.DISABLED_ALPHA
 import com.stansful.sshvpnclient.ui.designsystem.ShadowIcons
 import com.stansful.sshvpnclient.ui.designsystem.ShadowSpinner
 import com.stansful.sshvpnclient.ui.designsystem.SwapText
@@ -55,11 +57,12 @@ import com.stansful.sshvpnclient.ui.theme.shadowTween
 /**
  * The server editor's pinned footer: the "Fix N fields" chip (jumps to the first error), the mint
  * [savedLabel] link while saved, the save failure, the save button and the storage note. Pads the
- * navigation bar and the keyboard.
+ * navigation bar and the keyboard. [saveEnabled]: see [isServerSaveEnabled].
  */
 @Composable
 internal fun EditorFooter(
     phase: SavePhase,
+    saveEnabled: Boolean,
     invalid: List<ServerField>,
     savedLabel: String,
     onFix: () -> Unit,
@@ -117,7 +120,7 @@ internal fun EditorFooter(
                     modifier = Modifier.padding(bottom = 12.dp),
                 )
             }
-            SaveServerButton(phase = phase, onClick = onSave)
+            SaveServerButton(phase = phase, enabled = saveEnabled, onClick = onSave)
             Row(
                 modifier = Modifier.padding(top = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
@@ -205,11 +208,15 @@ private fun SavedLink(label: String, onClick: () -> Unit, modifier: Modifier = M
     }
 }
 
-/** The footer's 52 dp save button: amber "Save server" → spinner "Saving…" → mint "Saved". */
+/**
+ * The footer's 52 dp save button: amber "Save server" → spinner "Saving…" → mint "Saved". Dimmed while
+ * it is disabled for another reason (an "Accept new key" in flight).
+ */
 @Composable
-private fun SaveServerButton(phase: SavePhase, onClick: () -> Unit) {
+private fun SaveServerButton(phase: SavePhase, enabled: Boolean, onClick: () -> Unit) {
     val colors = Shadow.colors
     val saved = phase == SavePhase.Saved
+    val dimmed = !enabled && phase != SavePhase.Saving && !saved
     val container by animateColorAsState(
         targetValue = if (saved) colors.mint else colors.amber,
         animationSpec = shadowTween(ShadowMotion.ColorFade, ShadowMotion.Ease),
@@ -231,10 +238,11 @@ private fun SaveServerButton(phase: SavePhase, onClick: () -> Unit) {
             .fillMaxWidth()
             .shadowClickable(
                 interactionSource = remember { MutableInteractionSource() },
-                enabled = phase != SavePhase.Saving && !saved,
+                enabled = enabled,
                 onClick = onClick,
             )
             .height(52.dp)
+            .alpha(if (dimmed) DISABLED_ALPHA else 1f)
             .clip(ShadowShapes.Button)
             .background(container),
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
