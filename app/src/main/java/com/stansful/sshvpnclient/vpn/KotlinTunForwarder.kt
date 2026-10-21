@@ -666,11 +666,15 @@ internal class KotlinTunForwarder(
         }
     }
     private val packetId = AtomicInteger(1)
-    private val dnsFailureStreak = AtomicInteger(0)
 
-    /** Resolvers that did not answer through the current transport, and until when to skip them. */
-    private val silentResolvers = SilentResolverTracker(nowMs = ::elapsedRealtimeMs)
-    private val degradationReported = AtomicBoolean(false)
+    /**
+     * The failed-query run and the silent resolvers of the current transport. Answers, failures and
+     * transport changes are recorded under [transportLock], for the transport they belong to.
+     */
+    private val dnsHealth = TunnelDnsHealth(
+        nowMs = ::elapsedRealtimeMs,
+        degradationThreshold = DNS_DEGRADATION_FAILURE_THRESHOLD,
+    )
     private val terminalError = AtomicReference<String?>(null)
     private val pressureCleanupScheduled = AtomicBoolean(false)
 
@@ -1261,7 +1265,7 @@ internal class KotlinTunForwarder(
             return
         }
         val sshSession = transport.session
-        val upstreams = TunnelDnsPolicy.upstreamsFor(dnsServerAddress, silentResolvers::isSilent)
+        val upstreams = TunnelDnsPolicy.upstreamsFor(dnsServerAddress, dnsHealth.silentResolvers::isSilent)
         try {
             val response = resolveThroughTunnel(
                 sshSession = sshSession,
@@ -1328,7 +1332,7 @@ internal class KotlinTunForwarder(
                     deadlineAtMs = startedAtMs + budgetMs,
                     transportGeneration = transportGeneration,
                 )
-                silentResolvers.markAnswered(upstream)
+                dnsHealth.silentResolvers.markAnswered(upstream)
                 return response
             } catch (error: Exception) {
                 lastError = error
@@ -1353,7 +1357,7 @@ internal class KotlinTunForwarder(
         message: String,
         transportGeneration: Long,
     ) {
-        if (!silentResolvers.markSilent(resolver, transportGeneration)) return
+        if (!dnsHealth.silentResolvers.markSilent(resolver, transportGeneration)) return
         diagnostics.logSilentResolver(
             resolver = addressToString(resolver),
             next = next?.let(::addressToString),
@@ -1432,14 +1436,11 @@ internal class KotlinTunForwarder(
         }
     }
 
-    /**
-     * Only the failure streak: a fallback resolver answering says nothing about the resolvers that
-     * stayed silent before it, so their marks keep their cooldown.
-     */
+    /** Ends the failure run; silent resolvers keep their cooldown (see [TunnelDnsHealth]). */
     private fun recordDnsSuccess(expectedTransport: DnsTransport) {
         synchronized(transportLock) {
             if (isDnsTransportActiveLocked(expectedTransport)) {
-                resetDnsFailureStreakLocked()
+                dnsHealth.recordSuccess()
             }
         }
     }
@@ -1448,34 +1449,24 @@ internal class KotlinTunForwarder(
         message: String,
         expectedTransport: DnsTransport,
     ): Boolean {
-        val (failures, shouldReport) = synchronized(transportLock) {
+        val reportedFailures = synchronized(transportLock) {
             if (!isDnsTransportActiveLocked(expectedTransport)) {
                 return false
             }
-            val failures = dnsFailureStreak.incrementAndGet()
-            failures to (
-                failures >= DNS_DEGRADATION_FAILURE_THRESHOLD &&
-                    degradationReported.compareAndSet(false, true)
-                )
+            dnsHealth.recordFailure()
         }
-        if (shouldReport) {
+        if (reportedFailures != null) {
             log(
-                "DNS failed $failures consecutive time(s); continuing per-query fallback " +
+                "DNS failed $reportedFailures consecutive time(s); continuing per-query fallback " +
                     "without rebuilding VPN; last error: $message",
             )
         }
         return true
     }
 
-    private fun resetDnsFailureStreakLocked() {
-        dnsFailureStreak.set(0)
-        degradationReported.set(false)
-    }
-
     /** The transport changed: failures and silent resolvers it saw belong to the old one. */
     private fun resetDnsTransportStateLocked() {
-        resetDnsFailureStreakLocked()
-        silentResolvers.onTransportChanged(transportGeneration)
+        dnsHealth.onTransportChanged(transportGeneration)
     }
 
     private fun isDnsTransportActiveLocked(expectedTransport: DnsTransport): Boolean {
