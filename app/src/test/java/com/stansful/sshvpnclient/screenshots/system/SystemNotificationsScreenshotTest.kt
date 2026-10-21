@@ -25,6 +25,7 @@ import com.stansful.sshvpnclient.screenshots.SystemBarsDp
 import com.stansful.sshvpnclient.screenshots.renderScreenshot
 import com.stansful.sshvpnclient.ui.system.AutoNotice
 import com.stansful.sshvpnclient.ui.system.NotificationAction
+import com.stansful.sshvpnclient.ui.system.alwaysOnStartNotification
 import com.stansful.sshvpnclient.ui.system.autoNotificationCopy
 import com.stansful.sshvpnclient.ui.system.connectionNotification
 import com.stansful.sshvpnclient.ui.system.routeNotificationCopy
@@ -91,6 +92,22 @@ class SystemNotificationsScreenshotTest : ScreenshotTest() {
         val open = shadowOf(notification.contentIntent).savedIntent
         assertEquals(MainActivity::class.java.name, open.component?.className)
         assertTrue(open.flags and Intent.FLAG_ACTIVITY_SINGLE_TOP != 0)
+    }
+
+    @Test
+    fun alwaysOnStartNoticeNamesNoModeAndOffersNoAction() {
+        // Android's start reaches the Server service even when Routes or Auto comes back.
+        val notification = context.alwaysOnStartNotification("ssh_vpn_connection")
+        assertEquals("Always-on VPN", notification.extras.getCharSequence(Notification.EXTRA_SUB_TEXT))
+        assertEquals("Starting VPN", notification.extras.getCharSequence(Notification.EXTRA_TITLE))
+        assertEquals(
+            "Restoring the mode you used last",
+            notification.extras.getCharSequence(Notification.EXTRA_TEXT),
+        )
+        assertTrue(notification.actions.isNullOrEmpty())
+        assertTrue(notification.flags and Notification.FLAG_ONGOING_EVENT != 0)
+        val open = shadowOf(notification.contentIntent).savedIntent
+        assertEquals(MainActivity::class.java.name, open.component?.className)
     }
 
     @Test

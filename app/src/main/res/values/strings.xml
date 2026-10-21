@@ -32,6 +32,10 @@
     <string name="notification_auto_live_check">Live check %1$d ms</string>
     <string name="notification_auto_no_route">No working route yet</string>
     <string name="notification_auto_next_pass">Next pass in %1$d s</string>
+    <!-- Android's own start (Always-on VPN) before the mode used last takes over: no action. -->
+    <string name="notification_always_on_mode">Always-on VPN</string>
+    <string name="notification_always_on_starting">Starting VPN</string>
+    <string name="notification_always_on_text">Restoring the mode you used last</string>
 
     <!-- Quick settings tile: "shadow", subtitle "<mode> · <status>". The error texts below match the
          messages the connect use cases publish, so the app shows the same words for either source. -->
