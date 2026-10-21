@@ -235,6 +235,14 @@ Entities:
 
 Есть миграция legacy secrets из `EncryptedSharedPreferences` `ssh_vpn_secrets`. Миграция идемпотентная и помечается в preferences.
 
+Keystore-ключ не покидает устройство. Если keyset сохранён, но не читается, а исправный Keystore
+отвечает, что master key `ssh_vpn_secret_master_key` отсутствует (данные перенесены с другого
+телефона), `RecoveringKeysetLoader` стирает keyset и шифртексты под ним и создаёт новый keyset; в
+Activity пишется строка `Saved passwords and keys can't be decrypted: ...`. До Android 12 Keystore
+сообщает «ключа нет», когда его сервис недоступен, поэтому «нет» засчитывается только после того, как
+пробный ключ удалось создать и найти. Любая другая ошибка (ключ есть, Keystore не ответил,
+`ProviderException`) пробрасывается как есть, без стирания.
+
 ## 11. Глобальное состояние VPN
 
 `VpnConnectionState`:
@@ -412,13 +420,19 @@ Mac, который по `b` перестаёт пропускать байты 
   на стороне сервера отвечает за миллисекунды, а роутер телефона (`192.168.x.1`, резолвер оператора в
   `10.x`/`100.64.x`) из сети сервера недостижим.
 - Резолвер, который не ответил, запоминается как молчащий на `5` минут (до смены SSH-транспорта) и
-  пропускается: платит только первый запрос. Строка в логе:
+  пропускается: платит только первый запрос. Ответ запасного резолвера отметку не снимает, снимает
+  только ответ самого резолвера, истечение срока или смена транспорта (`SilentResolverTracker`). Строка в логе:
   `DNS over SSH: <резолвер> did not answer (...); asking <следующий> instead`.
 - Открытие `direct-tcpip` канала ждёт, пока сервер дозвонится до адресата, до `10 s` для
   недостижимого. Поэтому открытия идут в своём пуле (`connect`, поток на поток TCP, до двух лимитов
-  сессий + `32`: закрытый поток держит своё открытие до таймаута), а не в общем `control`: раньше несколько недостижимых адресов занимали все `8`
-  control-потоков, и за ними вставали загрузки всех живых потоков - замирал весь туннель. DNS -
+  сессий + `32`: закрытый поток держит своё открытие до таймаута), а не в общем пуле: раньше несколько недостижимых адресов занимали все `8`
+  общих потоков, и за ними вставали загрузки всех живых потоков - замирал весь туннель. DNS -
   `16` воркеров вместо `4`.
+- Запись аплоада в SSH-канал тоже у каждого потока своя (пул `upload`, handoff без очереди, до лимита
+  сессий + `16`, простаивающий writer живёт `15 s`). Запись JSch ждёт окно канала без таймаута и не
+  реагирует на interrupt; раньше несколько потоков с закрытым окном занимали все `8` общих
+  control-потоков, и замирал аплоад всех остальных. Теперь такой поток держит только свой writer,
+  а закрытие канала (reset, idle/pressure cleanup, смена транспорта) его освобождает.
 - VoIP UDP на Telegram-рефлекторы - relay поверх TCP (см. ниже).
 
 ### 15.0 Кэш DNS и watchdog датапата
@@ -515,7 +529,7 @@ SSH не умеет форвардить UDP: `direct-tcpip` - это тольк
 - Normal/Battery Saver/Android low-RAM уменьшают только session cap `128/64/32` и retained packet pool `64/32/32`. Профиль применяется при построении нового TUN pipeline.
 - Upload queue управляет advertised TCP window. Любое отправленное нулевое окно остаётся sticky до отдельного положительного reopen ACK на актуальном sequence; обычный positive packet со старым sequence не может ошибочно снять latch. FIN закрывает SSH output после drain очереди.
 - Принятые payload coalesce-ятся в максимум восемь блоков по 64 KiB при capacity 512 KiB; два завершённых блока кешируются для повторного использования. Byte capacity является единственным advertised limit, поэтому мелкие сегменты не сжимают окно раньше времени. Rejected/duplicate/zero-window payload проверяется до копирования.
-- Upload flush пишет максимум один 64 KiB блок за control task и повторно ставит flow в хвост executor, сохраняя fairness между параллельными upload и корректный FIN drain.
+- Upload flush - один writer на flow за раз (порядок байт сохраняется), он пишет очередь блоками по 64 KiB, пока она не опустеет, затем закрывает SSH output после FIN. Fairness между параллельными upload больше не зависит от общего пула: у каждого flow свой writer.
 - Outbound IPv4/TCP кеширует и переиспользует до 64 возвращённых полных MTU-буферов; буфер возвращается в cache только после TUN write/drop, а payload не создаёт отдельный packet-sized массив. Лимит 64 относится к retained cache, а не к общему числу transient allocations при backlog.
 - `TcpPacketSender` имеет primitive JVM signature без `Function11` boxing; advertised window снимается под сериализованным outbound/session lock.
 - TUN writer блокируется на `take()` и zero-window reader на `Condition.await()`, поэтому idle path не создаёт периодических wakeups.
@@ -703,7 +717,12 @@ Parser:
 - Максимум строк при bulk import: 10000.
 - Пустые строки и строки `#...` игнорируются.
 - Схема определяется без учёта регистра. `ProxyProtocol.fromScheme` сопоставляет и `scheme`, и `aliases` (`hy2` у `HYSTERIA2`).
-- Для VLESS/Trojan используется URI parser.
+- Для VLESS/Trojan используется URI parser. Credential (userinfo до `@`) percent-decoded, литеральный
+  `+` остаётся `+` (как Go `url.Userinfo` и `URI.getUserInfo`): `trojan://abc+def@` - пароль `abc+def`.
+  Query и имя декодируются как form, `+` - пробел: так их пишут `URLSearchParams` и Go `url.Values`
+  (например, JSON в `extra`). Fingerprint ссылок без `+` в credential от этого не изменился; у
+  сохранённой строки с `+` остаётся прежний fingerprint, подключается она правильно (builder заново
+  разбирает raw URI), а remote source заменит её при следующем изменившемся sync.
 - Для VMess используется base64 JSON.
 - Для Hysteria 2 используется отдельный `Hysteria2LinkParser` без `java.net.URI`: тот не читает multi-port authority (`host:443,20000-50000`), а порт в ссылке Hysteria 2 необязателен.
 - Canonical fingerprint считается через SHA-256 по нормализованной конфигурации.
@@ -1159,7 +1178,11 @@ Components:
 Backup:
 
 - `android:allowBackup="false"`.
-- Настроены `dataExtractionRules` и `backup_rules`.
+- `dataExtractionRules` (Android 12+) исключают все домены (`root`, `file`, `database`, `sharedpref`,
+  `external` и их `device_*`) и из `cloud-backup`, и из `device-transfer`: перенос между устройствами
+  на Android 12+ идёт, несмотря на `allowBackup="false"`, а ключ Keystore не переносится, так что
+  перенесённые секреты всё равно не расшифровать. `backup_rules` исключают то же самое для Android 11
+  и ниже. На новом телефоне приложение начинает с нуля.
 
 ## 29. Безопасность и privacy
 
@@ -1238,7 +1261,7 @@ Backup:
 
 Основные unit test suites:
 
-- `ProxyShareLinkParserTest` - parser VLESS/VMess/Trojan/Hysteria 2, limits, failures; для Hysteria 2 - canonical fingerprint и общий fingerprint алиасов, bulk import, `hysteria://` v1 как `unsupported`.
+- `ProxyShareLinkParserTest` - parser VLESS/VMess/Trojan/Hysteria 2, limits, failures; `+` в userinfo VLESS/Trojan остаётся плюсом, а query и имя декодируются как form (`+` - пробел); для Hysteria 2 - canonical fingerprint и общий fingerprint алиасов, bulk import, `hysteria://` v1 как `unsupported`.
 - `Hysteria2LinkParserTest` - сама ссылка `Hysteria2LinkParser`: схемы `hysteria2://`/`hy2://` в любом регистре, порт по умолчанию, IPv6, multi-port authority и слияние hop-диапазонов, auth (`+` в userinfo, `@` и `:` в auth, query `auth`), имя, экранирование в fingerprint.
 - `Hysteria2ParametersTest` - параметры `Hysteria2LinkParser`: пустые значения и алиасы, `sni`/`peer`, пины (разделители, fail closed), `insecure`, Salamander/Gecko и слишком короткий `obfs-password`, неподдерживаемый `obfs` как `unsupported`, ECH (нормализация, fail closed), hop ports и `hop-interval` (включая `0`), Brutal bandwidth, отбрасывание прочих параметров.
 - `XrayConfigBuilderTest` - генерация Xray JSON, включая Hysteria 2 outbound (`serverName`, пины, Salamander, Gecko `packetSize`, `echConfigList`, `keepAlivePeriod`, Brutal, port hopping) и отсутствие `allowInsecure` у всех протоколов.
@@ -1251,6 +1274,9 @@ Backup:
 - `WakeRecoveryPolicyTest` - screen off/on policy.
 - `SshLinkLivenessTest` - счётчики SSH-сокета, вердикты watchdog'а (проба, reader, head-of-line, зависшая запись, молчание после записи), `kill()` на реальном loopback-сокете.
 - `TunnelDnsPolicyTest` - порядок резолверов через SSH, пропуск молчащих, короткий бюджет для частного адреса, границы частных диапазонов.
+- `SilentResolverTrackerTest` - отметка молчащего резолвера держится весь срок и переживает ответы запасных резолверов, снимается ответом самого резолвера и сменой транспорта, отметка от старого транспорта игнорируется.
+- `FlowWriterExecutorTest` - потоки, застрявшие на закрытом окне SSH-канала, не задерживают аплоад другого потока; закрытие канала освобождает writer; число writer'ов ограничено.
+- `RecoveringKeysetLoaderTest` - keyset без своего Keystore-ключа заменяется новым; при существующем ключе, неотвечающем Keystore, отсутствии keyset и runtime-ошибках ничего не стирается.
 - `ReconnectSupervisorTest` - backoff (включая screen-off), поколения линков, устаревшие триггеры (время постановки в очередь, id линка), прерывание ожидания и его пределы, лестница деградации, flapping, throttle строк триггеров.
 - `ReconnectBackoffTest` - exponential backoff.
 - `ConnectionPowerPolicyTest` - cadence, network handoff и stable-connection backoff policy.
