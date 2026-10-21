@@ -132,6 +132,23 @@ class AlwaysOnVpnPolicyTest {
     }
 
     @Test
+    fun `a session ending after android's start it kept still stops its service`() {
+        // Connect was start 1, Android's start 2 was kept: stopSelfResult(1) would be refused for good.
+        assertEquals(2, sessionStopStartId(sessionStartId = 1, keptAlwaysOnStartId = 2))
+    }
+
+    @Test
+    fun `a stop after android's start was kept uses its own newer start id`() {
+        // Android's start 2 was kept, then the user's disconnect came as start 3.
+        assertEquals(3, sessionStopStartId(sessionStartId = 3, keptAlwaysOnStartId = 2))
+    }
+
+    @Test
+    fun `without a kept android start the session stops with its own start id`() {
+        assertEquals(1, sessionStopStartId(sessionStartId = 1, keptAlwaysOnStartId = 0))
+    }
+
+    @Test
     fun `skipped start names the mode and what to fix for every reason`() {
         val texts = QuickTileOpenAppReason.entries.map { reason ->
             alwaysOnSkippedDiagnostic(VpnSessionOwner.OPEN_SOURCE, reason)
