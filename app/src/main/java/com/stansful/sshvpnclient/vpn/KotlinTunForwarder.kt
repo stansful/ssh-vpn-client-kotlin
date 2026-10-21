@@ -570,6 +570,56 @@ internal fun flowWriterLimit(maxActiveTcpSessions: Int): Int = maxActiveTcpSessi
 
 private const val FLOW_WRITER_THREAD_SLACK = 16
 
+/**
+ * Disconnects SSH channels for a thread that must not wait on one.
+ *
+ * A JSch channel's writer holds the channel's monitor for its whole write: while it queues for the
+ * session's socket behind every other uploading flow, and while that socket drains at the speed of
+ * the uplink. A disconnect needs that monitor first and then the socket for its CLOSE message, so
+ * under upload congestion it can take a while. The closer threads only ever wait, so a few are
+ * enough, and they expire when idle. A disconnect is never lost: once the closer is shut down it
+ * runs on the caller, and [shutdown] runs the ones still queued.
+ */
+internal class ChannelCloser(
+    threadFactory: ThreadFactory,
+    keepAliveMs: Long,
+    threads: Int = CHANNEL_CLOSER_THREADS,
+) {
+    private val executor = ThreadPoolExecutor(
+        threads,
+        threads,
+        keepAliveMs,
+        TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue(),
+        threadFactory,
+        ThreadPoolExecutor.AbortPolicy(),
+    ).apply {
+        allowCoreThreadTimeOut(true)
+    }
+
+    /** A failed disconnect has nobody to tell; on a pool thread it must not end the process either. */
+    fun disconnectLater(disconnect: () -> Unit) {
+        try {
+            executor.execute { runCatching(disconnect) }
+        } catch (_: RejectedExecutionException) {
+            runCatching(disconnect)
+        }
+    }
+
+    /**
+     * Stops taking disconnects and runs the queued ones here. Running ones are not interrupted:
+     * JSch would ignore it anyway, and they finish on their own.
+     */
+    fun shutdown() {
+        executor.shutdown()
+        val queued = ArrayList<Runnable>()
+        executor.queue.drainTo(queued)
+        queued.forEach(Runnable::run)
+    }
+}
+
+private const val CHANNEL_CLOSER_THREADS = 4
+
 internal class KotlinTunForwarder(
     private val vpnInterface: ParcelFileDescriptor,
     sshSession: Session,
@@ -715,7 +765,8 @@ internal class KotlinTunForwarder(
                 "voipUdpRelay=$HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS flows over reflector TCP $REFLECTOR_TCP_PORT, " +
                 "dnsCache=${DnsResponseCache.DEFAULT_MAX_ENTRIES} answers",
         )
-        readThread = Thread(
+        // Published by start(): the read thread finds itself in readThread (see disconnectTcpChannel).
+        val tunReadThread = Thread(
             {
                 var stopReason = "Stopped"
                 try {
@@ -742,8 +793,9 @@ internal class KotlinTunForwarder(
             READ_THREAD_NAME,
         ).apply {
             isDaemon = true
-            start()
         }
+        readThread = tunReadThread
+        tunReadThread.start()
     }
 
     fun stop() {
@@ -979,6 +1031,7 @@ internal class KotlinTunForwarder(
                         onClosed = { closedKey, closedSession ->
                             removeExpectedConcurrentEntry(sessions, closedKey, closedSession)
                         },
+                        disconnectChannel = ::disconnectTcpChannel,
                         config = config,
                     )
                 }
@@ -1661,6 +1714,21 @@ internal class KotlinTunForwarder(
         }
     }
 
+    /**
+     * The TUN read thread reads the packets of every flow - ACKs, DNS, new SYNs - so it never waits
+     * for a channel disconnect, which under upload congestion queues behind other flows' writes (see
+     * [ChannelCloser]). The flow it closes is already CLOSED and out of the table; only the channel
+     * goes later. Every other thread disconnects in place, and so does a teardown, which must not
+     * leave a channel behind.
+     */
+    private fun disconnectTcpChannel(channel: ChannelDirectTCPIP) {
+        if (Thread.currentThread() === readThread && running.get()) {
+            executors.disconnectLater(channel)
+        } else {
+            channel.disconnect()
+        }
+    }
+
     private fun closeSessions(resetClients: Boolean = false) {
         sessions.values.forEach { session ->
             runCatching {
@@ -1770,6 +1838,14 @@ internal class KotlinTunForwarder(
             setKeepAliveTime(WORKER_KEEP_ALIVE_MS, TimeUnit.MILLISECONDS)
             allowCoreThreadTimeOut(true)
         }
+        private val channelCloser = ChannelCloser(
+            threadFactory = NamedThreadFactory(CHANNEL_CLOSE_THREAD_PREFIX),
+            keepAliveMs = WORKER_KEEP_ALIVE_MS,
+        )
+
+        fun disconnectLater(channel: ChannelDirectTCPIP) {
+            channelCloser.disconnectLater { channel.disconnect() }
+        }
 
         fun executeUpload(task: () -> Unit): Boolean {
             return execute(UPLOAD_POOL_NAME, uploadExecutor, task)
@@ -1835,6 +1911,8 @@ internal class KotlinTunForwarder(
             remoteReadExecutor.shutdownNow()
             cleanupExecutor.shutdownNow()
             dnsTimeoutExecutor.shutdownNow()
+            // Disconnects handed over and not started yet run here: no channel stays open.
+            channelCloser.shutdown()
         }
 
         private fun execute(
@@ -1860,6 +1938,7 @@ internal class KotlinTunForwarder(
         private val packetSender: TcpPacketSender,
         private val activeSessionCount: () -> Int,
         private val onClosed: (TcpKey, TcpProxySession) -> Unit,
+        private val disconnectChannel: (ChannelDirectTCPIP) -> Unit,
         private val config: TunForwarderConfig,
     ) {
         private val lock = ReentrantLock()
@@ -2547,9 +2626,10 @@ internal class KotlinTunForwarder(
             return resources
         }
 
+        /** The flow is CLOSED already; the channel may go a little later (see disconnectTcpChannel). */
         private fun finishClose(resources: CloseResources) {
             resources.cleanupFutures.forEach { future -> future.cancel(false) }
-            resources.channel?.disconnect()
+            resources.channel?.let(disconnectChannel)
             onClosed(key, this)
         }
 
@@ -3803,6 +3883,7 @@ internal class KotlinTunForwarder(
         const val DNS_TIMEOUT_THREAD_PREFIX = "kotlin-tun-dns-timeout"
         const val REMOTE_READ_THREAD_PREFIX = "kotlin-tun-read"
         const val CLEANUP_THREAD_PREFIX = "kotlin-tun-cleanup"
+        const val CHANNEL_CLOSE_THREAD_PREFIX = "kotlin-tun-close"
         const val UPLOAD_POOL_NAME = "upload"
         const val CONNECT_POOL_NAME = "connect"
         const val DNS_POOL_NAME = "dns"
