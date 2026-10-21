@@ -87,6 +87,9 @@ internal fun logSeverity(message: String): LogSeverity = when {
 /** Whether the server's host key was checked against the fingerprint saved for it. */
 internal enum class HostKeyPin {
     NotPinned,
+
+    /** No fingerprint was saved: the key was trusted on first use and is now pinned to the server. */
+    PinnedOnFirstUse,
     Matched,
     Mismatch,
     Unknown,
@@ -110,8 +113,9 @@ internal data class ActivityHighlights(
 
 /**
  * Finds the last `Server host key fingerprint: SHA256:…` line (written by the SSH client on the
- * first attempt after Connect and every 5th retry) and the Telegram VoIP verdict of the TUN layer
- * (`… reaches no TCP port of the Telegram VoIP hosts …`).
+ * first attempt after Connect and every 5th retry) or `SSH host key pinned on first use: SHA256:…`
+ * (the service, once it pinned an unpinned server's key) and the Telegram VoIP verdict of the TUN
+ * layer (`… reaches no TCP port of the Telegram VoIP hosts …`).
  */
 internal fun activityHighlights(lines: List<ActivityLine>): ActivityHighlights {
     var fingerprint: String? = null
@@ -124,7 +128,15 @@ internal fun activityHighlights(lines: List<ActivityLine>): ActivityHighlights {
             fingerprint = message.substring(index + FINGERPRINT_PREFIX.length).trim().substringBefore(' ')
                 .ifEmpty { fingerprint }
         }
+        val pinnedIndex = message.indexOf(PINNED_ON_FIRST_USE_PREFIX)
+        if (pinnedIndex >= 0) {
+            // Quiet retries skip the "Server host key" line, so the pin line carries the key too.
+            fingerprint = message.substring(pinnedIndex + PINNED_ON_FIRST_USE_PREFIX.length).trim()
+                .substringBefore(' ')
+                .ifEmpty { fingerprint }
+        }
         when {
+            pinnedIndex >= 0 -> pin = HostKeyPin.PinnedOnFirstUse
             message.contains(FINGERPRINT_MISMATCH) -> pin = HostKeyPin.Mismatch
             message.contains(FINGERPRINT_MATCHED) -> pin = HostKeyPin.Matched
             message.contains(HOST_NOT_VERIFIED) -> pin = HostKeyPin.NotPinned
@@ -186,6 +198,7 @@ private const val TIME_LENGTH = 8
 private val TIME_PREFIX = Regex("^\\d{2}:\\d{2}:\\d{2} ")
 
 private const val FINGERPRINT_PREFIX = "Server host key fingerprint:"
+private const val PINNED_ON_FIRST_USE_PREFIX = "SSH host key pinned on first use:"
 private const val FINGERPRINT_MISMATCH = "Fingerprint mismatch"
 private const val FINGERPRINT_MATCHED = "Fingerprint matched"
 private const val HOST_NOT_VERIFIED = "host identity is not verified"

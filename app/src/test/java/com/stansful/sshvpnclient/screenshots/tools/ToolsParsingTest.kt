@@ -5,6 +5,7 @@ import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.ui.activity.ActivityFilter
 import com.stansful.sshvpnclient.ui.activity.ActivityLogTracker
+import com.stansful.sshvpnclient.ui.activity.FingerprintHighlight
 import com.stansful.sshvpnclient.ui.activity.HostKeyPin
 import com.stansful.sshvpnclient.ui.activity.LogSeverity
 import com.stansful.sshvpnclient.ui.activity.SessionMode
@@ -172,6 +173,28 @@ class ToolsParsingTest {
         assertTrue(highlights.telegramCallsBlocked)
         assertEquals("SHA256:9f2cLq…7Hk", shortFingerprint("SHA256:9f2cLqVb3rN0tWq8yZk1mHc5XeJ4uRa6sPd2oGiT7Hk"))
         assertTrue(activityHighlights(emptyList()).isEmpty)
+    }
+
+    @Test
+    fun highlightsShowAKeyPinnedOnFirstUse() {
+        val key = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+        val verbose = listOf(
+            "14:02:12 Server host key fingerprint: $key",
+            "14:02:12 WARNING: SSH host identity is not verified because no fingerprint is configured; " +
+                "trusting this key on first use, it is pinned once sign-in succeeds",
+            "14:02:13 SSH host key pinned on first use: $key",
+        ).mapIndexed { index, raw -> parseActivityLine(index.toLong(), raw) }
+
+        assertEquals(FingerprintHighlight(key, HostKeyPin.PinnedOnFirstUse), activityHighlights(verbose).fingerprint)
+        // A quiet retry logs no "Server host key" line: the pin line alone still names the key.
+        val quiet = listOf(parseActivityLine(0, "14:05:40 SSH host key pinned on first use: $key"))
+        assertEquals(FingerprintHighlight(key, HostKeyPin.PinnedOnFirstUse), activityHighlights(quiet).fingerprint)
+        // The next run checks the pin.
+        val nextRun = verbose + listOf(
+            "14:09:01 Server host key fingerprint: $key",
+            "14:09:01 Fingerprint matched",
+        ).mapIndexed { index, raw -> parseActivityLine(10L + index, raw) }
+        assertEquals(HostKeyPin.Matched, activityHighlights(nextRun).fingerprint?.pin)
     }
 
     @Test

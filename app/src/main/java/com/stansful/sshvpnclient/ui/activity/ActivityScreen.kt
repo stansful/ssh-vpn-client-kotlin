@@ -738,6 +738,8 @@ private fun FingerprintCard(
         Text(
             text = when (highlight.pin) {
                 HostKeyPin.NotPinned -> "Not pinned yet. Paste it into the server’s Host identity to pin it."
+                HostKeyPin.PinnedOnFirstUse ->
+                    "Pinned on first connect · later connections must show this key."
                 HostKeyPin.Matched -> "Pinned · it matches the server’s Host identity."
                 HostKeyPin.Mismatch -> "Doesn’t match the pinned Host identity, so sign-in was stopped."
                 HostKeyPin.Unknown -> "Paste it into the server’s Host identity to pin it."
