@@ -1,6 +1,8 @@
 package com.stansful.sshvpnclient.vpn
 
 import com.jcraft.jsch.HostKeyRepository
+import com.stansful.sshvpnclient.ui.servers.FingerprintKind
+import com.stansful.sshvpnclient.ui.servers.fingerprintKind
 import java.security.MessageDigest
 import java.util.Base64
 import org.junit.Assert.assertEquals
@@ -66,28 +68,90 @@ class SshConnectionManagerTest {
     }
 
     @Test
-    fun `host key repository preserves optional fingerprint policy`() {
+    fun `host key repository trusts an unpinned key on first use and captures its fingerprint`() {
         val hostKey = "unconfigured-server-host-key".toByteArray()
         val messages = mutableListOf<String>()
         val repository = FingerprintHostKeyRepository(expectedFingerprint = null, log = messages::add)
 
         assertEquals(HostKeyRepository.OK, repository.check("example.com", hostKey))
+        assertEquals(
+            HostKeyVerdict.Accepted(SshHostKeyTrust.FirstUse(openSshSha256(hostKey))),
+            repository.verdict,
+        )
         assertTrue(messages.any { it.contains("host identity is not verified") })
+        assertTrue(messages.contains("Server host key fingerprint: ${openSshSha256(hostKey)}"))
+    }
+
+    @Test
+    fun `a blank saved fingerprint means trust on first use too`() {
+        val hostKey = "blank-pin-host-key".toByteArray()
+        val repository = FingerprintHostKeyRepository(expectedFingerprint = "   ")
+
+        assertEquals(HostKeyRepository.OK, repository.check("example.com", hostKey))
+        assertTrue((repository.verdict as HostKeyVerdict.Accepted).trust is SshHostKeyTrust.FirstUse)
+    }
+
+    @Test
+    fun `fingerprint captured on first use is accepted as a pin by the check and by the editor`() {
+        val hostKey = "first-use-host-key".toByteArray()
+        val firstUse = FingerprintHostKeyRepository(expectedFingerprint = null)
+        firstUse.check("example.com", hostKey)
+        val captured = ((firstUse.verdict as HostKeyVerdict.Accepted).trust as SshHostKeyTrust.FirstUse).fingerprint
+
+        assertTrue(captured.startsWith("SHA256:"))
+        assertTrue(matchesSshHostKeyFingerprint(captured, hostKey))
+        assertEquals(FingerprintKind.Sha256, fingerprintKind(captured))
+        val pinned = FingerprintHostKeyRepository(expectedFingerprint = captured)
+        assertEquals(HostKeyRepository.OK, pinned.check("example.com", hostKey))
+        assertEquals(HostKeyVerdict.Accepted(SshHostKeyTrust.Pinned(captured)), pinned.verdict)
+    }
+
+    @Test
+    fun `a matching MD5 pin reports the key in the SHA256 form`() {
+        val hostKey = "legacy-pinned-host-key".toByteArray()
+        val md5 = MessageDigest.getInstance("MD5")
+            .digest(hostKey)
+            .joinToString(":") { byte -> "%02x".format(byte.toInt() and 0xFF) }
+        val repository = FingerprintHostKeyRepository(expectedFingerprint = " MD5:$md5 ")
+
+        assertEquals(HostKeyRepository.OK, repository.check("example.com", hostKey))
+        assertEquals(HostKeyVerdict.Accepted(SshHostKeyTrust.Pinned(openSshSha256(hostKey))), repository.verdict)
     }
 
     @Test
     fun `host key repository rejects mismatch before authentication`() {
         val messages = mutableListOf<String>()
+        val detail = mutableListOf<String>()
+        val pinned = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        val presented = "different-server-host-key".toByteArray()
         val repository = FingerprintHostKeyRepository(
-            expectedFingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            expectedFingerprint = pinned,
             log = messages::add,
+            detailLog = detail::add,
+        )
+
+        assertEquals(HostKeyRepository.CHANGED, repository.check("example.com", presented))
+        assertEquals(
+            HostKeyVerdict.Changed(pinnedFingerprint = pinned, observedFingerprint = openSshSha256(presented)),
+            repository.verdict,
+        )
+        // A mismatch ends the run, so it is logged even on quiet (non-verbose) attempts.
+        assertTrue(messages.any { it.contains("authentication was not attempted") })
+        assertTrue(messages.contains("Server host key fingerprint: ${openSshSha256(presented)}"))
+    }
+
+    @Test
+    fun `host key changed error names the server and the way out`() {
+        val error = SshHostKeyChangedException(
+            serverName = "Home VPS",
+            pinnedFingerprint = "SHA256:old",
+            observedFingerprint = "SHA256:new",
         )
 
         assertEquals(
-            HostKeyRepository.CHANGED,
-            repository.check("example.com", "different-server-host-key".toByteArray()),
+            "Host key changed for Home VPS. Open the server to review and accept the new key.",
+            error.message,
         )
-        assertTrue(messages.any { it.contains("authentication was not attempted") })
     }
 
     @Test
@@ -102,5 +166,10 @@ class SshConnectionManagerTest {
         assertFalse(sanitized.contains("another-secret"))
         assertTrue(sanitized.contains("password=<redacted>"))
         assertTrue(sanitized.contains("passphrase=<redacted>"))
+    }
+
+    private fun openSshSha256(hostKey: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(hostKey)
+        return "SHA256:" + Base64.getEncoder().withoutPadding().encodeToString(digest)
     }
 }

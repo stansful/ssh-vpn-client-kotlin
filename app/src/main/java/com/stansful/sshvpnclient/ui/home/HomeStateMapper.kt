@@ -1070,10 +1070,13 @@ internal fun failureNote(message: String, mode: HomeMode): HomeNote.Failure {
                 "Pick another key or add it again.",
                 NoteAction.EditServer,
             )
-        mode == HomeMode.Server && message.startsWith("Fingerprint mismatch") ->
+        // "Host key changed for <server>. Open the server to review and accept the new key."
+        mode == HomeMode.Server && message.startsWith("Host key changed") ->
             HomeNote.Failure(
-                sentence,
-                "The server's identity doesn't match the saved fingerprint.",
+                message.substringBefore(". Open the server").let { title ->
+                    if (title.endsWith(".")) title else "$title."
+                },
+                "Sign-in was stopped before your password or key was sent. Open the server to review the new key.",
                 NoteAction.EditServer,
             )
         mode == HomeMode.Server && message.startsWith("Authentication failed") ->

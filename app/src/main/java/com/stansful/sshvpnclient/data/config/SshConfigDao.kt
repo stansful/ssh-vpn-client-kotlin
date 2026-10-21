@@ -66,6 +66,21 @@ abstract class SshConfigDao {
     @Query("SELECT COUNT(*) FROM ssh_configs WHERE privateKeyId = :keyId")
     abstract suspend fun countByPrivateKeyId(keyId: String): Int
 
+    /**
+     * Trust on first use: saves [fingerprint] only while the server has none, in one statement, so a
+     * fingerprint the user saved meanwhile is never overwritten. `updatedAt` is left alone: pinning does
+     * not reorder the server list. Returns the number of rows changed (0 or 1).
+     */
+    @Query(
+        "UPDATE ssh_configs SET fingerprint = :fingerprint " +
+            "WHERE id = :id AND (fingerprint IS NULL OR TRIM(fingerprint) = '')",
+    )
+    abstract suspend fun pinFingerprintIfAbsent(id: String, fingerprint: String): Int
+
+    /** Replaces the host key fingerprint; returns the number of rows changed (0 or 1). */
+    @Query("UPDATE ssh_configs SET fingerprint = :fingerprint WHERE id = :id")
+    abstract suspend fun updateFingerprint(id: String, fingerprint: String): Int
+
     @Transaction
     open suspend fun selectConfig(id: String) {
         clearSelection()

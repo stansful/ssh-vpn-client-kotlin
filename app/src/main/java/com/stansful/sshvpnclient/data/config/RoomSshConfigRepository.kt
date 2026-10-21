@@ -110,6 +110,18 @@ class RoomSshConfigRepository(
         return withContext(ioDispatcher) { dao.countByPrivateKeyId(keyId) }
     }
 
+    override suspend fun pinFingerprintIfAbsent(id: String, fingerprint: String): Boolean {
+        val value = fingerprint.trim()
+        if (value.isEmpty()) return false
+        return withContext(ioDispatcher) { dao.pinFingerprintIfAbsent(id, value) > 0 }
+    }
+
+    override suspend fun replaceFingerprint(id: String, fingerprint: String): Boolean {
+        val value = fingerprint.trim()
+        if (value.isEmpty()) return false
+        return withContext(ioDispatcher) { dao.updateFingerprint(id, value) > 0 }
+    }
+
     private suspend fun savePasswordIfNeeded(
         config: SshConfig,
         existingSecretId: String?,

@@ -56,6 +56,12 @@ class SshConnectionManager internal constructor(
     @Volatile
     private var activeLinkRef: ActiveLinkRef? = null
 
+    /**
+     * Opens and authenticates an SSH session. The host key is checked before authentication: a key
+     * that differs from [SshConfig.fingerprint] fails with [SshHostKeyChangedException]; with no
+     * fingerprint saved the key is trusted for this session and reported as [SshHostKeyTrust.FirstUse],
+     * for the caller to pin.
+     */
     suspend fun connect(
         owner: Any,
         lease: VpnRuntimeLease,
@@ -66,7 +72,7 @@ class SshConnectionManager internal constructor(
         connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS,
         verboseDiagnostics: Boolean = true,
         onTransportDead: (linkId: Long, reason: String) -> Unit = { _, _ -> },
-    ): Session = withContext(Dispatchers.IO) {
+    ): EstablishedSshSession = withContext(Dispatchers.IO) {
         require(lease.owner === owner) { "SSH owner must match runtime lease" }
         val attemptGeneration = beginConnectionAttempt(owner, lease)
         var attemptedSession: Session? = null
@@ -80,12 +86,12 @@ class SshConnectionManager internal constructor(
             installJschLogger()
             configureEdDsaSupport(detailLog)
             val jsch = JSch()
-            jsch.setHostKeyRepository(
-                FingerprintHostKeyRepository(
-                    expectedFingerprint = config.fingerprint,
-                    log = detailLog,
-                ),
+            val hostKeys = FingerprintHostKeyRepository(
+                expectedFingerprint = config.fingerprint,
+                log = safeLog,
+                detailLog = detailLog,
             )
+            jsch.setHostKeyRepository(hostKeys)
             if (config.authType == AuthType.PRIVATE_KEY) {
                 val key = privateKey ?: throw VpnConnectionException("Selected SSH key not found")
                 detailLog("Loading private key into SSH client")
@@ -155,14 +161,26 @@ class SshConnectionManager internal constructor(
                 } else {
                     connectTransport(session, attemptedLink, connectTimeoutMs)
                 }
+                // Checked before promotion: a session that fails here is closed with the attempt.
+                val hostKey = (hostKeys.verdict as? HostKeyVerdict.Accepted)?.trust
+                    ?: throw VpnConnectionException("SSH host key was not verified")
                 if (!promoteConnectedSession(attemptGeneration, lease, session)) {
                     throw CancellationException("SSH connection attempt was cancelled")
                 }
                 attemptedLink?.startWatchdog()
                 safeLog("SSH transport connected" + attemptedLink?.let { link -> " (${link.label})" }.orEmpty())
-                session
+                EstablishedSshSession(session = session, hostKey = hostKey)
             } catch (error: JSchException) {
                 safeLog("JSch exception: ${error.message.orEmpty().ifBlank { error::class.java.simpleName }}")
+                // The verdict, not the exception: a deadline closing the socket wraps JSch's error.
+                (hostKeys.verdict as? HostKeyVerdict.Changed)?.let { changed ->
+                    throw SshHostKeyChangedException(
+                        serverName = config.name.ifBlank { config.host },
+                        pinnedFingerprint = changed.pinnedFingerprint,
+                        observedFingerprint = changed.observedFingerprint,
+                        cause = error,
+                    )
+                }
                 if (isPrivateKeyAuthFailure(error, config)) {
                     safeLog(
                         "Authentication hint: server rejected the selected key; verify username, host, " +
@@ -674,14 +692,26 @@ class SshConnectionManager internal constructor(
 
     private fun mapJschError(error: JSchException, config: SshConfig): VpnConnectionException {
         val message = error.message.orEmpty()
-        val userMessage = when {
-            error is JSchChangedHostKeyException ||
-                message.contains("HostKey has been changed", ignoreCase = true) ->
-                    "Fingerprint mismatch"
-            message.contains("Auth fail", ignoreCase = true) &&
-                config.authType == AuthType.PRIVATE_KEY ->
+        if (error is JSchChangedHostKeyException || message.contains("HostKey has been changed", ignoreCase = true)) {
+            // Only reached without a verdict (no key bytes to fingerprint): still never retried.
+            return SshHostKeyChangedException(
+                serverName = config.name.ifBlank { config.host },
+                pinnedFingerprint = config.fingerprint.orEmpty(),
+                observedFingerprint = null,
+                cause = error,
+            )
+        }
+        if (message.contains("Auth fail", ignoreCase = true)) {
+            return SshAuthenticationException(
+                message = if (config.authType == AuthType.PRIVATE_KEY) {
                     "Authentication failed: server rejected this private key for user '${config.username}'"
-            message.contains("Auth fail", ignoreCase = true) -> "Authentication failed"
+                } else {
+                    "Authentication failed"
+                },
+                cause = error,
+            )
+        }
+        val userMessage = when {
             message.contains("timeout", ignoreCase = true) -> "Connection timeout"
             message.contains("ECONNABORTED", ignoreCase = true) ||
                 message.contains("Software caused connection abort", ignoreCase = true) ->
@@ -806,31 +836,97 @@ private fun List<Pair<Session, SshTransportLink?>>.distinctBySession(): List<Pai
     return distinct
 }
 
+/** An authenticated SSH session and how its host key came to be trusted. */
+class EstablishedSshSession(
+    val session: Session,
+    val hostKey: SshHostKeyTrust,
+)
+
+/** How the host key of an authenticated session was trusted. */
+sealed interface SshHostKeyTrust {
+    /** `SHA256:<base64>`: the form the Activity log shows and the server editor's fingerprint field takes. */
+    val fingerprint: String
+
+    /** The key matched the fingerprint saved for the server. */
+    data class Pinned(override val fingerprint: String) : SshHostKeyTrust
+
+    /** No fingerprint was saved: the key was trusted for this session only and should be pinned now. */
+    data class FirstUse(override val fingerprint: String) : SshHostKeyTrust
+}
+
+/**
+ * The server presented a host key that does not match the pinned fingerprint. Authentication was not
+ * attempted; retrying cannot help, the user has to review the new key ([observedFingerprint], null when
+ * JSch reported the change without the key).
+ */
+class SshHostKeyChangedException(
+    serverName: String,
+    val pinnedFingerprint: String,
+    val observedFingerprint: String?,
+    cause: Throwable? = null,
+) : VpnConnectionException(
+    "Host key changed for $serverName. Open the server to review and accept the new key.",
+    cause,
+)
+
+/** The server rejected the password or key: each retry is another failed login on the server. */
+class SshAuthenticationException(
+    message: String,
+    cause: Throwable? = null,
+) : VpnConnectionException(message, cause)
+
+/** What [FingerprintHostKeyRepository] decided about the key of its attempt. */
+internal sealed interface HostKeyVerdict {
+    data class Accepted(val trust: SshHostKeyTrust) : HostKeyVerdict
+
+    data class Changed(val pinnedFingerprint: String, val observedFingerprint: String) : HostKeyVerdict
+}
+
+/**
+ * One connection attempt's host key check, run by JSch during key exchange, before authentication.
+ * A saved fingerprint must match; without one the key is trusted on first use ([verdict] tells the
+ * caller which fingerprint to pin once sign-in succeeds). [log] gets what must always reach Activity
+ * (a mismatch), [detailLog] the step-by-step lines of verbose attempts.
+ */
 internal class FingerprintHostKeyRepository(
     expectedFingerprint: String?,
     private val log: (String) -> Unit = {},
+    private val detailLog: (String) -> Unit = log,
 ) : HostKeyRepository {
     private val expectedFingerprint = expectedFingerprint?.trim().orEmpty()
+
+    /** Set by [check]; JSch calls it once per attempt, on the thread that runs `connect()`. */
+    @Volatile
+    var verdict: HostKeyVerdict? = null
+        private set
 
     override fun check(host: String?, key: ByteArray?): Int {
         if (key == null) return HostKeyRepository.CHANGED
 
         val actualFingerprint = openSshSha256Fingerprint(key)
-        log("Server host key fingerprint: $actualFingerprint")
         if (expectedFingerprint.isBlank()) {
-            log(
+            detailLog("Server host key fingerprint: $actualFingerprint")
+            detailLog(
                 "WARNING: SSH host identity is not verified because no fingerprint is configured; " +
-                    "save the displayed fingerprint to enable pre-authentication verification",
+                    "trusting this key on first use, it is pinned once sign-in succeeds",
             )
+            verdict = HostKeyVerdict.Accepted(SshHostKeyTrust.FirstUse(actualFingerprint))
             return HostKeyRepository.OK
         }
 
-        log("Checking configured SSH fingerprint before authentication")
         return if (matchesSshHostKeyFingerprint(expectedFingerprint, key)) {
-            log("Fingerprint matched")
+            detailLog("Server host key fingerprint: $actualFingerprint")
+            detailLog("Checking configured SSH fingerprint before authentication")
+            detailLog("Fingerprint matched")
+            verdict = HostKeyVerdict.Accepted(SshHostKeyTrust.Pinned(actualFingerprint))
             HostKeyRepository.OK
         } else {
+            log("Server host key fingerprint: $actualFingerprint")
             log("Fingerprint mismatch; authentication was not attempted")
+            verdict = HostKeyVerdict.Changed(
+                pinnedFingerprint = expectedFingerprint,
+                observedFingerprint = actualFingerprint,
+            )
             HostKeyRepository.CHANGED
         }
     }
