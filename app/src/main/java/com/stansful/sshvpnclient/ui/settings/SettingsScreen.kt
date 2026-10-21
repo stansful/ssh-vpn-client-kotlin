@@ -112,6 +112,7 @@ internal class SettingsActions(
     val onOpenAppRouting: () -> Unit = {},
     val onShowConnectionActivityChange: (Boolean) -> Unit = {},
     val onShowTerminalChange: (Boolean) -> Unit = {},
+    val onOpenVpnSettings: () -> Unit = {},
     val onWarnBeforeRoutesChange: (Boolean) -> Unit = {},
     val onRefreshInBackgroundChange: (Boolean) -> Unit = {},
     val onRefreshNow: () -> Unit = {},
@@ -252,6 +253,19 @@ private fun ConnectionSection(state: SettingsUiState, actions: SettingsActions, 
                 } else {
                     "Open a shell on the connected SSH server from Home."
                 },
+            )
+            // Android's lockdown is the kill switch: it blocks traffic whenever the tunnel is down, and
+            // Always-on brings back the last mode after a reboot (AlwaysOnVpnStarter).
+            ListRow(
+                title = "Kill switch",
+                subtitle = "Turn on Always-on VPN and Block connections without VPN for shadow " +
+                    "in Android’s VPN settings.",
+                subtitleMaxLines = 3,
+                leadingIcon = ShadowIcons.Lock,
+                trailing = {
+                    Icon(ShadowIcons.External, null, tint = Shadow.colors.ink3, modifier = Modifier.size(16.dp))
+                },
+                onClick = actions.onOpenVpnSettings,
             )
         }
     }

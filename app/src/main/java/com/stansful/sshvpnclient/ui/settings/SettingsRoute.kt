@@ -1,5 +1,7 @@
 package com.stansful.sshvpnclient.ui.settings
 
+import android.content.Intent
+import android.provider.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
@@ -9,11 +11,14 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import com.stansful.sshvpnclient.BuildConfig
+import com.stansful.sshvpnclient.ui.designsystem.LocalToaster
+import com.stansful.sshvpnclient.ui.designsystem.ToastTone
 import com.stansful.sshvpnclient.ui.designsystem.rememberClipboardCopier
 import com.stansful.sshvpnclient.ui.main.MainViewModel
 import com.stansful.sshvpnclient.ui.opensource.OpenSourceViewModel
@@ -46,6 +51,7 @@ fun SettingsRoute(
     val lastProgress by updates.lastProgress.collectAsStateWithLifecycle()
     val consentGate = rememberConsentGate()
     val links = rememberLinkOpener()
+    val vpnSettings = rememberVpnSettingsOpener()
     val copier = rememberClipboardCopier()
     val installer = rememberUpdateInstaller(onFailed = updates::onActionFailed)
     val now by rememberClock()
@@ -122,11 +128,12 @@ fun SettingsRoute(
         nowMs = now,
     )
 
-    val actions = remember(routes, main, updates, installer, links, copier, consentGate, navController) {
+    val actions = remember(routes, main, updates, installer, links, vpnSettings, copier, consentGate, navController) {
         SettingsActions(
             onOpenAppRouting = { navController.navigateTo(Destinations.APP_ROUTING) },
             onShowConnectionActivityChange = container.appSettingsRepository::setShowConnectionActivity,
             onShowTerminalChange = main::setShowTerminalOnMain,
+            onOpenVpnSettings = vpnSettings,
             onWarnBeforeRoutesChange = { enabled ->
                 // Turning the notice back on shows it the next time Routes opens, even in this launch.
                 if (enabled) RoutesConsentSession.acknowledged = false
@@ -184,6 +191,27 @@ fun SettingsRoute(
             else -> null
         },
     )
+}
+
+/**
+ * Opens Android's VPN settings, where Always-on VPN and Block connections without VPN are turned on.
+ * Some OEM builds have no such screen; a toast says where to look instead of crashing.
+ */
+@Composable
+private fun rememberVpnSettingsOpener(): () -> Unit {
+    val context = LocalContext.current
+    val toaster = LocalToaster.current
+    return remember(context, toaster) {
+        {
+            runCatching { context.startActivity(Intent(Settings.ACTION_VPN_SETTINGS)) }.onFailure {
+                toaster.show(
+                    message = "Couldn’t open VPN settings",
+                    tone = ToastTone.Error,
+                    detail = "Open Android Settings and search for VPN.",
+                )
+            }
+        }
+    }
 }
 
 /** Wall clock for relative times ("2 h ago"), ticking every 30 s. */
