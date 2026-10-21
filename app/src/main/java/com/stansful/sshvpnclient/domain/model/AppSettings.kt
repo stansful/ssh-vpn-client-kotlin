@@ -16,6 +16,8 @@ data class AppSettings(
     val openSourceAutoUpdateEnabled: Boolean = false,
     val smartConnectConsentVersion: Int = 0,
     val showSmartConnectWarningOnEnter: Boolean = true,
+    /** Android 13+: the app already asked for POST_NOTIFICATIONS once (it never asks again). */
+    val notificationPermissionRequested: Boolean = false,
 ) {
     /**
      * The single "Show connection activity" switch of the redesign. It is on when any of the three

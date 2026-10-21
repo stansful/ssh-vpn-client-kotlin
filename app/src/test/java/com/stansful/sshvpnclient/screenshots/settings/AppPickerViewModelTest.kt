@@ -136,5 +136,6 @@ class AppPickerViewModelTest {
         override fun setOpenSourceAutoUpdateEnabled(enabled: Boolean) = Unit
         override fun setSmartConnectConsentVersion(version: Int) = Unit
         override fun setShowSmartConnectWarningOnEnter(show: Boolean) = Unit
+        override fun setNotificationPermissionRequested(requested: Boolean) = Unit
     }
 }

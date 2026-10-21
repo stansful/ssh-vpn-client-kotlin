@@ -136,6 +136,11 @@ class SharedPreferencesAppSettingsRepository(
         currentSettings.value = currentSettings.value.copy(showSmartConnectWarningOnEnter = show)
     }
 
+    override fun setNotificationPermissionRequested(requested: Boolean) {
+        preferences.edit { putBoolean(KEY_NOTIFICATION_PERMISSION_REQUESTED, requested) }
+        currentSettings.value = currentSettings.value.copy(notificationPermissionRequested = requested)
+    }
+
     private fun readSettings(): AppSettings {
         applyOpenSourceAutoUpdateDefaultMigration()
         return AppSettings(
@@ -170,6 +175,10 @@ class SharedPreferencesAppSettingsRepository(
             showSmartConnectWarningOnEnter = preferences.getBoolean(
                 KEY_SHOW_SMART_CONNECT_WARNING_ON_ENTER,
                 true,
+            ),
+            notificationPermissionRequested = preferences.getBoolean(
+                KEY_NOTIFICATION_PERMISSION_REQUESTED,
+                false,
             ),
         )
     }
@@ -223,5 +232,6 @@ class SharedPreferencesAppSettingsRepository(
         const val KEY_SMART_CONNECT_CONSENT_VERSION = "smart_connect_consent_version"
         const val KEY_SHOW_SMART_CONNECT_WARNING_ON_ENTER =
             "show_smart_connect_warning_on_enter"
+        const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "notification_permission_requested"
     }
 }
