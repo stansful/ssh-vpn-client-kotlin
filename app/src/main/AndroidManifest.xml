@@ -46,6 +46,15 @@
             </intent-filter>
         </activity>
 
+        <!--
+            The three VPN services keep the android.net.VpnService filter. Builder.establish() resolves
+            the calling class through Intent(VpnService.SERVICE_INTERFACE) and requires BIND_VPN_SERVICE,
+            and Android offers Always-on VPN only to an app whose services answer this filter.
+            Always-on starts Intent(VpnService.SERVICE_INTERFACE).setPackage(app) when it is turned on,
+            after unlock following a reboot and after an app update; that start reaches whichever of the
+            three the package manager lists first, and each one hands it to vpn/AlwaysOnVpnStarter,
+            which brings back the mode used last.
+        -->
         <service
             android:name=".vpn.SshVpnService"
             android:exported="false"

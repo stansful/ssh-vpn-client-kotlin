@@ -131,6 +131,12 @@ class SmartConnectVpnService : android.net.VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         lastStartId = startId
         when {
+            intent?.action == android.net.VpnService.SERVICE_INTERFACE -> {
+                // Android's own start, not a redelivered ACTION_START: it must neither resurrect a
+                // stopped Auto below nor be redelivered itself.
+                handleAlwaysOnStart(startId)
+                return START_NOT_STICKY
+            }
             intent?.action == ACTION_STOP -> requestStop(startId, "Smart Connect stopped")
             !appContainer.smartConnectStateStore.desiredActive -> {
                 // ConnectSmartVpnUseCase persists the desired state before it starts us. A queued
@@ -162,6 +168,38 @@ class SmartConnectVpnService : android.net.VpnService() {
         } else {
             START_NOT_STICKY
         }
+    }
+
+    /**
+     * Android's own start (Always-on VPN): [AlwaysOnVpnStarter] brings back the last mode, Auto through
+     * ConnectSmartVpnUseCase like the tile. Android may have used startForegroundService(), so the
+     * deadline is met first, unless an Auto run already holds the foreground with its own notice.
+     */
+    private fun handleAlwaysOnStart(startId: Int) {
+        if (!runsAlwaysOnReceiverSession()) startSmartForeground(AutoNotice.Starting, force = true)
+        appContainer.alwaysOnVpnStarter.start { releaseAlwaysOnStart(startId) }
+    }
+
+    /** Main thread, like every stop of this service; a newer command makes stopSelfResult() refuse. */
+    private fun releaseAlwaysOnStart(startId: Int) {
+        if (serviceDestroyed) return
+        if (!mayStopAfterAlwaysOnStart(
+                state = appContainer.vpnConnectionRepository.currentState,
+                receiver = VpnSessionOwner.SMART_CONNECT,
+                // A restored run (redelivered ACTION_START) owns the global state only once it rehydrates.
+                receiverRunActive = !userRequestedStop,
+            )
+        ) {
+            return
+        }
+        if (stopSelfResult(startId)) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+    }
+
+    private fun runsAlwaysOnReceiverSession(): Boolean {
+        return !userRequestedStop ||
+            appContainer.vpnConnectionRepository.currentState.sessionOwner == VpnSessionOwner.SMART_CONNECT
     }
 
     override fun onDestroy() {
