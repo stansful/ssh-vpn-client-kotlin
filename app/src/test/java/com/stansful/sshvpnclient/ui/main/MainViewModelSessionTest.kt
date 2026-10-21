@@ -36,6 +36,8 @@ import com.stansful.sshvpnclient.domain.usecase.config.SelectSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
+import com.stansful.sshvpnclient.vpn.OpenSourceVpnService
+import com.stansful.sshvpnclient.vpn.SmartConnectVpnService
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
 import com.stansful.sshvpnclient.vpn.SshVpnService
 import java.time.Duration
@@ -167,6 +169,8 @@ class MainViewModelSessionTest {
 
         assertEquals(VpnSessionOwner.OPEN_SOURCE, vpn.currentState.sessionOwner)
         assertTrue(sshConnectStarts().isEmpty())
+        // The reconnect must not take the Xray path and stop the session the user just started.
+        assertTrue(xrayServiceCommands().isEmpty())
         assertTrue(vpn.errors.isEmpty())
         assertNull(viewModel.notice.value)
     }
@@ -238,6 +242,9 @@ class MainViewModelSessionTest {
         // Home offers Connect now; the restart is still in its grace before it reconnects.
         idleFor(100L)
         viewModel.connect()
+        // The connect takes over the restart's wait, grace included.
+        idleFor(DESTROY_GRACE_MS - 1L)
+        assertTrue(sshConnectStarts().isEmpty())
         idleFor(15_000L)
 
         assertEquals(1, sshConnectStarts().size)
@@ -249,18 +256,25 @@ class MainViewModelSessionTest {
     }
 
     @Test
-    fun `a reconnect that throws while the old session still owns the vpn is reported without setError`() {
+    fun `a reconnect reads the server only once the old session let go`() {
         val viewModel = createViewModel()
         configs.failure = IllegalStateException("Server storage unavailable")
 
         viewModel.reconnectThroughSelectedServer()
-        idleFor(DEBOUNCE_AND_PAUSE_MS + 100L)
+        idleFor(DEBOUNCE_AND_PAUSE_MS + 2_000L)
 
+        // Still waiting for the old session: nothing read, nothing published.
         assertTrue(vpn.errors.isEmpty())
         assertEquals(SSH_SESSION_ON_A, vpn.currentState)
+
+        vpn.setDisconnected()
+        idleFor(1_000L)
+
+        // Read into the released state, so the failure is the connection error and needs no toast.
+        assertEquals(listOf("Server storage unavailable"), vpn.errors)
+        assertEquals(VpnConnectionStatus.ERROR, vpn.currentState.status)
         assertTrue(sshConnectStarts().isEmpty())
-        assertEquals("Couldn’t reconnect", viewModel.notice.value?.message)
-        assertEquals("Server storage unavailable", viewModel.notice.value?.detail)
+        assertNull(viewModel.notice.value)
     }
 
     @Test
@@ -272,7 +286,7 @@ class MainViewModelSessionTest {
         assertTrue(sshDisconnectRequested())
         vpn.setDisconnected()
         configs.failure = IllegalStateException("Server storage unavailable")
-        idleFor(MainViewModel.SETTINGS_RECONNECT_DELAY_MS + 100L)
+        idleFor(MainViewModel.SETTINGS_RECONNECT_DELAY_MS + DESTROY_GRACE_MS + 100L)
 
         assertEquals(listOf("Server storage unavailable"), vpn.errors)
         assertEquals(VpnConnectionStatus.ERROR, vpn.currentState.status)
@@ -292,6 +306,114 @@ class MainViewModelSessionTest {
         assertEquals(ROUTES_SESSION, vpn.currentState)
         assertEquals("Couldn’t connect", viewModel.notice.value?.message)
         assertEquals("Server storage unavailable", viewModel.notice.value?.detail)
+    }
+
+    @Test
+    fun `the reconnect waits until Android had time to destroy the stopped service`() {
+        createViewModel().reconnectThroughSelectedServer()
+        idleFor(DEBOUNCE_AND_PAUSE_MS + 1_000L)
+
+        vpn.setDisconnected()
+        // SshVpnService.onDestroy() would wipe a session published before it ran.
+        idleFor(DESTROY_GRACE_MS - 1L)
+        assertTrue(sshConnectStarts().isEmpty())
+
+        idleFor(1L)
+        assertEquals(1, sshConnectStarts().size)
+        assertEquals(VpnConnectionStatus.RECONNECTING, vpn.currentState.status)
+    }
+
+    @Test
+    fun `the destroy grace also applies when the old session let go during the restart's pause`() {
+        createViewModel().reconnectThroughSelectedServer()
+        idleFor(MainViewModel.SETTINGS_CHANGE_DEBOUNCE_MS)
+        assertTrue(sshDisconnectRequested())
+        idleFor(100L)
+        vpn.setDisconnected()
+
+        // The pause ends; the stopped service may still be waiting for its onDestroy().
+        idleFor(MainViewModel.SETTINGS_RECONNECT_DELAY_MS - 100L)
+        idleFor(DESTROY_GRACE_MS - 1L)
+        assertTrue(sshConnectStarts().isEmpty())
+
+        idleFor(1L)
+        assertEquals(1, sshConnectStarts().size)
+    }
+
+    @Test
+    fun `a second Connect tap during a takeover still waits out the destroy grace`() {
+        val viewModel = createViewModel()
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(DEBOUNCE_AND_PAUSE_MS)
+        vpn.setDisconnected()
+        idleFor(100L)
+        viewModel.connect()
+        idleFor(100L)
+
+        viewModel.connect()
+        idleFor(DESTROY_GRACE_MS - 1L)
+        assertTrue(sshConnectStarts().isEmpty())
+
+        idleFor(15_000L)
+        assertEquals(1, sshConnectStarts().size)
+        assertEquals(VpnConnectionStatus.CONNECTING, vpn.currentState.status)
+    }
+
+    @Test
+    fun `a connect while the server session is already starting changes nothing`() {
+        // E.g. a second tap before Home shows Connecting, or the quick tile started it meanwhile.
+        val starting = VpnConnectionState(
+            status = VpnConnectionStatus.CONNECTING,
+            activeConfigId = "server-b",
+            activeTransport = VpnTransportType.SSH,
+            sessionOwner = VpnSessionOwner.SHADOW_SSH,
+        )
+        vpn = FakeVpnConnectionRepository(starting)
+        val viewModel = createViewModel()
+
+        viewModel.connect()
+        idleFor(0L)
+
+        assertEquals(starting, vpn.currentState)
+        assertTrue(sshConnectStarts().isEmpty())
+        idleFor(15_000L)
+        assertTrue(vpn.errors.isEmpty())
+        assertNull(viewModel.notice.value)
+    }
+
+    @Test
+    fun `a restart whose key was deleted publishes that error once the old session let go`() {
+        configs.selected = config("server-b", privateKeyId = "deleted-key")
+        val viewModel = createViewModel()
+
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(DEBOUNCE_AND_PAUSE_MS + 1_000L)
+        assertTrue(vpn.errors.isEmpty())
+
+        vpn.setDisconnected()
+        idleFor(1_000L)
+
+        assertEquals(listOf(MISSING_KEY), vpn.errors)
+        assertEquals(VpnConnectionStatus.ERROR, vpn.currentState.status)
+        assertEquals("server-b", vpn.currentState.activeConfigId)
+        assertTrue(sshConnectStarts().isEmpty())
+        assertNull(viewModel.notice.value)
+    }
+
+    @Test
+    fun `a connect rejected while a routes session runs is shown without setError`() {
+        vpn = FakeVpnConnectionRepository(ROUTES_SESSION)
+        configs.selected = config("server-b", privateKeyId = "deleted-key")
+        val viewModel = createViewModel()
+
+        viewModel.connect()
+        idleFor(0L)
+
+        assertTrue(vpn.errors.isEmpty())
+        assertEquals(ROUTES_SESSION, vpn.currentState)
+        assertTrue(xrayServiceCommands().isEmpty())
+        assertEquals("Couldn’t connect", viewModel.notice.value?.message)
+        assertEquals(MISSING_KEY, viewModel.notice.value?.detail)
     }
 
     @Test
@@ -369,6 +491,12 @@ class MainViewModelSessionTest {
     private fun sshConnectStarts() = sshIntents(SSH_ACTION_CONNECT)
 
     private fun sshDisconnectRequested() = sshIntents(SSH_ACTION_DISCONNECT).isNotEmpty()
+
+    /** Anything sent to the Routes / Auto services (e.g. their stop). */
+    private fun xrayServiceCommands(): List<Intent> = startedServices.filter { intent ->
+        intent.component?.className == OpenSourceVpnService::class.java.name ||
+            intent.component?.className == SmartConnectVpnService::class.java.name
+    }
 
     private class FakeVpnConnectionRepository(initial: VpnConnectionState) : VpnConnectionRepository {
         private val mutableState = MutableStateFlow(initial)
@@ -452,7 +580,7 @@ class MainViewModelSessionTest {
         }
     }
 
-    private class FakeSshConfigRepository(private val selected: SshConfig) : SshConfigRepository {
+    private class FakeSshConfigRepository(var selected: SshConfig) : SshConfigRepository {
         /** When set, [getSelectedConfig] suspends until it completes. */
         var gate: CompletableDeferred<Unit>? = null
 
@@ -524,6 +652,8 @@ class MainViewModelSessionTest {
         const val SSH_ACTION_CONNECT = "com.stansful.sshvpnclient.action.CONNECT"
         const val SSH_ACTION_DISCONNECT = "com.stansful.sshvpnclient.action.DISCONNECT"
         const val FOREGROUND_START_DENIED = "startForegroundService() not allowed"
+        const val MISSING_KEY = "Selected SSH key not found"
+        const val DESTROY_GRACE_MS = ConnectVpnUseCase.SSH_SERVICE_DESTROY_GRACE_MS
 
         /** The restart's debounce plus its pause before it reconnects. */
         const val DEBOUNCE_AND_PAUSE_MS =
@@ -543,15 +673,16 @@ class MainViewModelSessionTest {
             sessionOwner = VpnSessionOwner.OPEN_SOURCE,
         )
 
-        fun config(id: String) = SshConfig(
+        /** A password server, or a key server when [privateKeyId] is given (no key exists in [NoKeys]). */
+        fun config(id: String, privateKeyId: String? = null) = SshConfig(
             id = id,
             name = id,
             host = "$id.example",
             port = 22,
             username = "user",
-            authType = AuthType.PASSWORD,
-            password = "secret",
-            privateKeyId = null,
+            authType = if (privateKeyId == null) AuthType.PASSWORD else AuthType.PRIVATE_KEY,
+            password = if (privateKeyId == null) "secret" else null,
+            privateKeyId = privateKeyId,
             fingerprint = null,
             keepAliveIntervalSec = 30,
             enableUdpForwarding = false,

@@ -64,10 +64,9 @@ class AwaitVpnOwnerReleaseTest {
 
     @Test
     fun `the ssh wait covers its teardown and is longer than an xray switch`() {
-        val ssh = ConnectVpnUseCase.ownerReleaseTimeoutMs(VpnSessionOwner.SHADOW_SSH)
+        val ssh = ConnectVpnUseCase.SSH_OWNER_RELEASE_TIMEOUT_MS
         // SshVpnService.disconnect: 1 s job join + up to 2 s forwarder stop, after its lifecycle lock.
         assertTrue(ssh >= 5_000L)
-        assertTrue(ssh > ConnectVpnUseCase.ownerReleaseTimeoutMs(VpnSessionOwner.OPEN_SOURCE))
-        assertTrue(ssh > ConnectVpnUseCase.ownerReleaseTimeoutMs(VpnSessionOwner.SMART_CONNECT))
+        assertTrue(ssh > ConnectVpnUseCase.TRANSPORT_SWITCH_TIMEOUT_MS)
     }
 }
