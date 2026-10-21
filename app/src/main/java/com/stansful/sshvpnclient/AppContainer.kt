@@ -263,8 +263,8 @@ class AppContainer(
         AlwaysOnVpnStarter(
             applicationScope = applicationScope,
             vpnConnectionRepository = vpnConnectionRepository,
-            lastVpnSessionStore = lastVpnSessionStore,
-            lastVpnModeStarter = lastVpnModeStarter,
+            lastOwner = { lastVpnSessionStore.lastOwner.value },
+            modeStarter = lastVpnModeStarter,
         )
     }
     val observeVpnConnectionStateUseCase by lazy {

@@ -133,6 +133,33 @@ internal fun alwaysOnFailedDiagnostic(owner: VpnSessionOwner, message: String): 
     return "Always-on VPN: ${owner.alwaysOnModeLabel()} failed to start: $message"
 }
 
+/**
+ * What Android's start of [owner] came to once the mode's use case returned, judged by the state it
+ * left ([stateAfter]): a use case also returns normally when it gave up, because another session took
+ * over while it waited or because it published a validation error. [failure] is the message of a use
+ * case that threw.
+ */
+internal fun alwaysOnConnectDiagnostic(
+    owner: VpnSessionOwner,
+    failure: String?,
+    stateAfter: VpnConnectionState,
+): String {
+    if (failure != null) return alwaysOnFailedDiagnostic(owner, failure)
+    if (stateAfter.sessionOwner == owner && stateAfter.status in ALWAYS_ON_STARTED_STATUSES) {
+        return alwaysOnStartedDiagnostic(owner)
+    }
+    val error = stateAfter.errorMessage
+    if (stateAfter.status == VpnConnectionStatus.ERROR && error != null) {
+        return alwaysOnFailedDiagnostic(owner, error)
+    }
+    val other = stateAfter.sessionOwner?.takeIf { it != owner }
+    return if (other != null) {
+        "Always-on VPN: ${owner.alwaysOnModeLabel()} not started, ${other.alwaysOnModeLabel()} took over"
+    } else {
+        "Always-on VPN: ${owner.alwaysOnModeLabel()} not started"
+    }
+}
+
 /** The mode names the app shows (R.string.mode_server, mode_routes, mode_auto). */
 private fun VpnSessionOwner.alwaysOnModeLabel(): String = when (this) {
     VpnSessionOwner.SHADOW_SSH -> "Server"
@@ -164,4 +191,10 @@ private val ALWAYS_ON_BUSY_STATUSES = setOf(
     VpnConnectionStatus.CONNECTED,
     VpnConnectionStatus.RECONNECTING,
     VpnConnectionStatus.DISCONNECTING,
+)
+
+private val ALWAYS_ON_STARTED_STATUSES = setOf(
+    VpnConnectionStatus.CONNECTING,
+    VpnConnectionStatus.CONNECTED,
+    VpnConnectionStatus.RECONNECTING,
 )

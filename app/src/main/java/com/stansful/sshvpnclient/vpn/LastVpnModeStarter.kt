@@ -29,6 +29,14 @@ internal data class VpnModeStartCheck(
     val failureConfigId: String?,
 )
 
+/** Checks and starts a recorded mode: [LastVpnModeStarter]; [AlwaysOnVpnStarter] depends on this much. */
+internal interface VpnModeStarter {
+    suspend fun check(target: VpnSessionOwner): VpnModeStartCheck
+
+    /** Starts [owner] through its tab's use case; the error message if the use case threw, else null. */
+    suspend fun connect(owner: VpnSessionOwner, failureConfigId: String?): String?
+}
+
 /**
  * Starts a mode with no tab in front of it: the quick settings tile and Always-on VPN
  * ([AlwaysOnVpnStarter]) both bring back the mode recorded in LastVpnSessionStore. The Android lookups
@@ -47,10 +55,10 @@ internal class LastVpnModeStarter(
     private val connectVpnUseCase: ConnectVpnUseCase,
     private val connectProxyVpnUseCase: ConnectProxyVpnUseCase,
     private val connectSmartVpnUseCase: ConnectSmartVpnUseCase,
-) {
+) : VpnModeStarter {
     private val appContext = context.applicationContext
 
-    suspend fun check(target: VpnSessionOwner): VpnModeStartCheck {
+    override suspend fun check(target: VpnSessionOwner): VpnModeStartCheck {
         val settings = appSettingsRepository.settings.value
         val selectedAppsReady = settings.vpnMode != VpnMode.SELECTED_APPS ||
             settings.selectedAppPackages.isNotEmpty()
@@ -96,10 +104,10 @@ internal class LastVpnModeStarter(
     }
 
     /**
-     * Starts [owner] through its tab's use case. A use case that throws is published as the error of
-     * this attempt; returns that message then, null when the start went through.
+     * A use case that throws is published as the error of this attempt. Null does not mean the mode
+     * started: a use case that gave up (another session took over, a validation error) returns too.
      */
-    suspend fun connect(owner: VpnSessionOwner, failureConfigId: String?): String? {
+    override suspend fun connect(owner: VpnSessionOwner, failureConfigId: String?): String? {
         try {
             when (owner) {
                 VpnSessionOwner.SHADOW_SSH -> connectVpnUseCase()
