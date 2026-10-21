@@ -28,6 +28,7 @@ import com.stansful.sshvpnclient.vpn.canPublishVpnStartFailure
 import com.stansful.sshvpnclient.vpn.SshTerminalSession
 import java.util.ArrayDeque
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -148,6 +149,8 @@ class MainViewModel(
     observeVpnConnectionStateUseCase: ObserveVpnConnectionStateUseCase,
     private val appUpdateCoordinator: AppUpdateCoordinator,
     private val sshStopRequests: SshStopRequests,
+    /** Runs restarts: one that has stopped the session must reconnect even if the Activity finishes. */
+    private val applicationScope: CoroutineScope,
 ) : ViewModel() {
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
     private val tunnelCheck = MutableStateFlow(TunnelCheckState())
@@ -488,6 +491,8 @@ class MainViewModel(
     }
 
     override fun onCleared() {
+        // A restart still in its debounce has stopped nothing yet; one past it finishes its reconnect.
+        if (!sessionRestartStarted) sessionRestartJob?.cancel()
         val session = invalidateTerminalGeneration()
         runCatching { session?.close() }
     }
@@ -500,6 +505,8 @@ class MainViewModel(
      * either. Intent is re-checked after each pause and once the old session has let go: a restart
      * is dropped when its session has ended, another mode has taken the VPN over, or the user has
      * stopped the session since the request (the notification, the quick tile; [SshStopRequests]).
+     * Once it has stopped the session it runs on in [applicationScope] when the ViewModel is cleared
+     * (the Activity finished or was swiped away), so the VPN is not left off.
      */
     private fun restartSession(settings: AppSettings) {
         if (settings.requiresSelectedAppsButHasNone()) {
@@ -516,7 +523,7 @@ class MainViewModel(
         // the restart's own stop from one the user made.
         val stopRequestsAtRequest = sshStopRequests.current
         val isStillWanted = { sshStopRequests.current == stopRequestsAtRequest }
-        sessionRestartJob = viewModelScope.launch {
+        sessionRestartJob = applicationScope.launch(Dispatchers.Main.immediate) {
             delay(SETTINGS_CHANGE_DEBOUNCE_MS)
             // The session may have ended meanwhile (notification Stop, quick tile, another mode).
             if (!isStillWanted() || !vpnConnectionRepository.currentState.canDisconnect()) return@launch
@@ -545,7 +552,7 @@ class MainViewModel(
         val result = try {
             connectVpnUseCase(preserveDiagnostics = true, afterSshStop = true, isStillWanted = isStillWanted)
         } catch (cancellation: CancellationException) {
-            // Disconnect (or a cleared ViewModel) cancelled the restart: publish nothing.
+            // Disconnect or Connect cancelled the restart: publish nothing.
             throw cancellation
         } catch (error: Exception) {
             reportConnectFailure("Couldn’t reconnect", error)

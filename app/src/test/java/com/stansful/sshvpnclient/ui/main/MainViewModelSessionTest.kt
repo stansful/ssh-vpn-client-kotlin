@@ -43,6 +43,9 @@ import com.stansful.sshvpnclient.vpn.SshStopRequests
 import com.stansful.sshvpnclient.vpn.SshVpnService
 import java.time.Duration
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -77,6 +80,9 @@ class MainViewModelSessionTest {
     /** What SshVpnService records for every stop but a restart's own (notification, tile, Home). */
     private val stopRequests = SshStopRequests()
 
+    /** The app container's scope, which restarts run in. */
+    private val appScope = CoroutineScope(SupervisorJob())
+
     @Before
     fun setUp() {
         app = ApplicationProvider.getApplicationContext()
@@ -87,6 +93,7 @@ class MainViewModelSessionTest {
     @After
     fun tearDown() {
         store.clear()
+        appScope.cancel()
     }
 
     @Test
@@ -230,16 +237,50 @@ class MainViewModelSessionTest {
 
     @Test
     fun `a cancelled restart publishes no connection error`() {
-        createViewModel().reconnectThroughSelectedServer()
-        configs.gate = CompletableDeferred()
-        idleFor(DEBOUNCE_AND_PAUSE_MS + 100L)
+        val viewModel = createViewModel()
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(DEBOUNCE_AND_PAUSE_MS)
+        val gate = CompletableDeferred<Unit>()
+        configs.gate = gate
+        vpn.setDisconnected()
+        idleFor(DESTROY_GRACE_MS + 100L)
 
-        // The reconnect is suspended in the use case; clearing the ViewModel cancels it.
-        store.clear()
+        // The reconnect is suspended reading the server; Disconnect cancels it.
+        viewModel.disconnect()
+        gate.complete(Unit)
         idleFor(1_000L)
 
         assertTrue(vpn.errors.isEmpty())
         assertTrue(sshConnectStarts().isEmpty())
+        assertTrue(vpn.transitions.none { it.startsWith("reconnecting") })
+    }
+
+    @Test
+    fun `a restart that stopped the session reconnects after the activity is gone`() {
+        createViewModel().reconnectThroughSelectedServer()
+        idleFor(DEBOUNCE_AND_PAUSE_MS + 100L)
+        assertTrue(sshDisconnectRequested())
+
+        // The Activity finishes (swiped away from Recents) while the old session tears down.
+        store.clear()
+        vpn.setDisconnected()
+        idleFor(1_000L)
+
+        assertEquals(1, sshConnectStarts().size)
+        assertEquals(VpnConnectionStatus.RECONNECTING, vpn.currentState.status)
+        assertEquals("server-b", vpn.currentState.activeConfigId)
+    }
+
+    @Test
+    fun `a restart still in its debounce ends with the activity`() {
+        createViewModel().reconnectThroughSelectedServer()
+        idleFor(100L)
+
+        store.clear()
+        idleFor(15_000L)
+
+        assertTrue(startedServices.isEmpty())
+        assertEquals(SSH_SESSION_ON_A, vpn.currentState)
     }
 
     @Test
@@ -522,6 +563,7 @@ class MainViewModelSessionTest {
                 observeVpnConnectionStateUseCase = ObserveVpnConnectionStateUseCase(vpn),
                 appUpdateCoordinator = NoUpdates,
                 sshStopRequests = stopRequests,
+                applicationScope = appScope,
             ) as T
         }
         val viewModel = ViewModelProvider(store, factory)[MainViewModel::class.java]
