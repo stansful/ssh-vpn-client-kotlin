@@ -506,6 +506,62 @@ class MainViewModelSessionTest {
     }
 
     @Test
+    fun `a connect that took a restart over reconnects after the activity is gone`() {
+        val viewModel = createViewModel()
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(DEBOUNCE_AND_PAUSE_MS)
+        vpn.setDisconnected()
+        idleFor(100L)
+        viewModel.connect()
+        idleFor(100L)
+
+        // The Activity finishes while the connect waits out the stopped service's destroy grace.
+        store.clear()
+        idleFor(1_000L)
+
+        assertEquals(1, sshConnectStarts().size)
+        assertEquals(VpnConnectionStatus.CONNECTING, vpn.currentState.status)
+        assertEquals("server-b", vpn.currentState.activeConfigId)
+    }
+
+    @Test
+    fun `a stop from elsewhere drops a connect that took a restart over`() {
+        val viewModel = createViewModel()
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(DEBOUNCE_AND_PAUSE_MS)
+        vpn.setDisconnected()
+        idleFor(100L)
+        viewModel.connect()
+        idleFor(100L)
+        store.clear()
+
+        // The next Activity's Disconnect, the notification or the quick tile.
+        stopRequests.record()
+        idleFor(15_000L)
+
+        assertTrue(sshConnectStarts().isEmpty())
+        assertEquals(VpnConnectionStatus.DISCONNECTED, vpn.currentState.status)
+    }
+
+    @Test
+    fun `disconnect cancels a connect that took a restart over`() {
+        val viewModel = createViewModel()
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(DEBOUNCE_AND_PAUSE_MS)
+        vpn.setDisconnected()
+        idleFor(100L)
+        viewModel.connect()
+        idleFor(100L)
+
+        viewModel.disconnect()
+        idleFor(15_000L)
+
+        assertTrue(sshConnectStarts().isEmpty())
+        assertTrue(vpn.errors.isEmpty())
+        assertNull(viewModel.notice.value)
+    }
+
+    @Test
     fun `a second Connect tap during a takeover still waits out the destroy grace`() {
         val viewModel = createViewModel()
         viewModel.reconnectThroughSelectedServer()
