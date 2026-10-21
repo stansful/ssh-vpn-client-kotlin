@@ -1,6 +1,8 @@
 package com.stansful.sshvpnclient.vpn
 
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Which resolvers a DNS query from the TUN is asked, and for how long. Everything goes through the
@@ -88,6 +90,42 @@ internal object TunnelDnsPolicy {
     private const val IPV4_OCTETS = 4
     private const val OCTET_MAX = 255
     private const val BITS_PER_OCTET = 8
+}
+
+/**
+ * How DNS through the current SSH transport has been going: the run of failed queries, whether the
+ * run was already reported, and the resolvers that stayed silent.
+ *
+ * An answered query ends the failure run and nothing else. The silent marks keep their cooldown:
+ * the tunnel's resolvers answering says nothing about the router that stayed silent before them,
+ * and clearing the marks on every answer made each uncached lookup wait out the router's budget
+ * again. Only a new transport starts over with everything.
+ */
+internal class TunnelDnsHealth(
+    nowMs: () -> Long,
+    private val degradationThreshold: Int,
+) {
+    val silentResolvers = SilentResolverTracker(nowMs)
+    private val failureStreak = AtomicInteger(0)
+    private val degradationReported = AtomicBoolean(false)
+
+    fun recordSuccess() {
+        failureStreak.set(0)
+        degradationReported.set(false)
+    }
+
+    /** One more failed query. The run's length when it just reached the threshold, else null. */
+    fun recordFailure(): Int? {
+        val failures = failureStreak.incrementAndGet()
+        val report = failures >= degradationThreshold && degradationReported.compareAndSet(false, true)
+        return failures.takeIf { report }
+    }
+
+    /** A new SSH transport: the failures and silent resolvers of the old one don't apply to it. */
+    fun onTransportChanged(transportGeneration: Long) {
+        recordSuccess()
+        silentResolvers.onTransportChanged(transportGeneration)
+    }
 }
 
 /**
