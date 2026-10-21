@@ -163,10 +163,15 @@ class MainViewModel(
     private var terminalSession: SshTerminalSession? = null
     private var connectJob: Job? = null
 
-    /** Whether [connectJob] waits for the Server session a restart stopped (see [connect]). */
-    private var connectAfterSshStop = false
+    /** The Server session a restart stopped that [connectJob] waits for (see [connect]), else null. */
+    private var connectStoppedSession: Long? = null
     private var sessionRestartJob: Job? = null
-    private var sessionRestartStarted = false
+
+    /**
+     * The Server session [sessionRestartJob] stops ([ConnectVpnUseCase.latestSession]); null while the
+     * restart is still in its debounce and has stopped nothing.
+     */
+    private var restartStoppedSession: Long? = null
     private val sessionNotice = MutableStateFlow<ServerSessionNotice?>(null)
     private var noticeSequence = 0L
 
@@ -251,15 +256,15 @@ class MainViewModel(
         // stopped): both would start a session, and the loser would report a bogus failure. A restart
         // that has already stopped its session hands over its wait for that session to let go, and so
         // does an earlier Connect that took one over.
-        val afterSshStop = (sessionRestartStarted && sessionRestartJob?.isActive == true) ||
-            (connectAfterSshStop && connectJob?.isActive == true)
+        val stoppedSession = restartStoppedSession?.takeIf { sessionRestartJob?.isActive == true }
+            ?: connectStoppedSession?.takeIf { connectJob?.isActive == true }
         cancelSessionRestart()
         // The newest request wins; one that already started the service has completed anyway.
         connectJob?.cancel()
-        connectAfterSshStop = afterSshStop
+        connectStoppedSession = stoppedSession
         connectJob = viewModelScope.launch {
             try {
-                reportUnstartedConnect("Couldn’t connect", connectVpnUseCase(afterSshStop = afterSshStop))
+                reportUnstartedConnect("Couldn’t connect", connectVpnUseCase(stoppedSession = stoppedSession))
             } catch (cancellation: CancellationException) {
                 // The repository outlives this ViewModel; a cancelled scope must not publish
                 // a connection error into app-wide VPN state.
@@ -492,7 +497,7 @@ class MainViewModel(
 
     override fun onCleared() {
         // A restart still in its debounce has stopped nothing yet; one past it finishes its reconnect.
-        if (!sessionRestartStarted) sessionRestartJob?.cancel()
+        if (restartStoppedSession == null) sessionRestartJob?.cancel()
         val session = invalidateTerminalGeneration()
         runCatching { session?.close() }
     }
@@ -503,10 +508,11 @@ class MainViewModel(
      * stopped session to let go (see [ConnectVpnUseCase]). A restart that already began finishes
      * first; a pending one is replaced by the newest request; [disconnect] and [connect] cancel
      * either. Intent is re-checked after each pause and once the old session has let go: a restart
-     * is dropped when its session has ended, another mode has taken the VPN over, or the user has
-     * stopped the session since the request (the notification, the quick tile; [SshStopRequests]).
-     * Once it has stopped the session it runs on in [applicationScope] when the ViewModel is cleared
-     * (the Activity finished or was swiped away), so the VPN is not left off.
+     * is dropped when its session has ended, another mode or a newer Server session (the quick tile,
+     * Always-on VPN) has taken the VPN over, or the user has stopped the session since the request
+     * (the notification, the quick tile; [SshStopRequests]). Once it has stopped the session it runs
+     * on in [applicationScope] when the ViewModel is cleared (the Activity finished or was swiped
+     * away), so the VPN is not left off.
      */
     private fun restartSession(settings: AppSettings) {
         if (settings.requiresSelectedAppsButHasNone()) {
@@ -514,7 +520,7 @@ class MainViewModel(
             return
         }
         if (sessionRestartJob?.isActive == true) {
-            if (sessionRestartStarted) return
+            if (restartStoppedSession != null) return
             sessionRestartJob?.cancel()
         }
         if (!vpnState.value.canDisconnect()) return
@@ -533,24 +539,36 @@ class MainViewModel(
                 return@launch
             }
             val restartJob = coroutineContext.job
-            sessionRestartStarted = true
+            // The session stopped below: only while that one still owns the VPN is it worth waiting for.
+            val stoppedSession = connectVpnUseCase.latestSession
+            restartStoppedSession = stoppedSession
             try {
                 disconnectVpnUseCase(forRestart = true)
                 delay(SETTINGS_RECONNECT_DELAY_MS)
-                if (!isStillWanted() || !canContinueServerRestart(vpnConnectionRepository.currentState)) {
+                if (!isStillWanted() ||
+                    !canContinueServerRestart(
+                        state = vpnConnectionRepository.currentState,
+                        stoppedSession = stoppedSession,
+                        latestSession = connectVpnUseCase.latestSession,
+                    )
+                ) {
                     return@launch
                 }
-                reconnectAfterRestart(isStillWanted)
+                reconnectAfterRestart(stoppedSession, isStillWanted)
             } finally {
-                // A cancelled restart must not clear the flag of the restart that replaced it.
-                if (sessionRestartJob === restartJob) sessionRestartStarted = false
+                // A cancelled restart must not clear the session of the restart that replaced it.
+                if (sessionRestartJob === restartJob) restartStoppedSession = null
             }
         }
     }
 
-    private suspend fun reconnectAfterRestart(isStillWanted: () -> Boolean) {
+    private suspend fun reconnectAfterRestart(stoppedSession: Long, isStillWanted: () -> Boolean) {
         val result = try {
-            connectVpnUseCase(preserveDiagnostics = true, afterSshStop = true, isStillWanted = isStillWanted)
+            connectVpnUseCase(
+                preserveDiagnostics = true,
+                stoppedSession = stoppedSession,
+                isStillWanted = isStillWanted,
+            )
         } catch (cancellation: CancellationException) {
             // Disconnect or Connect cancelled the restart: publish nothing.
             throw cancellation
@@ -598,7 +616,7 @@ class MainViewModel(
     private fun cancelSessionRestart() {
         sessionRestartJob?.cancel()
         sessionRestartJob = null
-        sessionRestartStarted = false
+        restartStoppedSession = null
     }
 
     private fun notify(message: String, detail: String? = null) {
@@ -750,10 +768,18 @@ class MainViewModel(
 }
 
 /**
- * After the restart's pause: reconnect while the Server session is still stopping or already gone.
- * Another owner means the user started another mode meanwhile, so the restart is dropped.
+ * After the restart's pause: reconnect while the Server session it stopped ([stoppedSession]) is still
+ * stopping or already gone. The restart is dropped when another mode owns the VPN (the user started it
+ * meanwhile) or when a newer Server session was published ([latestSession] moved on): the quick tile
+ * or Always-on VPN started one after the stopped session let go, with the current server and settings,
+ * whether it is still running or has already ended.
  */
-internal fun canContinueServerRestart(state: VpnConnectionState): Boolean {
+internal fun canContinueServerRestart(
+    state: VpnConnectionState,
+    stoppedSession: Long,
+    latestSession: Long,
+): Boolean {
+    if (latestSession != stoppedSession) return false
     return state.sessionOwner == null || state.sessionOwner == VpnSessionOwner.SHADOW_SSH
 }
 

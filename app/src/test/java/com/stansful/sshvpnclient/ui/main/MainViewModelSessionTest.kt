@@ -33,6 +33,7 @@ import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.SshPrivateKeyRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.usecase.config.SelectSshConfigUseCase
+import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnResult
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
@@ -44,12 +45,14 @@ import com.stansful.sshvpnclient.vpn.SshVpnService
 import java.time.Duration
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -74,6 +77,7 @@ class MainViewModelSessionTest {
     private lateinit var app: Application
     private lateinit var vpn: FakeVpnConnectionRepository
     private lateinit var configs: FakeSshConfigRepository
+    private lateinit var connectUseCase: ConnectVpnUseCase
     private val store = ViewModelStore()
     private val startedServices = mutableListOf<Intent>()
 
@@ -185,6 +189,73 @@ class MainViewModelSessionTest {
         assertTrue(xrayServiceCommands().isEmpty())
         assertTrue(vpn.errors.isEmpty())
         assertNull(viewModel.notice.value)
+    }
+
+    @Test
+    fun `a server session the quick tile starts during the restart's pause takes the restart over`() {
+        val viewModel = createViewModel()
+
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(MainViewModel.SETTINGS_CHANGE_DEBOUNCE_MS)
+        assertTrue(sshDisconnectRequested())
+        // The old session lets go during the pause, and the tile (or Always-on VPN) starts Server mode.
+        vpn.setDisconnected()
+        assertEquals(ConnectVpnResult.Started, startFromTile())
+        idleFor(15_000L)
+
+        // The restart neither waits on the healthy new session nor reports it as still stopping.
+        assertEquals(1, sshConnectStarts().size)
+        assertEquals(VpnConnectionStatus.CONNECTING, vpn.currentState.status)
+        assertEquals(VpnSessionOwner.SHADOW_SSH, vpn.currentState.sessionOwner)
+        assertTrue(vpn.transitions.none { it.startsWith("reconnecting") })
+        assertTrue(vpn.errors.isEmpty())
+        assertNull(viewModel.notice.value)
+    }
+
+    @Test
+    fun `a restart does not start again after a newer server session has ended`() {
+        val viewModel = createViewModel()
+
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(MainViewModel.SETTINGS_CHANGE_DEBOUNCE_MS)
+        vpn.setDisconnected()
+        startFromTile()
+        // That session fails before the restart's pause is over; its error stays.
+        vpn.setError("server-b", "Authentication failed")
+        idleFor(15_000L)
+
+        assertEquals(1, sshConnectStarts().size)
+        assertEquals(VpnConnectionStatus.ERROR, vpn.currentState.status)
+        assertEquals("Authentication failed", vpn.currentState.errorMessage)
+        assertNull(viewModel.notice.value)
+    }
+
+    @Test
+    fun `a server session started as the old one lets go ends the reconnect's wait`() {
+        val viewModel = createViewModel()
+
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(DEBOUNCE_AND_PAUSE_MS + 1_000L)
+        // The reconnect waits for the old session. Its end and the tile's start land in one main-thread
+        // turn, so the wait never sees the VPN without an owner: only the new session.
+        startFromTile(sameTurn = { vpn.setDisconnected() })
+        idleFor(15_000L)
+
+        assertEquals(1, sshConnectStarts().size)
+        assertEquals(VpnConnectionStatus.CONNECTING, vpn.currentState.status)
+        assertTrue(vpn.transitions.none { it.startsWith("reconnecting") })
+        assertNull(viewModel.notice.value)
+    }
+
+    @Test
+    fun `a restart goes on only while the session it stopped still owns the vpn`() {
+        val stopping = SSH_SESSION_ON_A
+        assertTrue(canContinueServerRestart(stopping, stoppedSession = 3L, latestSession = 3L))
+        assertTrue(canContinueServerRestart(VpnConnectionState(), stoppedSession = 3L, latestSession = 3L))
+        // The same state, but a newer Server session: the quick tile or Always-on VPN started it.
+        assertFalse(canContinueServerRestart(stopping, stoppedSession = 3L, latestSession = 4L))
+        assertFalse(canContinueServerRestart(VpnConnectionState(), stoppedSession = 3L, latestSession = 4L))
+        assertFalse(canContinueServerRestart(ROUTES_SESSION, stoppedSession = 3L, latestSession = 3L))
     }
 
     @Test
@@ -543,20 +614,22 @@ class MainViewModelSessionTest {
 
     private fun createViewModel(context: Context = app): MainViewModel {
         val settings = FakeSettings()
+        // One instance, like the app container's: the quick tile and Always-on VPN start through it too.
+        connectUseCase = ConnectVpnUseCase(
+            context = context,
+            configRepository = configs,
+            keyRepository = NoKeys,
+            vpnConnectionRepository = vpn,
+            appSettingsRepository = settings,
+            lastVpnSessionStore = LastVpnSessionStore(app),
+        )
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T = MainViewModel(
                 appSettingsRepository = settings,
                 configRepository = configs,
                 vpnConnectionRepository = vpn,
-                connectVpnUseCase = ConnectVpnUseCase(
-                    context = context,
-                    configRepository = configs,
-                    keyRepository = NoKeys,
-                    vpnConnectionRepository = vpn,
-                    appSettingsRepository = settings,
-                    lastVpnSessionStore = LastVpnSessionStore(app),
-                ),
+                connectVpnUseCase = connectUseCase,
                 disconnectVpnUseCase = DisconnectVpnUseCase(app, vpn),
                 selectSshConfigUseCase = SelectSshConfigUseCase(configs),
                 sshConnectionManager = SshConnectionManager(),
@@ -569,6 +642,21 @@ class MainViewModelSessionTest {
         val viewModel = ViewModelProvider(store, factory)[MainViewModel::class.java]
         idleFor(0L)
         return viewModel
+    }
+
+    /**
+     * The quick tile or Always-on VPN starting Server mode through the shared use case, on the main
+     * thread like they do. [sameTurn] runs first in the same main-thread turn, before anything the
+     * start resumes gets to run.
+     */
+    private fun startFromTile(sameTurn: () -> Unit = {}): ConnectVpnResult? {
+        var result: ConnectVpnResult? = null
+        appScope.launch(Dispatchers.Main.immediate) {
+            sameTurn()
+            result = connectUseCase()
+        }
+        idleFor(0L)
+        return result
     }
 
     private fun idleFor(millis: Long) {
