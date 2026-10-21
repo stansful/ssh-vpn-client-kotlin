@@ -407,8 +407,8 @@ private fun ServerDetails(state: HomeUiState, actions: HomeActions) {
                         icon = ShadowIcons.Warning,
                         text = buildAnnotatedString {
                             append(
-                                "No fingerprint saved, so this server's identity isn't checked. Connect once, " +
-                                    "copy the fingerprint from Activity and paste it in ",
+                                "No fingerprint saved yet: the next connection trusts the server's key and " +
+                                    "pins it. To pin one you checked yourself, paste it in ",
                             )
                             withLink(
                                 LinkAnnotation.Clickable(
