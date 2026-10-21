@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -271,6 +273,82 @@ class RoomProxyProfileRepositoryBatchTest {
         assertEquals(existing, dao.entity(existing.id))
     }
 
+    @Test
+    fun `a remote sync gives a route whose secret store started over its link back`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        repository.import(text = HY2_LINK, source = ProxyProfileSource.REMOTE, sourceUrl = SOURCE_URL)
+        val original = dao.remainingEntities().single()
+        secretStorage.startOver()
+        assertNull(repository.getById(original.id))
+
+        val result = repository.import(text = HY2_LINK, source = ProxyProfileSource.REMOTE, sourceUrl = SOURCE_URL)
+
+        assertEquals(1, result.updated)
+        val healed = dao.remainingEntities().single()
+        assertEquals(original.id, healed.id)
+        assertNotEquals(original.secretId, healed.secretId)
+        assertEquals(HY2_LINK, repository.getById(original.id)?.rawUri)
+        assertEquals(listOf(original.id), repository.getByIds(listOf(original.id)).map { profile -> profile.id })
+        assertTrue(original.secretId in secretStorage.deletedSecretIds)
+    }
+
+    @Test
+    fun `a remote sync keeps the stored link of a route that can still read it`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        repository.import(text = HY2_LINK, source = ProxyProfileSource.REMOTE, sourceUrl = SOURCE_URL)
+        val original = dao.remainingEntities().single()
+
+        val result = repository.import(text = HY2_LINK, source = ProxyProfileSource.REMOTE, sourceUrl = SOURCE_URL)
+
+        assertEquals(1, result.updated)
+        assertEquals(original.secretId, dao.remainingEntities().single().secretId)
+        assertEquals(1, secretStorage.savedSecrets.size)
+        assertTrue(secretStorage.deletedSecretIds.isEmpty())
+    }
+
+    @Test
+    fun `importing a route that lost its link again restores it instead of counting a duplicate`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        repository.import(text = HY2_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+        val original = dao.remainingEntities().single()
+        secretStorage.startOver()
+
+        val result = repository.import(text = HY2_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+        val again = repository.import(text = HY2_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+
+        assertEquals(0, result.duplicates)
+        assertEquals(1, result.updated)
+        assertEquals(original.copy(secretId = dao.remainingEntities().single().secretId), dao.entity(original.id))
+        assertEquals(HY2_LINK, repository.getById(original.id)?.rawUri)
+        // Once it reads again, the same paste is an ordinary duplicate.
+        assertEquals(1, again.duplicates)
+        assertEquals(0, again.updated)
+    }
+
+    @Test
+    fun `pasting the link of a synced route that lost it restores the route and leaves it synced`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        repository.import(text = HY2_LINK, source = ProxyProfileSource.REMOTE, sourceUrl = SOURCE_URL)
+        val original = dao.remainingEntities().single()
+        secretStorage.startOver()
+
+        val result = repository.import(text = HY2_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+
+        assertEquals(1, result.updated)
+        val healed = dao.remainingEntities().single()
+        assertEquals(ProxyProfileSource.REMOTE.name, healed.source)
+        assertEquals(SOURCE_URL, healed.sourceUrl)
+        assertEquals(HY2_LINK, repository.getById(original.id)?.rawUri)
+    }
+
     private fun repository(
         dao: ProxyProfileDao,
         secretStorage: SecretStorage,
@@ -282,6 +360,7 @@ class RoomProxyProfileRepositoryBatchTest {
     )
 
     private companion object {
+        const val SOURCE_URL = "https://example.test/proxies"
         const val HY2_LINK = "hysteria2://correct-horse@hy2.example.test:443?sni=hy2.example.test#Hy2"
 
         // The alias scheme, the default port and `peer` for `sni` describe the same outbound.
@@ -319,6 +398,11 @@ private class RecordingSecretStorage(
     override suspend fun deleteSecret(id: String) {
         secrets.remove(id)
         deletedSecretIds += id
+    }
+
+    /** What the store looks like after it started over: every saved value is gone. */
+    fun startOver() {
+        secrets.clear()
     }
 }
 

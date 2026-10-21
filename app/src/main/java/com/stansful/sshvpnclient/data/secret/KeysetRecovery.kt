@@ -46,8 +46,9 @@ internal class RecoveringKeysetLoader<T>(
     companion object {
         const val KEYSET_RESET_MESSAGE =
             "Saved passwords and keys can't be decrypted: their Android Keystore key is missing " +
-                "(app data restored or moved from another device). Starting a new secret store; " +
-                "enter passwords and keys again."
+                "(app data restored or moved from another device). Starting a new secret store: " +
+                "enter SSH passwords and keys again and re-import routes added by hand; " +
+                "synced routes come back with their next sync."
     }
 }
 

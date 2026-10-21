@@ -243,6 +243,14 @@ Activity пишется строка `Saved passwords and keys can't be decrypte
 пробный ключ удалось создать и найти. Любая другая ошибка (ключ есть, Keystore не ответил,
 `ProviderException`) пробрасывается как есть, без стирания.
 
+Строки Room при этом остаются, и их secret id указывает в пустоту. Импорт маршрутов и каталога Smart
+Connect проверяет, читается ли секрет строки с тем же fingerprint (`readableSecretIds`, пачками по 256);
+если нет, строка получает ссылку из импорта под новым secret id, а старый id удаляется. Поэтому
+маршруты из источника и каталог Smart Connect возвращаются со следующим sync, а повторный импорт
+ручного маршрута восстанавливает его: это `updated`, а не `duplicates`, и source, выбор, pin и
+результаты проверки строки не меняются. SSH-пароли и ключи восстанавливаются через Edit: `update()`
+пишет секрет под прежний id.
+
 ## 11. Глобальное состояние VPN
 
 `VpnConnectionState`:
@@ -1287,7 +1295,7 @@ Backup:
 - `ProxySourceSyncNetworkSelectionTest` - выбор физической validated non-VPN unmetered сети для background sync.
 - `SmartConnectPolicyTest`/`SmartConnectViewModelPolicyTest` - ranking, `🇷🇺` exclusion, deadlines, terminal-result accumulation и расписание forced source refresh (первый проход, успех с/без sync, неудачный проход).
 - `PublicProxySourceEtagTest` - `If-None-Match` только для не-forced запроса к тому же URL, который выдал ETag, и при той же ревизии parser'а (`IMPORT_PARSER_REVISION`).
-- `RoomProxyProfileRepositoryBatchTest`/`RoomSmartProxyProfileRepositoryBatchTest` - в том числе импорт Hysteria 2 (protocol, QUIC transport, TLS), один профиль для `hy2://` и `hysteria2://`, подсчёт неподдерживаемых ссылок (`hysteria://` v1, неизвестный `obfs`) как `unsupported`, а не `invalid`, без сохранения, и Edit такой ссылкой без изменения профиля.
+- `RoomProxyProfileRepositoryBatchTest`/`RoomSmartProxyProfileRepositoryBatchTest` - в том числе импорт Hysteria 2 (protocol, QUIC transport, TLS), один профиль для `hy2://` и `hysteria2://`, подсчёт неподдерживаемых ссылок (`hysteria://` v1, неизвестный `obfs`) как `unsupported`, а не `invalid`, без сохранения, и Edit такой ссылкой без изменения профиля; строка, чей секрет не читается (хранилище секретов началось заново), получает ссылку обратно при sync и при повторном импорте, а строка с читаемым секретом свой secret id сохраняет.
 - `QuickTilePolicyTest`/`LastVpnSessionStoreTest` - выбор режима tile, матрица preconditions → `Connect`/`OpenApp(tab, reason)`, guard публикации ошибки, subtitle mode и storage-значения режима.
 - `OpenSourceUiStatePolicyTest` - OpenSource tab показывает текст ошибки только для выбранного route.
 - `VpnTrafficActivityMonitorTest` - RX/TX liveness policy для длинных download/upload.
