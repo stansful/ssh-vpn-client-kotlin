@@ -55,6 +55,11 @@ data class ParsedProxyProfile(
     val rawUri: String,
     val fingerprint: String,
     val parameters: Map<String, String>,
+    /**
+     * The fingerprint an older parser gave this link, when it differs: a VLESS or Trojan credential
+     * with a `+` was read with a space in its place. Rows saved then still carry it.
+     */
+    val legacyFingerprint: String? = null,
 )
 
 /**

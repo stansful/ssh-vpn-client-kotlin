@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.data.smart
 
 import com.stansful.sshvpnclient.data.proxy.ProxyTestResultUpdate
 import com.stansful.sshvpnclient.data.proxy.SQLITE_QUERY_BATCH_SIZE
+import com.stansful.sshvpnclient.data.proxy.legacyFingerprintMatches
 import com.stansful.sshvpnclient.data.proxy.sqliteQueryBatches
 import com.stansful.sshvpnclient.data.secret.SecretIds
 import com.stansful.sshvpnclient.data.secret.SecretStorage
@@ -111,23 +112,35 @@ class RoomSmartProxyProfileRepository(
             var unsupported = successful.size - policyAllowedProfiles.size + unsupportedSkipped
 
             val existingByFingerprint = successful
-                .map(ParsedProxyProfile::fingerprint)
+                .flatMap { parsed -> listOfNotNull(parsed.fingerprint, parsed.legacyFingerprint) }
                 .distinct()
                 .chunked(SQLITE_QUERY_BATCH_SIZE)
                 .flatMap { fingerprints -> dao.getByFingerprints(fingerprints) }
                 .associateBy(SmartProxyProfileEntity::fingerprint)
+            // A row saved before a `+` in a VLESS or Trojan credential was kept has an older
+            // fingerprint; it is found by that one and takes the current fingerprint below.
+            val legacyRows = legacyFingerprintMatches(
+                profiles = successful.distinctBy(ParsedProxyProfile::fingerprint),
+                rowsByFingerprint = existingByFingerprint,
+                secretIdOf = SmartProxyProfileEntity::secretId,
+                secretStorage = secretStorage,
+                parser = parser,
+            )
+            val existingFor = { fingerprint: String ->
+                existingByFingerprint[fingerprint] ?: legacyRows[fingerprint]
+            }
             val allowedFingerprints = uniqueProfiles.mapTo(hashSetOf(), ParsedProxyProfile::fingerprint)
             val policyRejectedIds = policyRejectedProfiles
                 .asSequence()
                 .map(ParsedProxyProfile::fingerprint)
                 .filterNot(allowedFingerprints::contains)
-                .mapNotNull { fingerprint -> existingByFingerprint[fingerprint]?.id }
+                .mapNotNull { fingerprint -> existingFor(fingerprint)?.id }
                 .toSet()
             // A row can outlive its link: the secret store starts over when its Keystore key is
             // gone. Such a row takes the link from this sync, or it would stay unusable for good.
             // A store that can't be read right now fails the sync here, before anything changes.
             val readableSecretIds = secretStorage.readableSecretIds(
-                uniqueProfiles.mapNotNull { parsed -> existingByFingerprint[parsed.fingerprint]?.secretId },
+                uniqueProfiles.mapNotNull { parsed -> existingFor(parsed.fingerprint)?.secretId },
             )
             val entitiesToUpsert = ArrayList<SmartProxyProfileEntity>(uniqueProfiles.size)
             val secretsToSave = LinkedHashMap<String, String>(uniqueProfiles.size)
@@ -137,11 +150,14 @@ class RoomSmartProxyProfileRepository(
                 if (parsed.transport == ProxyTransport.UNKNOWN || parsed.security == ProxySecurity.UNKNOWN) {
                     unsupported += 1
                 }
-                val existing = existingByFingerprint[parsed.fingerprint]
+                val existing = existingFor(parsed.fingerprint)
                 val existingReadable = existing != null && existing.secretId in readableSecretIds
                 if (existing != null && (source != ProxyProfileSource.REMOTE || existing.source != source.name)) {
                     if (existingReadable) {
                         duplicates += 1
+                        if (existing.fingerprint != parsed.fingerprint) {
+                            entitiesToUpsert += existing.copy(fingerprint = parsed.fingerprint)
+                        }
                         return@forEach
                     }
                     // Still a duplicate of that row, so the row keeps its source and state; only
@@ -150,7 +166,7 @@ class RoomSmartProxyProfileRepository(
                         profileId = existing.id,
                         revisionId = UUID.randomUUID().toString(),
                     ).also { newSecretId -> secretsToSave[newSecretId] = parsed.rawUri }
-                    entitiesToUpsert += existing.copy(secretId = secretId)
+                    entitiesToUpsert += existing.copy(secretId = secretId, fingerprint = parsed.fingerprint)
                     unreadableSecretIds += existing.secretId
                     updated += 1
                     return@forEach
@@ -228,6 +244,7 @@ class RoomSmartProxyProfileRepository(
                     return@withContext emptyImportResult(unsupported = 1)
                 }
                 val duplicate = dao.getByFingerprint(parsed.profile.fingerprint)
+                    ?: legacyRowOf(parsed.profile, exceptId = id)
                 if (duplicate != null && duplicate.id != id) {
                     return@withContext emptyImportResult(duplicates = 1)
                 }
@@ -367,6 +384,19 @@ class RoomSmartProxyProfileRepository(
                 )
             }
         }
+    }
+
+    /** A row other than [exceptId] that [profile] was saved to under its older fingerprint. */
+    private suspend fun legacyRowOf(profile: ParsedProxyProfile, exceptId: String): SmartProxyProfileEntity? {
+        val legacyFingerprint = profile.legacyFingerprint ?: return null
+        val row = dao.getByFingerprint(legacyFingerprint)?.takeIf { row -> row.id != exceptId } ?: return null
+        return legacyFingerprintMatches(
+            profiles = listOf(profile),
+            rowsByFingerprint = mapOf(legacyFingerprint to row),
+            secretIdOf = SmartProxyProfileEntity::secretId,
+            secretStorage = secretStorage,
+            parser = parser,
+        )[profile.fingerprint]
     }
 
     private suspend fun deleteSecretsBestEffort(ids: Collection<String>) {

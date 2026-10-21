@@ -10,6 +10,7 @@ import com.stansful.sshvpnclient.domain.model.ProxyTestStatus
 import com.stansful.sshvpnclient.domain.model.ProxyTransport
 import com.stansful.sshvpnclient.domain.model.ProxyTunnelTestResult
 import com.stansful.sshvpnclient.domain.repository.SmartProxyBatchSupersededException
+import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyParseResult
 import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyShareLinkParser
 import java.security.GeneralSecurityException
 import kotlinx.coroutines.Dispatchers
@@ -598,6 +599,51 @@ class RoomSmartProxyProfileRepositoryBatchTest {
         assertEquals(1, result.duplicates)
         assertEquals(1, result.unsupported)
         assertEquals(0, result.unsupportedSkipped)
+    }
+
+    @Test
+    fun `catalog sync finds the profile an older build saved a plus credential under`() = runBlocking {
+        val dao = RecordingSmartProxyProfileDao(emptyMap())
+        val secrets = RecordingSmartSecretStorage(emptyMap())
+        val repository = repository(dao, secrets)
+        val link = "trojan://correct+horse@plus.test:443?security=tls#Plus"
+        val parsed = (ProxyShareLinkParser().parse(link) as ProxyParseResult.Success).profile
+        repository.import(link, ProxyProfileSource.REMOTE, "https://example.test/smart")
+        val saved = dao.remainingEntities().single()
+            .copy(fingerprint = checkNotNull(parsed.legacyFingerprint), isPinned = true)
+            .also { dao.upsert(it) }
+
+        val result = repository.import(link, ProxyProfileSource.REMOTE, "https://example.test/smart")
+
+        assertEquals(0, result.added)
+        assertEquals(1, result.updated)
+        val synced = dao.remainingEntities().single()
+        assertEquals(saved.id, synced.id)
+        assertEquals(parsed.fingerprint, synced.fingerprint)
+        assertEquals(saved.secretId, synced.secretId)
+        assertTrue(synced.isPinned && !synced.isStale)
+    }
+
+    @Test
+    fun `catalog sync removes a profile an older build saved once its name is excluded`() = runBlocking {
+        val dao = RecordingSmartProxyProfileDao(emptyMap())
+        val secrets = RecordingSmartSecretStorage(emptyMap())
+        val repository = repository(dao, secrets)
+        val link = "vless://my+id@plus.test:443?security=tls#Allowed"
+        val parsed = (ProxyShareLinkParser().parse(link) as ProxyParseResult.Success).profile
+        repository.import(link, ProxyProfileSource.REMOTE, "https://example.test/smart")
+        val saved = dao.remainingEntities().single()
+            .copy(fingerprint = checkNotNull(parsed.legacyFingerprint))
+            .also { dao.upsert(it) }
+
+        repository.import(
+            link.replace("#Allowed", "#Now%20%F0%9F%87%B7%F0%9F%87%BA"),
+            ProxyProfileSource.REMOTE,
+            "https://example.test/smart",
+        )
+
+        assertTrue(dao.remainingEntities().isEmpty())
+        assertTrue(saved.secretId in secrets.deletedSecretIds)
     }
 
     private fun repository(

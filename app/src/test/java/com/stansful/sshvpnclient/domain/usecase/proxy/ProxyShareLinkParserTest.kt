@@ -9,6 +9,7 @@ import java.security.MessageDigest
 import java.util.Base64
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -217,6 +218,34 @@ class ProxyShareLinkParserTest {
         assertEquals(literal.fingerprint, escaped.fingerprint)
         // trojan://abc+def@example.net:8443|security=tls|sni=example.net
         assertEquals(sha256("trojan://abc+def@example.net:8443|security=tls|sni=example.net"), literal.fingerprint)
+    }
+
+    @Test
+    fun `a plus in a credential also gives the fingerprint older builds saved`() {
+        val trojan = success("trojan://abc+def@example.net:8443?security=tls&sni=example.net#One")
+        val vless = success("vless://my+id@example.com:443?security=tls&type=ws")
+
+        // Older builds read the `+` as a space.
+        assertEquals(sha256("trojan://abc def@example.net:8443|security=tls|sni=example.net"), trojan.legacyFingerprint)
+        assertEquals(sha256("vless://my id@example.com:443|security=tls|type=ws"), vless.legacyFingerprint)
+        // Which is what a link with a real space in its credential gets now.
+        assertEquals(
+            success("trojan://abc%20def@example.net:8443?security=tls&sni=example.net").fingerprint,
+            trojan.legacyFingerprint,
+        )
+    }
+
+    @Test
+    fun `a link without a plus in its credential has no older fingerprint`() {
+        listOf(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=ws&security=tls&path=%2Fa+b#A+B",
+            "trojan://pass%40word@example.net:8443?security=tls&sni=example.net#Trojan",
+            // An escaped plus was a plus for older builds too.
+            "trojan://abc%2Bdef@example.net:8443?security=tls",
+            "hy2://abc+def@example.com#Hy2",
+        ).forEach { link -> assertNull(link, success(link).legacyFingerprint) }
+        // A credential that was only `+` failed as missing before, so no row carries its fingerprint.
+        assertNull(success("trojan://+@example.net:443").legacyFingerprint)
     }
 
     @Test

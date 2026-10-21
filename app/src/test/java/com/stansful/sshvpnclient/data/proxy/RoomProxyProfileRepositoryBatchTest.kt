@@ -7,6 +7,7 @@ import com.stansful.sshvpnclient.domain.model.ProxySecurity
 import com.stansful.sshvpnclient.domain.model.ProxyTestStatus
 import com.stansful.sshvpnclient.domain.model.ProxyTransport
 import com.stansful.sshvpnclient.domain.model.ProxyTunnelTestResult
+import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyParseResult
 import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyShareLinkParser
 import java.security.GeneralSecurityException
 import kotlinx.coroutines.Dispatchers
@@ -397,6 +398,118 @@ class RoomProxyProfileRepositoryBatchTest {
         assertTrue(secretStorage.deletedSecretIds.isEmpty())
     }
 
+    @Test
+    fun `a sync finds the route an older build saved a plus credential under and keeps its state`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        val saved = dao.savedByOlderBuild(repository, PLUS_LINK, ProxyProfileSource.REMOTE, SOURCE_URL)
+        dao.upsert(saved.copy(isSelected = true, isPinned = true))
+
+        val result = repository.import(text = PLUS_LINK, source = ProxyProfileSource.REMOTE, sourceUrl = SOURCE_URL)
+
+        assertEquals(0, result.added)
+        assertEquals(1, result.updated)
+        val synced = dao.remainingEntities().single()
+        assertEquals(saved.id, synced.id)
+        assertEquals(currentFingerprint(PLUS_LINK), synced.fingerprint)
+        assertEquals(saved.secretId, synced.secretId)
+        assertTrue(synced.isSelected && synced.isPinned && !synced.isStale)
+        assertEquals(PLUS_LINK, repository.getById(saved.id)?.rawUri)
+    }
+
+    @Test
+    fun `pasting a plus link again finds the route an older build saved it as`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        val saved = dao.savedByOlderBuild(repository, PLUS_LINK, ProxyProfileSource.MANUAL, sourceUrl = null)
+
+        val result = repository.import(text = PLUS_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+        val again = repository.import(text = PLUS_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+
+        assertEquals(0, result.added)
+        assertEquals(1, result.duplicates)
+        // The route now carries the current fingerprint, so the next paste finds it directly.
+        assertEquals(saved.copy(fingerprint = currentFingerprint(PLUS_LINK)), dao.entity(saved.id))
+        assertEquals(1, again.duplicates)
+        assertEquals(1, dao.remainingEntities().size)
+        assertEquals(1, secretStorage.savedSecrets.size)
+        assertTrue(secretStorage.deletedSecretIds.isEmpty())
+    }
+
+    @Test
+    fun `a route whose credential has a real space is not taken for the plus link`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val repository = repository(dao, RecordingSecretStorage(emptyMap()))
+        repository.import(text = SPACE_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+        val spaceRoute = dao.remainingEntities().single()
+        // Older builds read the plus link the same way, so both share that fingerprint.
+        assertEquals(spaceRoute.fingerprint, legacyFingerprint(PLUS_LINK))
+
+        val result = repository.import(text = PLUS_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+
+        assertEquals(1, result.added)
+        assertEquals(spaceRoute, dao.entity(spaceRoute.id))
+        assertEquals(
+            setOf(spaceRoute.fingerprint, currentFingerprint(PLUS_LINK)),
+            dao.remainingEntities().map(ProxyProfileEntity::fingerprint).toSet(),
+        )
+    }
+
+    @Test
+    fun `a route saved under the older fingerprint whose link can't be read is left alone`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        val saved = dao.savedByOlderBuild(repository, PLUS_LINK, ProxyProfileSource.MANUAL, sourceUrl = null)
+        secretStorage.startOver()
+
+        val result = repository.import(text = PLUS_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+
+        // Nothing proves the row is this link, so it is neither given the link nor deleted.
+        assertEquals(1, result.added)
+        assertEquals(saved, dao.entity(saved.id))
+        assertTrue(secretStorage.deletedSecretIds.isEmpty())
+    }
+
+    @Test
+    fun `editing another route to a plus link an older build saved is a duplicate`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        val saved = dao.savedByOlderBuild(repository, PLUS_LINK, ProxyProfileSource.MANUAL, sourceUrl = null)
+        repository.import(text = OWN_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+        val other = dao.remainingEntities().single { entity -> entity.id != saved.id }
+
+        val result = repository.update(id = other.id, rawUri = PLUS_LINK)
+        val sameRoute = repository.update(id = saved.id, rawUri = PLUS_LINK.replace("#Plus", "#Renamed"))
+
+        assertEquals(1, result.duplicates)
+        assertEquals(other, dao.entity(other.id))
+        // The route itself takes its own link and, with it, the current fingerprint.
+        assertEquals(1, sameRoute.updated)
+        assertEquals(currentFingerprint(PLUS_LINK), dao.entity(saved.id)?.fingerprint)
+    }
+
+    /** Imports [link] and gives its row the fingerprint an older build saved it under. */
+    private suspend fun RecordingProxyProfileDao.savedByOlderBuild(
+        repository: RoomProxyProfileRepository,
+        link: String,
+        source: ProxyProfileSource,
+        sourceUrl: String?,
+    ): ProxyProfileEntity {
+        repository.import(text = link, source = source, sourceUrl = sourceUrl)
+        val imported = remainingEntities().single { entity -> entity.fingerprint == currentFingerprint(link) }
+        return imported.copy(fingerprint = legacyFingerprint(link)).also { upsert(it) }
+    }
+
+    private fun currentFingerprint(link: String): String = parsed(link).fingerprint
+
+    private fun legacyFingerprint(link: String): String = checkNotNull(parsed(link).legacyFingerprint)
+
+    private fun parsed(link: String) = (ProxyShareLinkParser().parse(link) as ProxyParseResult.Success).profile
+
     private fun repository(
         dao: ProxyProfileDao,
         secretStorage: SecretStorage,
@@ -424,6 +537,10 @@ class RoomProxyProfileRepositoryBatchTest {
         const val OWN_LINK = "vless://00000000-0000-4000-8000-000000000002@own.example.test:443?security=tls#Mine"
         const val SAME_ROUTE_OTHER_NAME_LINK =
             "vless://00000000-0000-4000-8000-000000000002@own.example.test:443?security=tls#Shared"
+
+        // Older builds read the `+` as a space: the plus link then had the space link's fingerprint.
+        const val PLUS_LINK = "trojan://correct+horse@trojan.example.test:443?security=tls#Plus"
+        const val SPACE_LINK = "trojan://correct%20horse@trojan.example.test:443?security=tls#Space"
     }
 }
 

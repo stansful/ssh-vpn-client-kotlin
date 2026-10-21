@@ -752,9 +752,15 @@ Parser:
 - Для VLESS/Trojan используется URI parser. Credential (userinfo до `@`) percent-decoded, литеральный
   `+` остаётся `+` (как Go `url.Userinfo` и `URI.getUserInfo`): `trojan://abc+def@` - пароль `abc+def`.
   Query и имя декодируются как form, `+` - пробел: так их пишут `URLSearchParams` и Go `url.Values`
-  (например, JSON в `extra`). Fingerprint ссылок без `+` в credential от этого не изменился; у
-  сохранённой строки с `+` остаётся прежний fingerprint, подключается она правильно (builder заново
-  разбирает raw URI), а remote source заменит её при следующем изменившемся sync.
+  (например, JSON в `extra`). Fingerprint ссылок без `+` в credential от этого не изменился. Строка,
+  сохранённая раньше из ссылки с `+`, хранит прежний fingerprint (credential с пробелом вместо `+`);
+  подключается она правильно (builder заново разбирает raw URI). Для такой ссылки parser отдаёт и
+  `legacyFingerprint`, и импорт/sync/Edit (`legacyFingerprintMatches`) находят строку и по нему, но
+  только если сохранённая ссылка строки разбирается в текущий fingerprint: ссылка с настоящим
+  пробелом (`%20`) в credential даёт тот же старый fingerprint и остаётся отдельной строкой, как и
+  строка, чья ссылка не читается. Найденная строка получает текущий fingerprint и сохраняет id,
+  выбор, pin и результаты проверки; повторный импорт - `duplicates`, sync - `updated`, Edit другой
+  строки на эту ссылку - `duplicates`. Читаются только секреты таких строк.
 - Для VMess используется base64 JSON.
 - Для Hysteria 2 используется отдельный `Hysteria2LinkParser` без `java.net.URI`: тот не читает multi-port authority (`host:443,20000-50000`), а порт в ссылке Hysteria 2 необязателен.
 - Canonical fingerprint считается через SHA-256 по нормализованной конфигурации.
@@ -1293,7 +1299,7 @@ Backup:
 
 Основные unit test suites:
 
-- `ProxyShareLinkParserTest` - parser VLESS/VMess/Trojan/Hysteria 2, limits, failures; `+` в userinfo VLESS/Trojan остаётся плюсом, а query и имя декодируются как form (`+` - пробел); для Hysteria 2 - canonical fingerprint и общий fingerprint алиасов, bulk import, `hysteria://` v1 как `unsupported`.
+- `ProxyShareLinkParserTest` - parser VLESS/VMess/Trojan/Hysteria 2, limits, failures; `+` в userinfo VLESS/Trojan остаётся плюсом, а query и имя декодируются как form (`+` - пробел); у такой ссылки есть `legacyFingerprint` прежнего чтения, у ссылок без `+` в userinfo его нет; для Hysteria 2 - canonical fingerprint и общий fingerprint алиасов, bulk import, `hysteria://` v1 как `unsupported`.
 - `Hysteria2LinkParserTest` - сама ссылка `Hysteria2LinkParser`: схемы `hysteria2://`/`hy2://` в любом регистре, порт по умолчанию, IPv6, multi-port authority и слияние hop-диапазонов, auth (`+` в userinfo, `@` и `:` в auth, query `auth`), имя, экранирование в fingerprint.
 - `Hysteria2ParametersTest` - параметры `Hysteria2LinkParser`: пустые значения и алиасы, `sni`/`peer`, пины (разделители, fail closed), `insecure`, Salamander/Gecko и слишком короткий `obfs-password`, неподдерживаемый `obfs` как `unsupported`, ECH (нормализация, fail closed), hop ports и `hop-interval` (включая `0`), Brutal bandwidth, отбрасывание прочих параметров.
 - `XrayConfigBuilderTest` - генерация Xray JSON, включая Hysteria 2 outbound (`serverName`, пины, Salamander, Gecko `packetSize`, `echConfigList`, `keepAlivePeriod`, Brutal, port hopping) и отсутствие `allowInsecure` у всех протоколов.
@@ -1325,6 +1331,7 @@ Backup:
 - `SmartConnectPolicyTest`/`SmartConnectViewModelPolicyTest` - ranking, `🇷🇺` exclusion, deadlines, terminal-result accumulation и расписание forced source refresh (первый проход, успех с/без sync, неудачный проход).
 - `PublicProxySourceEtagTest` - `If-None-Match` только для не-forced запроса к тому же URL, который выдал ETag, и при той же ревизии parser'а (`IMPORT_PARSER_REVISION`).
 - `RoomProxyProfileRepositoryBatchTest`/`RoomSmartProxyProfileRepositoryBatchTest` - в том числе импорт Hysteria 2 (protocol, QUIC transport, TLS), один профиль для `hy2://` и `hysteria2://`, подсчёт неподдерживаемых ссылок (`hysteria://` v1, неизвестный `obfs`) как `unsupported`, а не `invalid`, без сохранения, и Edit такой ссылкой без изменения профиля; строка, чей секрет не читается (хранилище секретов началось заново), получает ссылку обратно при sync и при повторном импорте, а строка с читаемым секретом свой secret id сохраняет; импорт или sync в момент, когда keyset на миг не загружается, падает, ничего не заменив и не удалив, а после него тот же импорт - обычный duplicate.
+- `LegacyFingerprintsTest` - строка под старым fingerprint находится, если её ссылка разбирается в текущий; строку, которую другая ссылка нашла по текущему fingerprint, старый не забирает; без `legacyFingerprint` секреты не читаются. В `RoomProxyProfileRepositoryBatchTest`/`RoomSmartProxyProfileRepositoryBatchTest` - sync и повторная вставка находят такую строку (id, выбор, pin сохраняются, fingerprint становится текущим), строка с пробелом в credential и строка с нечитаемой ссылкой остаются отдельно, Edit другой строки на эту ссылку - duplicate, исключённое Smart Connect имя удаляет такую строку.
 - `ReadableSecretIdsTest` - нечитаемы только нерасшифровавшиеся значения, чтение пачками по 256; хранилище, которое нельзя открыть, бросает ошибку вместо «не читается ничего».
 - `QuickTilePolicyTest`/`LastVpnSessionStoreTest` - выбор режима tile, матрица preconditions → `Connect`/`OpenApp(tab, reason)`, guard публикации ошибки, subtitle mode и storage-значения режима.
 - `OpenSourceUiStatePolicyTest` - OpenSource tab показывает текст ошибки только для выбранного route.
