@@ -4,8 +4,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.SshConfig
+import com.stansful.sshvpnclient.domain.model.SshHostKeyChange
 import com.stansful.sshvpnclient.domain.model.SshPrivateKeySummary
 import com.stansful.sshvpnclient.domain.model.ValidationException
+import com.stansful.sshvpnclient.domain.repository.SshHostKeyChangeRepository
+import com.stansful.sshvpnclient.domain.usecase.config.AcceptSshHostKeyUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.AddSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.GetSshConfigByIdUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.SshConfigValidator
@@ -37,10 +40,14 @@ data class EditConfigForm(
     val createdAt: Long? = null,
 )
 
+/** One-shot outcome of "Accept new key", shown as a toast. */
+enum class HostKeyAcceptResult { Accepted, Failed }
+
 /**
  * [errors] appear after the first failed save ([attempted]); from then on every edit re-validates, so
  * fixed fields clear and [validationRound] counts the failed saves (the screen jumps to the first
- * error on each one).
+ * error on each one). [hostKeyChange] is set while the last connection found a host key that differs
+ * from the pinned one.
  */
 data class EditConfigUiState(
     val form: EditConfigForm = EditConfigForm(),
@@ -53,6 +60,9 @@ data class EditConfigUiState(
     val isEditing: Boolean = false,
     val attempted: Boolean = false,
     val validationRound: Int = 0,
+    val hostKeyChange: SshHostKeyChange? = null,
+    val isAcceptingHostKey: Boolean = false,
+    val hostKeyAcceptResult: HostKeyAcceptResult? = null,
 )
 
 class EditConfigViewModel(
@@ -62,10 +72,15 @@ class EditConfigViewModel(
     private val getSshConfigByIdUseCase: GetSshConfigByIdUseCase,
     getSshPrivateKeyListUseCase: GetSshPrivateKeyListUseCase,
     private val keyTraitsReader: SshKeyTraitsReader,
+    private val hostKeyChanges: SshHostKeyChangeRepository,
+    private val acceptSshHostKeyUseCase: AcceptSshHostKeyUseCase,
 ) : ViewModel() {
     private val validator = SshConfigValidator()
     private val mutableState = MutableStateFlow(EditConfigUiState(isEditing = configId != null))
     val uiState = mutableState.asStateFlow()
+
+    /** The fingerprint as last read from or written to storage, to tell a user edit from no edit. */
+    private var storedFingerprint: String = ""
 
     init {
         viewModelScope.launch {
@@ -84,6 +99,7 @@ class EditConfigViewModel(
         }
         viewModelScope.launch {
             val existing = configId?.let { getSshConfigByIdUseCase(it) } ?: return@launch
+            storedFingerprint = existing.fingerprint.orEmpty()
             mutableState.update { state ->
                 val form = existing.toForm()
                 state.copy(
@@ -91,6 +107,13 @@ class EditConfigViewModel(
                     isEditing = true,
                     errors = state.revalidated(form),
                 )
+            }
+        }
+        if (configId != null) {
+            viewModelScope.launch {
+                hostKeyChanges.observe(configId).collectLatest { change ->
+                    mutableState.update { it.copy(hostKeyChange = change) }
+                }
             }
         }
     }
@@ -117,6 +140,40 @@ class EditConfigViewModel(
         }
     }
 
+    /**
+     * Pins the key the server presented instead of the saved one, right away (other edits still wait
+     * for Save). The next connection checks the new key.
+     */
+    fun acceptNewHostKey() {
+        val state = mutableState.value
+        val change = state.hostKeyChange ?: return
+        if (state.isAcceptingHostKey) return
+        mutableState.update { it.copy(isAcceptingHostKey = true, hostKeyAcceptResult = null) }
+        viewModelScope.launch {
+            try {
+                val saved = acceptSshHostKeyUseCase(change)
+                if (saved) storedFingerprint = change.observedFingerprint
+                mutableState.update {
+                    it.copy(
+                        form = if (saved) it.form.copy(fingerprint = change.observedFingerprint) else it.form,
+                        isAcceptingHostKey = false,
+                        hostKeyAcceptResult = if (saved) HostKeyAcceptResult.Accepted else HostKeyAcceptResult.Failed,
+                    )
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Exception) {
+                mutableState.update {
+                    it.copy(isAcceptingHostKey = false, hostKeyAcceptResult = HostKeyAcceptResult.Failed)
+                }
+            }
+        }
+    }
+
+    fun consumeHostKeyAcceptResult() {
+        mutableState.update { it.copy(hostKeyAcceptResult = null) }
+    }
+
     fun save() {
         val state = mutableState.value
         if (state.isSaving || state.isSaved) return
@@ -126,13 +183,22 @@ class EditConfigViewModel(
         }
         mutableState.update { it.copy(form = form, isSaving = true, message = null) }
         viewModelScope.launch {
-            val config = form.toDomain(System.currentTimeMillis())
             try {
+                val fingerprintEdited = form.fingerprint.trim() != storedFingerprint.trim()
+                var config = form.toDomain(System.currentTimeMillis())
+                if (state.isEditing && !fingerprintEdited) {
+                    // Not touched here: keep what is stored now, e.g. a key pinned on first use while
+                    // the editor was open.
+                    config = config.copy(fingerprint = getSshConfigByIdUseCase(config.id)?.fingerprint)
+                }
                 if (state.isEditing) {
                     updateSshConfigUseCase(config)
                 } else {
                     addSshConfigUseCase(config)
                 }
+                storedFingerprint = config.fingerprint.orEmpty()
+                // A fingerprint set by hand settles a pending "host key changed" either way.
+                if (fingerprintEdited) hostKeyChanges.clear(config.id)
                 mutableState.update { it.copy(isSaving = false, isSaved = true, errors = emptyMap(), message = null) }
             } catch (error: ValidationException) {
                 mutableState.update {

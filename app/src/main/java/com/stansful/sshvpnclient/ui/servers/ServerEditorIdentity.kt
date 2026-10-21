@@ -16,11 +16,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -34,9 +37,15 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.stansful.sshvpnclient.domain.model.SshHostKeyChange
 import com.stansful.sshvpnclient.ui.configedit.EditConfigForm
+import com.stansful.sshvpnclient.ui.designsystem.BannerTone
+import com.stansful.sshvpnclient.ui.designsystem.InlineBanner
 import com.stansful.sshvpnclient.ui.designsystem.LocalToaster
 import com.stansful.sshvpnclient.ui.designsystem.SectionHeader
+import com.stansful.sshvpnclient.ui.designsystem.ShadowButton
+import com.stansful.sshvpnclient.ui.designsystem.ShadowButtonSize
+import com.stansful.sshvpnclient.ui.designsystem.ShadowButtonVariant
 import com.stansful.sshvpnclient.ui.designsystem.ShadowIconButton
 import com.stansful.sshvpnclient.ui.designsystem.ShadowIcons
 import com.stansful.sshvpnclient.ui.designsystem.ToastTone
@@ -51,8 +60,11 @@ import java.util.Base64
 @Composable
 internal fun IdentitySection(
     form: EditConfigForm,
+    hostKeyChange: SshHostKeyChange?,
+    acceptingHostKey: Boolean,
     onFormChange: ((EditConfigForm) -> EditConfigForm) -> Unit,
     onOpenActivity: () -> Unit,
+    onAcceptHostKey: () -> Unit,
     modifier: Modifier,
 ) {
     val colors = Shadow.colors
@@ -62,13 +74,30 @@ internal fun IdentitySection(
     val scope = rememberCoroutineScope()
     val empty = form.fingerprint.isBlank()
     val kind = remember(form.fingerprint) { fingerprintKind(form.fingerprint) }
+    // Keeps the card filled in while it collapses after "Accept new key".
+    val lastChange = remember { arrayOfNulls<SshHostKeyChange>(1) }
+    if (hostKeyChange != null) lastChange[0] = hostKeyChange
     Column(modifier) {
         SectionHeader("Host identity")
+        AnimatedVisibility(
+            visible = hostKeyChange != null,
+            enter = expandVertically(shadowTween(EDITOR_EXPAND_MS)) + fadeIn(shadowTween(EDITOR_EXPAND_FADE_MS)),
+            exit = shrinkVertically(shadowTween(EDITOR_EXPAND_MS)) + fadeOut(shadowTween(EDITOR_EXPAND_FADE_MS)),
+        ) {
+            (hostKeyChange ?: lastChange[0])?.let { change ->
+                HostKeyChangedCard(
+                    change = change,
+                    accepting = acceptingHostKey,
+                    onAccept = onAcceptHostKey,
+                    modifier = Modifier.padding(bottom = 16.dp),
+                )
+            }
+        }
         EditorTextField(
             value = form.fingerprint,
             onValueChange = { value -> onFormChange { it.copy(fingerprint = value) } },
             label = "Fingerprint",
-            labelTrailing = "Optional · recommended",
+            labelTrailing = "Optional · pinned on first connect",
             placeholder = "SHA256:…",
             textStyle = Shadow.type.monoMedium,
             contentPadding = PaddingValues(start = FIELD_TEXT_INSET, end = 8.dp),
@@ -105,7 +134,7 @@ internal fun IdentitySection(
         )
         when {
             empty -> FieldMessage(
-                "Paste SHA256 or MD5. We check it before sending your password or key.",
+                "Saved from the server on the first successful sign-in, or paste SHA256 or MD5.",
                 FieldTone.Helper,
             )
             kind != null -> FieldMessage(
@@ -188,7 +217,7 @@ private fun FingerprintWarning(onOpenActivity: () -> Unit) {
         ) {
             Icon(ShadowIcons.Warning, contentDescription = null, tint = colors.amberText, modifier = NoteIconSize)
             Text(
-                text = "Without a fingerprint any server can pretend to be this one.",
+                text = "Until a fingerprint is saved, the next connection trusts whatever key the server shows.",
                 style = Shadow.type.bodyS,
                 color = colors.ink1,
                 modifier = Modifier.weight(1f),
@@ -218,9 +247,9 @@ private fun FingerprintWarning(onOpenActivity: () -> Unit) {
                     .size(18.dp),
             )
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(text = "Where do I find it?", style = Shadow.type.label, color = colors.amberText)
+                Text(text = "Want to check it yourself?", style = Shadow.type.label, color = colors.amberText)
                 Text(
-                    text = "Connect once, open Activity and copy the line “Server host key”.",
+                    text = "Compare “Server host key” in Activity with ssh-keygen -lf on the server.",
                     style = Shadow.type.bodyS,
                     color = colors.ink2,
                 )
@@ -228,6 +257,53 @@ private fun FingerprintWarning(onOpenActivity: () -> Unit) {
             Icon(ShadowIcons.ChevronRight, contentDescription = null, tint = colors.ink3, modifier = NoteIconSize)
         }
     }
+}
+
+/**
+ * Coral card shown while the last connection met a host key that differs from the pinned one: the new
+ * fingerprint and "Accept new key". Scrolls itself into view, since it is why the user came here.
+ */
+@Composable
+private fun HostKeyChangedCard(
+    change: SshHostKeyChange,
+    accepting: Boolean,
+    onAccept: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = Shadow.colors
+    val requester = remember { BringIntoViewRequester() }
+    LaunchedEffect(change.observedFingerprint) { requester.bringIntoView() }
+    InlineBanner(
+        title = "Host key changed.",
+        message = "The server showed a different key than the pinned one, so sign-in was stopped before " +
+            "your password or key was sent. Accept it only if you reinstalled the server or replaced its " +
+            "keys; otherwise someone may be intercepting the connection.",
+        tone = BannerTone.Error,
+        modifier = modifier.bringIntoViewRequester(requester),
+        action = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(text = "New key", style = Shadow.type.label, color = colors.ink2)
+                    Text(
+                        text = change.observedFingerprint,
+                        style = Shadow.type.monoMedium,
+                        color = colors.ink1,
+                        modifier = Modifier.semantics {
+                            contentDescription = "New key ${change.observedFingerprint}"
+                        },
+                    )
+                }
+                ShadowButton(
+                    text = "Accept new key",
+                    onClick = onAccept,
+                    variant = ShadowButtonVariant.DangerTonal,
+                    size = ShadowButtonSize.Compact,
+                    icon = ShadowIcons.Fingerprint,
+                    loading = accepting,
+                )
+            }
+        },
+    )
 }
 
 /** Kind of host-key fingerprint, as the connection's identity check understands it. */

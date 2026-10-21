@@ -9,7 +9,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import com.stansful.sshvpnclient.ui.configedit.EditConfigViewModel
+import com.stansful.sshvpnclient.ui.configedit.HostKeyAcceptResult
 import com.stansful.sshvpnclient.ui.designsystem.LocalToaster
+import com.stansful.sshvpnclient.ui.designsystem.ToastTone
 import com.stansful.sshvpnclient.ui.keys.SshKeyTraitsReader
 import com.stansful.sshvpnclient.ui.shell.Destinations
 import com.stansful.sshvpnclient.ui.shell.LocalAppContainer
@@ -33,6 +35,8 @@ fun ServerEditorRoute(
             getSshConfigByIdUseCase = container.getSshConfigByIdUseCase,
             getSshPrivateKeyListUseCase = container.getSshPrivateKeyListUseCase,
             keyTraitsReader = SshKeyTraitsReader(container.getSshPrivateKeyByIdUseCase),
+            hostKeyChanges = container.sshHostKeyChangeRepository,
+            acceptSshHostKeyUseCase = container.acceptSshHostKeyUseCase,
         )
     }
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -51,6 +55,16 @@ fun ServerEditorRoute(
         navController.navigateBack()
     }
 
+    LaunchedEffect(state.hostKeyAcceptResult) {
+        when (state.hostKeyAcceptResult) {
+            HostKeyAcceptResult.Accepted ->
+                toaster.show("New host key saved. Connect again to use it.", tone = ToastTone.Success)
+            HostKeyAcceptResult.Failed -> toaster.show("Couldn't save the new host key", tone = ToastTone.Error)
+            null -> return@LaunchedEffect
+        }
+        viewModel.consumeHostKeyAcceptResult()
+    }
+
     ServerEditorScreen(
         state = state,
         onBack = { navController.navigateBack() },
@@ -60,6 +74,7 @@ fun ServerEditorRoute(
         onKeySelect = viewModel::selectPrivateKey,
         onAddKey = { navController.navigateTo(Destinations.keyEdit()) },
         onOpenActivity = { navController.navigateTo(Destinations.ACTIVITY) },
+        onAcceptHostKey = viewModel::acceptNewHostKey,
     )
 }
 

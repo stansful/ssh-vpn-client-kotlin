@@ -92,6 +92,7 @@ internal fun ServerEditorScreen(
     onKeySelect: (String) -> Unit,
     onAddKey: () -> Unit,
     onOpenActivity: () -> Unit,
+    onAcceptHostKey: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val form = state.form
@@ -168,7 +169,15 @@ internal fun ServerEditorScreen(
                     onAddKey = onAddKey,
                     modifier = Modifier.fadeUpIn(2),
                 )
-                IdentitySection(form, onFormChange, onOpenActivity, Modifier.fadeUpIn(3))
+                IdentitySection(
+                    form = form,
+                    hostKeyChange = state.hostKeyChange,
+                    acceptingHostKey = state.isAcceptingHostKey,
+                    onFormChange = onFormChange,
+                    onOpenActivity = onOpenActivity,
+                    onAcceptHostKey = onAcceptHostKey,
+                    modifier = Modifier.fadeUpIn(3),
+                )
                 AdvancedSection(form, ::errorOf, requesters, onFormChange, Modifier.fadeUpIn(4))
             }
         }
