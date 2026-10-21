@@ -871,19 +871,29 @@ sealed interface SshHostKeyTrust {
 }
 
 /**
- * The server presented a host key that does not match the pinned fingerprint. Authentication was not
- * attempted; retrying cannot help, the user has to review the new key ([observedFingerprint], null when
- * JSch reported the change without the key).
+ * The server presented a host key that does not match the pinned fingerprint. Retrying cannot help, the
+ * user has to review the new key ([observedFingerprint], null when JSch reported the change without the
+ * key). Normally authentication was not attempted: the check runs during key exchange. [afterSignIn]:
+ * the key was trusted on first use and sign-in had completed when the fingerprint saved meanwhile (the
+ * editor, during that sign-in) turned out to name another key.
  */
 class SshHostKeyChangedException(
     serverName: String,
     val pinnedFingerprint: String,
     val observedFingerprint: String?,
+    val afterSignIn: Boolean = false,
     cause: Throwable? = null,
 ) : VpnConnectionException(
-    "Host key changed for $serverName. Open the server to review and accept the new key.",
+    if (afterSignIn) {
+        "Host key changed for $serverName$HOST_KEY_CHANGED_AFTER_SIGN_IN. Open the server to review the new key."
+    } else {
+        "Host key changed for $serverName. Open the server to review and accept the new key."
+    },
     cause,
 )
+
+/** Ends the "Host key changed for <server>" part of [SshHostKeyChangedException.afterSignIn]'s message. */
+internal const val HOST_KEY_CHANGED_AFTER_SIGN_IN = " after sign-in"
 
 /** The server rejected the password or key: each retry is another failed login on the server. */
 class SshAuthenticationException(

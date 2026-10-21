@@ -136,6 +136,11 @@ class ServerEditorScreenshotTest : ScreenshotTest() {
         render("ServerEditor_HostKeyChanged_Phone_Night", changed, size = ScreenSize.PHONE)
         // Accepting: the button spins, and both Saves are disabled until the new key is written.
         render("ServerEditor_HostKeyAccepting_Night", changed.copy(isAcceptingHostKey = true))
+        // Found only once a first-use sign-in had finished: the card does not claim it was stopped before.
+        render(
+            "ServerEditor_HostKeyChangedAfterSignIn_Night",
+            changed.copy(hostKeyChange = changed.hostKeyChange?.copy(afterSignIn = true)),
+        )
     }
 
     @Test

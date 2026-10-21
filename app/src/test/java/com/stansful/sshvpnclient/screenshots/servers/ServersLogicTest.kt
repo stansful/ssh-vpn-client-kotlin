@@ -1,11 +1,14 @@
 package com.stansful.sshvpnclient.screenshots.servers
 
+import com.stansful.sshvpnclient.domain.model.AuthType
+import com.stansful.sshvpnclient.domain.model.SshHostKeyChange
 import com.stansful.sshvpnclient.ui.keys.SshKeyFormat
 import com.stansful.sshvpnclient.ui.keys.sshKeyFormatOf
 import com.stansful.sshvpnclient.ui.servers.FingerprintKind
 import com.stansful.sshvpnclient.ui.servers.SavePhase
 import com.stansful.sshvpnclient.ui.servers.fingerprintKind
 import com.stansful.sshvpnclient.ui.servers.formatShortDate
+import com.stansful.sshvpnclient.ui.servers.hostKeyChangedMessage
 import com.stansful.sshvpnclient.ui.servers.isServerSaveEnabled
 import com.stansful.sshvpnclient.ui.servers.keyUsageLabel
 import com.stansful.sshvpnclient.ui.servers.serversCountLabel
@@ -72,6 +75,29 @@ class ServersLogicTest {
         // "Accept new key" writes the fingerprint too; the view model would drop the tap.
         assertFalse(isServerSaveEnabled(SavePhase.Idle, acceptingHostKey = true))
         assertFalse(isServerSaveEnabled(SavePhase.Failed, acceptingHostKey = true))
+    }
+
+    @Test
+    fun hostKeyCardSaysWhetherSignInWasStopped() {
+        val duringKeyExchange = SshHostKeyChange(
+            configId = "vps",
+            pinnedFingerprint = "SHA256:old",
+            observedFingerprint = "SHA256:new",
+        )
+        AuthType.entries.forEach { auth ->
+            assertTrue(hostKeyChangedMessage(duringKeyExchange, auth).contains("sign-in was stopped before"))
+        }
+
+        // A first-use sign-in had finished when the fingerprint saved meanwhile was compared.
+        val afterSignIn = duringKeyExchange.copy(afterSignIn = true)
+        val password = hostKeyChangedMessage(afterSignIn, AuthType.PASSWORD)
+        assertFalse(password.contains("stopped before"))
+        assertTrue(password.contains("your password was sent"))
+        assertTrue(password.contains("change the server's password"))
+        val key = hostKeyChangedMessage(afterSignIn, AuthType.PRIVATE_KEY)
+        assertFalse(key.contains("stopped before"))
+        assertTrue(key.contains("sign-in had already finished"))
+        assertFalse(key.contains("password"))
     }
 
     @Test
