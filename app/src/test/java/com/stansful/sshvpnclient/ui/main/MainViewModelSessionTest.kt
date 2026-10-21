@@ -664,6 +664,8 @@ class MainViewModelSessionTest {
 
         override fun appendDiagnostic(message: String) = Unit
 
+        override fun appendNotice(message: String) = Unit
+
         override fun clearDiagnostics() = Unit
     }
 
@@ -697,9 +699,12 @@ class MainViewModelSessionTest {
         override suspend fun getAll(): List<SshConfig> = listOf(selected)
         override suspend fun getById(id: String): SshConfig? = selected.takeIf { it.id == id }
         override suspend fun create(config: SshConfig) = error("unused")
-        override suspend fun update(config: SshConfig) = error("unused")
+        override suspend fun update(config: SshConfig, keepSavedFingerprint: Boolean) = error("unused")
         override suspend fun delete(id: String) = error("unused")
         override suspend fun getUsageCountForKey(keyId: String): Int = 0
+        override suspend fun pinFingerprintIfAbsent(id: String, fingerprint: String): Boolean = error("unused")
+        override suspend fun replaceFingerprint(id: String, expected: String, fingerprint: String): Boolean =
+            error("unused")
     }
 
     private object NoKeys : SshPrivateKeyRepository {
