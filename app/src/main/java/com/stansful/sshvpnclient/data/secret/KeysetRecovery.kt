@@ -53,31 +53,81 @@ internal class RecoveringKeysetLoader<T>(
 }
 
 /**
- * Whether the Android Keystore holds [alias]. True or false only when the Keystore demonstrably
- * answers, null otherwise: before Android 12 it reports any key as absent while its service is
- * unreachable, so "absent" only counts once a probe key could be created and found.
+ * Whether the Android Keystore holds [alias]: true or false only when the Keystore demonstrably
+ * answered, null otherwise. See [keystoreHasKey] for how "absent" is told apart from a failure.
  */
-internal fun androidKeystoreHasKey(alias: String): Boolean? = runCatching {
-    val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-    if (keyStore.containsAlias(alias)) return@runCatching true
+internal fun androidKeystoreHasKey(alias: String): Boolean? {
+    val keystore = runCatching { AndroidKeystoreLookup() }.getOrNull() ?: return null
+    return keystoreHasKey(alias, keystore) { Thread.sleep(KEYSTORE_RECHECK_DELAY_MS) }
+}
+
+/** The Keystore calls [keystoreHasKey] makes. */
+internal interface KeystoreLookup {
+    /** False for an absent alias and, as Android's provider answers, for any Keystore error too. */
+    fun containsAlias(alias: String): Boolean
+
+    fun createProbeKey(alias: String)
+
+    fun deleteEntry(alias: String)
+}
+
+/**
+ * Whether [keystore] holds [alias]; null when its answer can't be trusted.
+ *
+ * `containsAlias` can't tell "absent" from "couldn't ask": AndroidKeyStoreSpi answers false for any
+ * Keystore error - before Android 12 whenever its service is unreachable, and since then for every
+ * error but KEY_NOT_FOUND too, which it only logs. A wrong "absent" here wipes every saved secret,
+ * so it counts only when all checks agree. A probe key is created; then, in each of
+ * [KEYSTORE_ABSENCE_CHECKS] rounds a [pause] apart, the key is looked up first and the probe right
+ * after it. A Keystore that fails from the key's lookup on misses the probe, which gives no
+ * verdict; a failure of the key's lookup alone has to happen again after the pause to count.
+ */
+internal fun keystoreHasKey(
+    alias: String,
+    keystore: KeystoreLookup,
+    pause: () -> Unit,
+): Boolean? = runCatching {
+    if (keystore.containsAlias(alias)) return@runCatching true
     val probeAlias = "$alias$KEYSTORE_PROBE_SUFFIX"
-    KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE).run {
-        init(
-            KeyGenParameterSpec.Builder(probeAlias, KeyProperties.PURPOSE_ENCRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .build(),
-        )
-        generateKey()
-    }
+    keystore.createProbeKey(probeAlias)
     try {
-        val keystoreAnswers = keyStore.containsAlias(probeAlias)
-        val present = keyStore.containsAlias(alias)
-        if (keystoreAnswers) present else null
+        repeat(KEYSTORE_ABSENCE_CHECKS) { round ->
+            if (round > 0) pause()
+            if (keystore.containsAlias(alias)) return@runCatching true
+            if (!keystore.containsAlias(probeAlias)) return@runCatching null
+        }
+        false
     } finally {
-        keyStore.deleteEntry(probeAlias)
+        keystore.deleteEntry(probeAlias)
     }
 }.getOrNull()
 
+private class AndroidKeystoreLookup : KeystoreLookup {
+    private val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+
+    override fun containsAlias(alias: String): Boolean = keyStore.containsAlias(alias)
+
+    override fun createProbeKey(alias: String) {
+        KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE).run {
+            init(
+                KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .build(),
+            )
+            generateKey()
+        }
+    }
+
+    override fun deleteEntry(alias: String) {
+        keyStore.deleteEntry(alias)
+    }
+}
+
+internal const val KEYSTORE_ABSENCE_CHECKS = 2
+internal const val KEYSTORE_PROBE_SUFFIX = "_probe"
+
+// Long enough for a call that failed on a passing hiccup - a binder error, the Keystore service
+// restarting - to go through again. It is only waited once a stored keyset already failed to load.
+private const val KEYSTORE_RECHECK_DELAY_MS = 500L
 private const val ANDROID_KEYSTORE = "AndroidKeyStore"
-private const val KEYSTORE_PROBE_SUFFIX = "_probe"
