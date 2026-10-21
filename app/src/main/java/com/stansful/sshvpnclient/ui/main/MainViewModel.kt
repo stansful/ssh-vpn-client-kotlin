@@ -415,6 +415,7 @@ class MainViewModel(
                     session.close()
                 }
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 if (!isTerminalGenerationCurrent(generation)) return@onFailure
                 val message = error.message ?: "Terminal connection failed"
                 vpnConnectionRepository.appendDiagnostic("SSH terminal unavailable: $message")
@@ -443,6 +444,10 @@ class MainViewModel(
     fun setTerminalInput(input: String) {
         terminalState.update { it.copy(input = input) }
     }
+
+    /** The Terminal's unsent command (memory only), read when its screen is recreated. */
+    val terminalInput: String
+        get() = terminalState.value.input
 
     fun submitTerminalInput() {
         val command = terminalState.value.input

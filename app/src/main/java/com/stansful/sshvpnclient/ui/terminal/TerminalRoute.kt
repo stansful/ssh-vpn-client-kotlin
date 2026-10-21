@@ -1,10 +1,12 @@
 package com.stansful.sshvpnclient.ui.terminal
 
+import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -23,7 +25,10 @@ import com.stansful.sshvpnclient.ui.shell.navigateTopLevel
  * SSH terminal of the connected server. The shell lives exactly as long as this screen is started
  * and the Server-mode session is connected: it opens on entry (and again after returning from the
  * background or after a reconnect), and closes on leave, `ON_STOP` and disconnect — closing never
- * touches the VPN. The typed command stays in memory only and is never saved.
+ * touches the VPN. A configuration change (rotation, dark mode, multi-window, folding) is not a
+ * leave: the Activity is recreated around the same Activity-scoped [MainViewModel], so the shell,
+ * its output and the typed command carry over and the new screen's `ON_START` finds the shell open.
+ * The typed command stays in memory only (the ViewModel, never the saved instance state).
  */
 @Composable
 fun TerminalRoute(
@@ -39,15 +44,15 @@ fun TerminalRoute(
     val enabled = uiState.appSettings.showTerminalOnMain
     val server = summaries.firstOrNull { it.id == uiState.vpnState.activeConfigId } ?: uiState.selectedConfig
     var started by remember { mutableStateOf(false) }
-    var command by remember { mutableStateOf("") }
+    // Seeded from the ViewModel, which keeps the draft across a configuration change.
+    var command by remember { mutableStateOf(viewModel.terminalInput) }
 
-    LifecycleStartEffect(viewModel) {
-        started = true
-        onStopOrDispose {
-            started = false
-            viewModel.closeTerminal()
-        }
-    }
+    TerminalShellLifecycleEffect(
+        key = viewModel,
+        onStart = { started = true },
+        onStop = { started = false },
+        onLeave = viewModel::closeTerminal,
+    )
     LaunchedEffect(started, connected, enabled) {
         when {
             started && connected && enabled -> viewModel.openTerminal()
@@ -57,7 +62,10 @@ fun TerminalRoute(
 
     val phase = terminalPhase(connected = connected, enabled = enabled, terminal = uiState.terminalState)
     LaunchedEffect(phase) {
-        if (phase != TerminalPhase.Active && phase != TerminalPhase.Opening) command = ""
+        if (phase != TerminalPhase.Active && phase != TerminalPhase.Opening) {
+            command = ""
+            viewModel.setTerminalInput("")
+        }
     }
 
     TerminalScreen(
@@ -71,7 +79,10 @@ fun TerminalRoute(
             errorMessage = uiState.terminalState.errorMessage,
         ),
         command = command,
-        onCommandChange = { command = it },
+        onCommandChange = {
+            command = it
+            viewModel.setTerminalInput(it)
+        },
         onRun = {
             viewModel.setTerminalInput(command)
             viewModel.submitTerminalInput()
@@ -88,6 +99,39 @@ fun TerminalRoute(
         onBackToHome = { navController.navigateTopLevel(Destinations.HOME) },
     )
 }
+
+/**
+ * The shell's lifecycle on the Terminal screen: [onStart] on every `ON_START`; [onStop] on `ON_STOP`
+ * or when the screen leaves composition, followed by [onLeave] (close the shell) unless the Activity
+ * is only being recreated for a configuration change (see [closesTerminalOnStop]).
+ */
+@Composable
+internal fun TerminalShellLifecycleEffect(
+    key: Any?,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    onLeave: () -> Unit,
+) {
+    val activity = LocalActivity.current
+    val currentOnStart by rememberUpdatedState(onStart)
+    val currentOnStop by rememberUpdatedState(onStop)
+    val currentOnLeave by rememberUpdatedState(onLeave)
+    LifecycleStartEffect(key) {
+        currentOnStart()
+        onStopOrDispose {
+            currentOnStop()
+            if (closesTerminalOnStop(changingConfigurations = activity?.isChangingConfigurations == true)) {
+                currentOnLeave()
+            }
+        }
+    }
+}
+
+/**
+ * Whether the screen's `ON_STOP` (or leaving composition) closes the shell. Not while the Activity is
+ * only being recreated for a configuration change: its ViewModel, and with it the shell, survives.
+ */
+internal fun closesTerminalOnStop(changingConfigurations: Boolean): Boolean = !changingConfigurations
 
 /**
  * Maps the ViewModel's terminal state to the screen. A closed shell that produced output is "ended"
