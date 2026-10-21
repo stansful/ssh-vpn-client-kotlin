@@ -6,8 +6,10 @@ import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
+import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -191,7 +193,7 @@ class QuickTilePolicyTest {
 
     @Test
     fun `connect that threw after its commit turns its own connecting state into the error`() {
-        VpnSessionOwner.entries.forEach { owner ->
+        listOf(VpnSessionOwner.OPEN_SOURCE, VpnSessionOwner.SMART_CONNECT).forEach { owner ->
             assertTrue(
                 canPublishQuickTileStartFailure(
                     connectingState(owner),
@@ -213,6 +215,67 @@ class QuickTilePolicyTest {
                 VpnSessionOwner.SMART_CONNECT,
                 connectAttempted = true,
             ),
+        )
+    }
+
+    @Test
+    fun `a server start that threw never takes the state of a live server session`() {
+        // ConnectVpnUseCase releases its own commit when the service cannot start, so a Server session
+        // that is connecting is one the app or Always-on started while the use case read the server.
+        assertFalse(
+            canPublishQuickTileStartFailure(
+                connectingState(VpnSessionOwner.SHADOW_SSH),
+                VpnSessionOwner.SHADOW_SSH,
+                connectAttempted = true,
+            ),
+        )
+        // The use case's own released commit, or nobody's state: the failure is published.
+        assertTrue(
+            canPublishQuickTileStartFailure(
+                VpnConnectionState(status = VpnConnectionStatus.ERROR, errorMessage = "not allowed"),
+                VpnSessionOwner.SHADOW_SSH,
+                connectAttempted = true,
+            ),
+        )
+        assertTrue(
+            canPublishQuickTileStartFailure(VpnConnectionState(), VpnSessionOwner.SHADOW_SSH, connectAttempted = true),
+        )
+    }
+
+    @Test
+    fun `a server start the state does not explain is named`() {
+        assertEquals(
+            SERVER_PREVIOUS_SESSION_ACTIVE,
+            unpublishedServerStartFailure(ConnectVpnResult.PreviousSessionActive),
+        )
+        assertEquals(
+            "Selected SSH key not found",
+            unpublishedServerStartFailure(
+                ConnectVpnResult.Rejected("Selected SSH key not found", published = false),
+            ),
+        )
+    }
+
+    @Test
+    fun `a server start the state explains needs no message`() {
+        assertNull(unpublishedServerStartFailure(ConnectVpnResult.Started))
+        // A Server session was already starting or running: the tile leaves it alone.
+        assertNull(unpublishedServerStartFailure(ConnectVpnResult.Skipped))
+        // The error is the connection state already.
+        assertNull(
+            unpublishedServerStartFailure(ConnectVpnResult.Rejected("No apps selected", published = true)),
+        )
+    }
+
+    @Test
+    fun `the tile's failed start leaves a log line naming the mode`() {
+        assertEquals(
+            "Quick settings tile: Server failed to start: The previous connection is still stopping",
+            quickTileStartFailureDiagnostic(VpnSessionOwner.SHADOW_SSH, SERVER_PREVIOUS_SESSION_ACTIVE),
+        )
+        assertEquals(
+            "Quick settings tile: Routes failed to start: boom",
+            quickTileStartFailureDiagnostic(VpnSessionOwner.OPEN_SOURCE, "boom"),
         )
     }
 

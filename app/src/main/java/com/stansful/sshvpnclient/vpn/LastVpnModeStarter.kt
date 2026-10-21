@@ -33,7 +33,11 @@ internal data class VpnModeStartCheck(
 internal interface VpnModeStarter {
     suspend fun check(target: VpnSessionOwner): VpnModeStartCheck
 
-    /** Starts [owner] through its tab's use case; the error message if the use case threw, else null. */
+    /**
+     * Starts [owner] through its tab's use case. A message when the start failed and the connection
+     * state may not say so: the use case threw (published as the error where that is safe), or a Server
+     * start found another session owning the state ([unpublishedServerStartFailure]); else null.
+     */
     suspend fun connect(owner: VpnSessionOwner, failureConfigId: String?): String?
 }
 
@@ -104,17 +108,23 @@ internal class LastVpnModeStarter(
     }
 
     /**
-     * A use case that throws is published as the error of this attempt. Null does not mean the mode
-     * started: a use case that gave up (another session took over, a validation error) returns too.
+     * A use case that throws is published as the error of this attempt where that is safe. Null does
+     * not mean the mode started: a use case that gave up (another session took over, a validation error
+     * it published) returns too.
      */
     override suspend fun connect(owner: VpnSessionOwner, failureConfigId: String?): String? {
         try {
-            when (owner) {
-                VpnSessionOwner.SHADOW_SSH -> connectVpnUseCase()
-                VpnSessionOwner.OPEN_SOURCE -> connectProxyVpnUseCase()
-                VpnSessionOwner.SMART_CONNECT -> connectSmartVpnUseCase()
+            return when (owner) {
+                VpnSessionOwner.SHADOW_SSH -> unpublishedServerStartFailure(connectVpnUseCase())
+                VpnSessionOwner.OPEN_SOURCE -> {
+                    connectProxyVpnUseCase()
+                    null
+                }
+                VpnSessionOwner.SMART_CONNECT -> {
+                    connectSmartVpnUseCase()
+                    null
+                }
             }
-            return null
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
