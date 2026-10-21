@@ -176,10 +176,14 @@ class SmartConnectVpnService : android.net.VpnService() {
      * Android's own start (Always-on VPN): [AlwaysOnVpnStarter] brings back the last mode, Auto through
      * ConnectSmartVpnUseCase like the tile. Android may have used startForegroundService(), so the
      * deadline is met first, unless an Auto run already holds the foreground with its own notice.
+     * A null intent is not Android's start: it can only be a restart of Auto, handled by desiredActive.
      */
     private fun handleAlwaysOnStart(startId: Int) {
-        if (!runsAlwaysOnReceiverSession()) startSmartForeground(AutoNotice.Starting, force = true)
-        appContainer.alwaysOnVpnStarter.start { releaseAlwaysOnStart(startId) }
+        val starter = appContainer.alwaysOnVpnStarter
+        if (!runsAlwaysOnReceiverSession()) {
+            starter.enterForeground { startSmartForeground(AutoNotice.Starting, force = true) }
+        }
+        starter.start { releaseAlwaysOnStart(startId) }
     }
 
     /** Main thread, like every stop of this service; a newer command makes stopSelfResult() refuse. */

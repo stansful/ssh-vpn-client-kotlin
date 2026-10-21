@@ -149,10 +149,12 @@ class OpenSourceVpnService : android.net.VpnService() {
      * Android's own start (Always-on VPN): [AlwaysOnVpnStarter] brings back the last mode, which may be
      * another service's. Android may have used startForegroundService(), so the deadline is met first,
      * unless this service already runs its session in the foreground (re-posting would reset its notice).
+     * Every command returns START_NOT_STICKY, so Android never restarts this service with a null intent.
      */
     private fun handleAlwaysOnStart(startId: Int) {
-        if (!ownsAlwaysOnReceiverSession()) startVpnForeground()
-        appContainer.alwaysOnVpnStarter.start { releaseAlwaysOnStart(startId) }
+        val starter = appContainer.alwaysOnVpnStarter
+        if (!ownsAlwaysOnReceiverSession()) starter.enterForeground(::startVpnForeground)
+        starter.start { releaseAlwaysOnStart(startId) }
     }
 
     /** Main thread, like every stop of this service; a newer command makes stopSelfResult() refuse. */
