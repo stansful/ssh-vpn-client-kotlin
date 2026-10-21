@@ -51,6 +51,7 @@ import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectProxyVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectSmartVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
+import com.stansful.sshvpnclient.vpn.LastVpnModeStarter
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
 import com.stansful.sshvpnclient.vpn.SmartConnectCatalogManager
 import com.stansful.sshvpnclient.vpn.Tun2SocksManager
@@ -240,6 +241,21 @@ class AppContainer(
         DisconnectVpnUseCase(
             context = appContext,
             vpnConnectionRepository = vpnConnectionRepository,
+        )
+    }
+    internal val lastVpnModeStarter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        LastVpnModeStarter(
+            context = appContext,
+            appSettingsRepository = appSettingsRepository,
+            sshConfigRepository = sshConfigRepository,
+            sshPrivateKeyRepository = sshPrivateKeyRepository,
+            proxyProfileRepository = proxyProfileRepository,
+            xrayCoreBridge = xrayCoreBridge,
+            vpnConnectionRepository = vpnConnectionRepository,
+            smartConnectStateStore = smartConnectStateStore,
+            connectVpnUseCase = connectVpnUseCase,
+            connectProxyVpnUseCase = connectProxyVpnUseCase,
+            connectSmartVpnUseCase = connectSmartVpnUseCase,
         )
     }
     val observeVpnConnectionStateUseCase by lazy {
