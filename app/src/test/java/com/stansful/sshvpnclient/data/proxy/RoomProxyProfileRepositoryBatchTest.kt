@@ -8,6 +8,7 @@ import com.stansful.sshvpnclient.domain.model.ProxyTestStatus
 import com.stansful.sshvpnclient.domain.model.ProxyTransport
 import com.stansful.sshvpnclient.domain.model.ProxyTunnelTestResult
 import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyShareLinkParser
+import java.security.GeneralSecurityException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
@@ -349,6 +350,53 @@ class RoomProxyProfileRepositoryBatchTest {
         assertEquals(HY2_LINK, repository.getById(original.id)?.rawUri)
     }
 
+    @Test
+    fun `an import while the secret store can't be read fails and keeps the routes' own links`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        repository.import(text = OWN_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+        repository.import(text = HY2_LINK, source = ProxyProfileSource.REMOTE, sourceUrl = SOURCE_URL)
+        val before = dao.remainingEntities().toSet()
+        val savedBefore = secretStorage.savedSecrets.toMap()
+        // The keyset fails to load for the readability check only; the save right after it would work.
+        secretStorage.keysetLoadFailures = 1
+
+        val failure = runCatching {
+            repository.import(
+                text = listOf(SAME_ROUTE_OTHER_NAME_LINK, HY2_LINK).joinToString("\n"),
+                source = ProxyProfileSource.REMOTE,
+                sourceUrl = SOURCE_URL,
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is GeneralSecurityException)
+        assertEquals(before, dao.remainingEntities().toSet())
+        assertEquals(savedBefore, secretStorage.savedSecrets)
+        assertTrue(secretStorage.deletedSecretIds.isEmpty())
+        val own = dao.remainingEntities().single { entity -> entity.source == ProxyProfileSource.MANUAL.name }
+        assertEquals(OWN_LINK, repository.getById(own.id)?.rawUri)
+    }
+
+    @Test
+    fun `once the secret store reads again the same import is a plain duplicate`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        repository.import(text = OWN_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+        val own = dao.remainingEntities().single()
+        secretStorage.keysetLoadFailures = 1
+        runCatching { repository.import(SAME_ROUTE_OTHER_NAME_LINK, ProxyProfileSource.MANUAL, sourceUrl = null) }
+
+        val result = repository.import(SAME_ROUTE_OTHER_NAME_LINK, ProxyProfileSource.MANUAL, sourceUrl = null)
+
+        assertEquals(1, result.duplicates)
+        assertEquals(0, result.updated)
+        assertEquals(own, dao.entity(own.id))
+        assertEquals(OWN_LINK, repository.getById(own.id)?.rawUri)
+        assertTrue(secretStorage.deletedSecretIds.isEmpty())
+    }
+
     private fun repository(
         dao: ProxyProfileDao,
         secretStorage: SecretStorage,
@@ -371,6 +419,11 @@ class RoomProxyProfileRepositoryBatchTest {
             "hysteria://hy1.example.test:443?protocol=udp&auth=correct-horse&upmbps=10&downmbps=50#V1"
         const val UNKNOWN_TRANSPORT_LINK =
             "vless://00000000-0000-4000-8000-000000000001@quic.example.test:443?type=quic#Quic"
+
+        // One outbound under two names: the same fingerprint, a different stored link.
+        const val OWN_LINK = "vless://00000000-0000-4000-8000-000000000002@own.example.test:443?security=tls#Mine"
+        const val SAME_ROUTE_OTHER_NAME_LINK =
+            "vless://00000000-0000-4000-8000-000000000002@own.example.test:443?security=tls#Shared"
     }
 }
 
@@ -383,15 +436,24 @@ private class RecordingSecretStorage(
     val savedSecrets = linkedMapOf<String, String>()
     val deletedSecretIds = hashSetOf<String>()
 
+    /**
+     * How many of the next store accesses find the keyset failing to load, as Tink's lazy keyset
+     * does for a moment while the Keystore hiccups: a read reports such a failure as missing values,
+     * a write and [checkAvailable] throw it. The access after them loads it.
+     */
+    var keysetLoadFailures = 0
+
     override suspend fun saveSecret(id: String, value: String) {
+        loadKeyset()
         secrets[id] = value
         savedSecrets[id] = value
     }
 
-    override suspend fun getSecret(id: String): String? = secrets[id]
+    override suspend fun getSecret(id: String): String? = if (keysetLoads()) secrets[id] else null
 
     override suspend fun getSecrets(ids: Collection<String>): Map<String, String> {
         getSecretsCalls += 1
+        if (!keysetLoads()) return emptyMap()
         return ids.mapNotNull { id -> secrets[id]?.let { value -> id to value } }.toMap()
     }
 
@@ -400,9 +462,22 @@ private class RecordingSecretStorage(
         deletedSecretIds += id
     }
 
+    override suspend fun checkAvailable() {
+        loadKeyset()
+    }
+
     /** What the store looks like after it started over: every saved value is gone. */
     fun startOver() {
         secrets.clear()
+    }
+
+    private fun keysetLoads(): Boolean = runCatching(::loadKeyset).isSuccess
+
+    private fun loadKeyset() {
+        if (keysetLoadFailures > 0) {
+            keysetLoadFailures -= 1
+            throw GeneralSecurityException("Keystore operation failed")
+        }
     }
 }
 

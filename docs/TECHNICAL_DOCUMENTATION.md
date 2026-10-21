@@ -255,6 +255,13 @@ Connect проверяет, читается ли секрет строки с �
 результаты проверки строки не меняются. SSH-пароли и ключи восстанавливаются через Edit: `update()`
 пишет секрет под прежний id.
 
+Нечитаемой считается только ссылка, чей шифртекст не расшифровался. Чтение секретов глотает и сбой
+загрузки keyset (тогда «не читается» всё сразу), поэтому `readableSecretIds` сначала вызывает
+`SecretStorage.checkAvailable()`: `TinkSecretStorage` загружает keyset и бросает ошибку, если не
+смог. Импорт или sync тогда падает до каких-либо изменений («Couldn’t import routes. Nothing was
+changed»), и ссылки, которые читаются, не заменяются и не удаляются. Загруженный keyset остаётся в
+памяти, так что после проверки не расшифроваться может только сам шифртекст.
+
 ## 11. Глобальное состояние VPN
 
 `VpnConnectionState`:
@@ -1314,7 +1321,8 @@ Backup:
 - `ProxySourceSyncNetworkSelectionTest` - выбор физической validated non-VPN unmetered сети для background sync.
 - `SmartConnectPolicyTest`/`SmartConnectViewModelPolicyTest` - ranking, `🇷🇺` exclusion, deadlines, terminal-result accumulation и расписание forced source refresh (первый проход, успех с/без sync, неудачный проход).
 - `PublicProxySourceEtagTest` - `If-None-Match` только для не-forced запроса к тому же URL, который выдал ETag, и при той же ревизии parser'а (`IMPORT_PARSER_REVISION`).
-- `RoomProxyProfileRepositoryBatchTest`/`RoomSmartProxyProfileRepositoryBatchTest` - в том числе импорт Hysteria 2 (protocol, QUIC transport, TLS), один профиль для `hy2://` и `hysteria2://`, подсчёт неподдерживаемых ссылок (`hysteria://` v1, неизвестный `obfs`) как `unsupported`, а не `invalid`, без сохранения, и Edit такой ссылкой без изменения профиля; строка, чей секрет не читается (хранилище секретов началось заново), получает ссылку обратно при sync и при повторном импорте, а строка с читаемым секретом свой secret id сохраняет.
+- `RoomProxyProfileRepositoryBatchTest`/`RoomSmartProxyProfileRepositoryBatchTest` - в том числе импорт Hysteria 2 (protocol, QUIC transport, TLS), один профиль для `hy2://` и `hysteria2://`, подсчёт неподдерживаемых ссылок (`hysteria://` v1, неизвестный `obfs`) как `unsupported`, а не `invalid`, без сохранения, и Edit такой ссылкой без изменения профиля; строка, чей секрет не читается (хранилище секретов началось заново), получает ссылку обратно при sync и при повторном импорте, а строка с читаемым секретом свой secret id сохраняет; импорт или sync в момент, когда keyset на миг не загружается, падает, ничего не заменив и не удалив, а после него тот же импорт - обычный duplicate.
+- `ReadableSecretIdsTest` - нечитаемы только нерасшифровавшиеся значения, чтение пачками по 256; хранилище, которое нельзя открыть, бросает ошибку вместо «не читается ничего».
 - `QuickTilePolicyTest`/`LastVpnSessionStoreTest` - выбор режима tile, матрица preconditions → `Connect`/`OpenApp(tab, reason)`, guard публикации ошибки, subtitle mode и storage-значения режима.
 - `OpenSourceUiStatePolicyTest` - OpenSource tab показывает текст ошибки только для выбранного route.
 - `VpnTrafficActivityMonitorTest` - RX/TX liveness policy для длинных download/upload.

@@ -159,6 +159,15 @@ class TinkSecretStorage(
         }
     }
 
+    /**
+     * Loads the keyset, or throws why it can't be loaded. Reads swallow that failure (see [decrypt]),
+     * so without this a keyset that failed to load for a moment made every value look unreadable. A
+     * loaded keyset stays loaded, so after this only a value's own ciphertext can fail to decrypt.
+     */
+    override suspend fun checkAvailable() {
+        withContext(ioDispatcher) { aead }
+    }
+
     @SuppressLint("UseKtx") // The boolean commit result is required before writing the completion marker.
     private fun ensureLegacyMigrationAttempted() {
         if (migrationPreferences.getBoolean(KEY_LEGACY_MIGRATION_COMPLETE, false)) return
