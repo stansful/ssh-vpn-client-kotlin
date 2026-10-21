@@ -11,16 +11,19 @@ import com.stansful.sshvpnclient.domain.model.SshConfigSummary
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnMode
+import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.repository.AppSettingsRepository
 import com.stansful.sshvpnclient.domain.repository.AppUpdateCoordinator
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.usecase.config.SelectSshConfigUseCase
+import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnResult
 import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
+import com.stansful.sshvpnclient.vpn.canPublishVpnStartFailure
 import com.stansful.sshvpnclient.vpn.SshTerminalSession
 import java.util.ArrayDeque
 import kotlinx.coroutines.CancellationException
@@ -29,10 +32,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 
 enum class TunnelCheckResult {
@@ -123,6 +129,13 @@ data class TerminalUiState(
     val errorMessage: String? = null,
 )
 
+/** A one-off Server-mode message for a toast; [id] makes repeated identical messages distinct. */
+data class ServerSessionNotice(
+    val id: Long,
+    val message: String,
+    val detail: String? = null,
+)
+
 class MainViewModel(
     private val appSettingsRepository: AppSettingsRepository,
     configRepository: SshConfigRepository,
@@ -143,8 +156,15 @@ class MainViewModel(
     private var terminalOutputPublishJob: Job? = null
     @Volatile
     private var terminalSession: SshTerminalSession? = null
+    private var connectJob: Job? = null
     private var sessionRestartJob: Job? = null
     private var sessionRestartStarted = false
+    private val sessionNotice = MutableStateFlow<ServerSessionNotice?>(null)
+    private var noticeSequence = 0L
+
+    /** The latest Server-mode notice not shown yet; the shell shows it as a toast, then [consumeNotice]. */
+    val notice: StateFlow<ServerSessionNotice?> = sessionNotice.asStateFlow()
+
     private val vpnState = observeVpnConnectionStateUseCase().stateIn(
         scope = viewModelScope,
         started = SharingStarted.Eagerly,
@@ -219,25 +239,45 @@ class MainViewModel(
             showNoSelectedAppsDialog.value = true
             return
         }
-        viewModelScope.launch {
+        // An explicit Connect takes over a restart (Home offers it once the restarted session has
+        // stopped): both would start a session, and the loser would report a bogus failure.
+        cancelSessionRestart()
+        // The newest request wins; one that already started the service has completed anyway.
+        connectJob?.cancel()
+        connectJob = viewModelScope.launch {
             try {
-                connectVpnUseCase()
+                val result = connectVpnUseCase()
+                if (result == ConnectVpnResult.PREVIOUS_SESSION_ACTIVE) {
+                    vpnConnectionRepository.appendDiagnostic(
+                        "Connect skipped: the previous VPN session is still stopping",
+                    )
+                    notify("Couldn’t connect", PREVIOUS_SESSION_ACTIVE_DETAIL)
+                }
             } catch (cancellation: CancellationException) {
                 // The repository outlives this ViewModel; a cancelled scope must not publish
                 // a connection error into app-wide VPN state.
                 throw cancellation
             } catch (error: Exception) {
-                vpnConnectionRepository.setError(
-                    uiState.value.selectedConfig?.id,
-                    error.message ?: "Unknown connection error",
-                )
+                reportConnectFailure("Couldn’t connect", error)
             }
         }
     }
 
+    /**
+     * Stops the Server-mode session. A connect still waiting for the previous session to let go and a
+     * pending or running restart are cancelled first: neither may start a session after this.
+     */
     fun disconnect() {
+        connectJob?.cancel()
+        connectJob = null
+        cancelSessionRestart()
         closeTerminal()
         disconnectVpnUseCase()
+    }
+
+    /** Drops notice [id] once it was shown, so a recreated screen does not show it again. */
+    fun consumeNotice(id: Long) {
+        sessionNotice.update { current -> if (current?.id == id) null else current }
     }
 
     fun checkTunnel() {
@@ -445,8 +485,11 @@ class MainViewModel(
 
     /**
      * Restarts a running SSH session (app-routing change or another server): debounce, disconnect,
-     * short pause, reconnect through the server selected at that moment. A restart that already
-     * began finishes first; a pending one is replaced by the newest request.
+     * short pause, reconnect through the server selected at that moment. The reconnect waits for the
+     * stopped session to let go (see [ConnectVpnUseCase]). A restart that already began finishes
+     * first; a pending one is replaced by the newest request; [disconnect] and [connect] cancel
+     * either. Intent is re-checked after each pause: the debounce drops a restart whose session has
+     * ended meanwhile, the reconnect pause one whose VPN another mode has taken over.
      */
     private fun restartSession(settings: AppSettings) {
         if (settings.requiresSelectedAppsButHasNone()) {
@@ -461,27 +504,75 @@ class MainViewModel(
 
         sessionRestartJob = viewModelScope.launch {
             delay(SETTINGS_CHANGE_DEBOUNCE_MS)
+            // The session may have ended meanwhile (notification Stop, quick tile, another mode).
+            if (!vpnConnectionRepository.currentState.canDisconnect()) return@launch
             val latestSettings = appSettingsRepository.settings.value
             if (latestSettings.requiresSelectedAppsButHasNone()) {
                 showNoSelectedAppsDialog.value = true
                 return@launch
             }
+            val restartJob = coroutineContext.job
             sessionRestartStarted = true
             try {
                 disconnectVpnUseCase()
                 delay(SETTINGS_RECONNECT_DELAY_MS)
-                runCatching {
-                    connectVpnUseCase(preserveDiagnostics = true)
-                }.onFailure { error ->
-                    vpnConnectionRepository.setError(
-                        uiState.value.selectedConfig?.id,
-                        error.message ?: "Unknown connection error",
-                    )
-                }
+                if (!canContinueServerRestart(vpnConnectionRepository.currentState)) return@launch
+                reconnectAfterRestart()
             } finally {
-                sessionRestartStarted = false
+                // A cancelled restart must not clear the flag of the restart that replaced it.
+                if (sessionRestartJob === restartJob) sessionRestartStarted = false
             }
         }
+    }
+
+    private suspend fun reconnectAfterRestart() {
+        val result = try {
+            connectVpnUseCase(preserveDiagnostics = true)
+        } catch (cancellation: CancellationException) {
+            // Disconnect (or a cleared ViewModel) cancelled the restart: publish nothing.
+            throw cancellation
+        } catch (error: Exception) {
+            reportConnectFailure("Couldn’t reconnect", error)
+            return
+        }
+        // Still owned by the stopped Server session: setError would clear its ownership, and its
+        // loops would then exit without tearing the tunnel down. Tell the user here instead. Another
+        // owner means another mode was started meanwhile; that needs no message.
+        if (result == ConnectVpnResult.PREVIOUS_SESSION_ACTIVE &&
+            vpnConnectionRepository.currentState.sessionOwner == VpnSessionOwner.SHADOW_SSH
+        ) {
+            vpnConnectionRepository.appendDiagnostic(
+                "Reconnect skipped: the previous SSH session is still stopping",
+            )
+            notify("Couldn’t reconnect", PREVIOUS_SESSION_ACTIVE_DETAIL)
+        }
+    }
+
+    /**
+     * A connect that threw. Its error becomes the connection state only while no session owns that
+     * state: an owner (the stopping Server session of a restart, a Routes / Auto session) would lose
+     * its ownership to setError, and its loops would then exit without tearing the tunnel down. A
+     * service that could not start has already released its own state in [ConnectVpnUseCase].
+     */
+    private fun reportConnectFailure(title: String, error: Exception) {
+        val message = error.message ?: "Unknown connection error"
+        if (canPublishVpnStartFailure(vpnConnectionRepository.currentState)) {
+            vpnConnectionRepository.setError(uiState.value.selectedConfig?.id, message)
+        } else {
+            vpnConnectionRepository.appendDiagnostic("Connect failed while another session owns the VPN: $message")
+            notify(title, message)
+        }
+    }
+
+    private fun cancelSessionRestart() {
+        sessionRestartJob?.cancel()
+        sessionRestartJob = null
+        sessionRestartStarted = false
+    }
+
+    private fun notify(message: String, detail: String? = null) {
+        noticeSequence += 1
+        sessionNotice.value = ServerSessionNotice(noticeSequence, message, detail)
     }
 
     private fun AppSettings.requiresSelectedAppsButHasNone(): Boolean {
@@ -618,12 +709,21 @@ class MainViewModel(
         }
     }
 
-    private companion object {
+    internal companion object {
         const val SETTINGS_CHANGE_DEBOUNCE_MS = 250L
         const val SETTINGS_RECONNECT_DELAY_MS = 450L
         const val TERMINAL_OUTPUT_UI_BATCH_MS = 250L
         const val MAX_TERMINAL_OUTPUT_CHARACTERS = 64 * 1_024
+        const val PREVIOUS_SESSION_ACTIVE_DETAIL = "The previous connection is still stopping. Try again in a moment."
     }
+}
+
+/**
+ * After the restart's pause: reconnect while the Server session is still stopping or already gone.
+ * Another owner means the user started another mode meanwhile, so the restart is dropped.
+ */
+internal fun canContinueServerRestart(state: VpnConnectionState): Boolean {
+    return state.sessionOwner == null || state.sessionOwner == VpnSessionOwner.SHADOW_SSH
 }
 
 private data class TunnelCheckState(

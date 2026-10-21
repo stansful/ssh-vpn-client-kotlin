@@ -5,6 +5,7 @@ import android.content.Intent
 import androidx.core.content.ContextCompat
 import com.stansful.sshvpnclient.data.local.LastVpnSessionStore
 import com.stansful.sshvpnclient.domain.model.AuthType
+import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
@@ -18,8 +19,25 @@ import com.stansful.sshvpnclient.vpn.OpenSourceVpnService
 import com.stansful.sshvpnclient.vpn.SmartConnectVpnService
 import com.stansful.sshvpnclient.vpn.canProceedAfterVpnOwnerStop
 import com.stansful.sshvpnclient.vpn.canPublishVpnStartFailure
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
+
+/** How a [ConnectVpnUseCase] call ended. */
+enum class ConnectVpnResult {
+    /** SshVpnService was asked to connect. */
+    STARTED,
+
+    /** A precondition failed (no server, no apps, missing key); its error is published when allowed. */
+    REJECTED,
+
+    /**
+     * The session that owned the VPN before did not let go in time, so nothing was started. No error
+     * is published: replacing the state of a still running owner would orphan its tunnel.
+     */
+    PREVIOUS_SESSION_ACTIVE,
+}
 
 class ConnectVpnUseCase(
     private val context: Context,
@@ -29,24 +47,24 @@ class ConnectVpnUseCase(
     private val appSettingsRepository: AppSettingsRepository,
     private val lastVpnSessionStore: LastVpnSessionStore,
 ) {
-    suspend operator fun invoke(preserveDiagnostics: Boolean = false) {
+    suspend operator fun invoke(preserveDiagnostics: Boolean = false): ConnectVpnResult {
         val config = configRepository.getSelectedConfig()
         if (config == null) {
             publishStartFailure(null, "No configuration selected")
-            return
+            return ConnectVpnResult.REJECTED
         }
 
         val settings = appSettingsRepository.settings.value
         if (settings.vpnMode == VpnMode.SELECTED_APPS && settings.selectedAppPackages.isEmpty()) {
             publishStartFailure(config.id, "No apps selected")
-            return
+            return ConnectVpnResult.REJECTED
         }
 
         if (config.authType == AuthType.PRIVATE_KEY) {
             val keyId = config.privateKeyId
             if (keyId.isNullOrBlank() || keyRepository.getById(keyId) == null) {
                 publishStartFailure(config.id, "Selected SSH key not found")
-                return
+                return ConnectVpnResult.REJECTED
             }
         }
 
@@ -69,13 +87,30 @@ class ConnectVpnUseCase(
         } else {
             context.stopService(Intent(context, OpenSourceVpnService::class.java))
             context.stopService(Intent(context, SmartConnectVpnService::class.java))
+            val previousOwner = stateBeforeSwitch.sessionOwner
+            if (previousOwner != null) {
+                // Typically a Server-mode restart (another server, an app-routing change): the caller
+                // has just asked SshVpnService to stop, and it lets go of the session only after its
+                // teardown (lifecycle lock, connection job join, TUN forwarder stop).
+                val released = awaitVpnOwnerRelease(
+                    state = vpnConnectionRepository.state,
+                    owner = previousOwner,
+                    timeoutMs = ownerReleaseTimeoutMs(previousOwner),
+                )
+                if (released && previousOwner == VpnSessionOwner.SHADOW_SSH) {
+                    // SshVpnService publishes the release before Android destroys it, and its
+                    // onDestroy() clears any SHADOW_SSH session it still finds: a start published
+                    // right now would be wiped and its connect command rejected as stale.
+                    delay(SSH_SERVICE_DESTROY_GRACE_MS)
+                }
+            }
         }
         if (!canProceedAfterVpnOwnerStop(
                 stoppedOwner = stateBeforeSwitch.sessionOwner,
                 currentState = vpnConnectionRepository.currentState,
             )
         ) {
-            return
+            return ConnectVpnResult.PREVIOUS_SESSION_ACTIVE
         }
 
         lastVpnSessionStore.record(VpnSessionOwner.SHADOW_SSH)
@@ -84,13 +119,22 @@ class ConnectVpnUseCase(
         } else {
             vpnConnectionRepository.setConnecting(config.id)
         }
-        ContextCompat.startForegroundService(
-            context.applicationContext,
-            SshVpnService.connectIntent(
-                context = context.applicationContext,
-                preserveDiagnostics = preserveDiagnostics,
-            ),
-        )
+        try {
+            ContextCompat.startForegroundService(
+                context.applicationContext,
+                SshVpnService.connectIntent(
+                    context = context.applicationContext,
+                    preserveDiagnostics = preserveDiagnostics,
+                ),
+            )
+        } catch (error: RuntimeException) {
+            // E.g. a foreground service start Android no longer allows. The session published above
+            // is this call's own and no service will run it: release it here, where that is known,
+            // so callers only ever publish failures into a state nobody owns.
+            vpnConnectionRepository.setError(config.id, error.message ?: SERVICE_START_FAILED_MESSAGE)
+            throw error
+        }
+        return ConnectVpnResult.STARTED
     }
 
     private fun publishStartFailure(configId: String?, message: String) {
@@ -99,7 +143,41 @@ class ConnectVpnUseCase(
         }
     }
 
-    private companion object {
+    internal companion object {
         const val TRANSPORT_SWITCH_TIMEOUT_MS = 2_000L
+
+        /**
+         * SshVpnService's stop: waiting for its lifecycle lock (a pipeline rebuild may hold it through
+         * a job join and a forwarder stop), then its own 1 s job join, up to 2 s TUN forwarder stop
+         * and the SSH disconnect.
+         */
+        const val SSH_OWNER_RELEASE_TIMEOUT_MS = 8_000L
+
+        /** Margin for Android to destroy the stopped SshVpnService (one IPC round trip). */
+        const val SSH_SERVICE_DESTROY_GRACE_MS = 400L
+
+        /** Same fallback as MainViewModel's, so both publish an identical error state. */
+        const val SERVICE_START_FAILED_MESSAGE = "Unknown connection error"
+
+        fun ownerReleaseTimeoutMs(owner: VpnSessionOwner): Long = when (owner) {
+            VpnSessionOwner.SHADOW_SSH -> SSH_OWNER_RELEASE_TIMEOUT_MS
+            VpnSessionOwner.OPEN_SOURCE,
+            VpnSessionOwner.SMART_CONNECT,
+            -> TRANSPORT_SWITCH_TIMEOUT_MS
+        }
     }
+}
+
+/**
+ * Waits up to [timeoutMs] until [owner] no longer owns the global VPN session. True once it has let
+ * go (to nobody or to another owner), false on timeout.
+ */
+internal suspend fun awaitVpnOwnerRelease(
+    state: Flow<VpnConnectionState>,
+    owner: VpnSessionOwner,
+    timeoutMs: Long,
+): Boolean {
+    return withTimeoutOrNull(timeoutMs) {
+        state.first { current -> current.sessionOwner != owner }
+    } != null
 }

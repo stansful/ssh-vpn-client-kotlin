@@ -75,10 +75,12 @@ import com.stansful.sshvpnclient.ui.designsystem.ShadowNavRail
 import com.stansful.sshvpnclient.ui.designsystem.StatusTone
 import com.stansful.sshvpnclient.ui.designsystem.ToastAnchorState
 import com.stansful.sshvpnclient.ui.designsystem.ToastHost
+import com.stansful.sshvpnclient.ui.designsystem.ToastTone
 import com.stansful.sshvpnclient.ui.designsystem.ToasterState
 import com.stansful.sshvpnclient.ui.designsystem.rememberToasterState
 import com.stansful.sshvpnclient.ui.designsystem.stateDotColor
 import com.stansful.sshvpnclient.ui.home.HomeRoute
+import com.stansful.sshvpnclient.ui.main.MainViewModel
 import com.stansful.sshvpnclient.ui.routes.RoutesRoute
 import com.stansful.sshvpnclient.ui.servers.KeyEditorRoute
 import com.stansful.sshvpnclient.ui.servers.ServerEditorRoute
@@ -170,6 +172,7 @@ fun ShadowApp(
             }
         }
         UpdateSheetHost(onGoHome = { navController.navigateTopLevel(Destinations.HOME) })
+        ServerSessionNotices(toaster = toaster)
     }
 
     LaunchedEffect(container) {
@@ -183,6 +186,21 @@ fun ShadowApp(
         val request = launchRequest ?: return@LaunchedEffect
         navController.openFromOutside(request.route)
         currentOnLaunchRequestHandled()
+    }
+}
+
+/**
+ * Server-mode notices (a connect or restart the previous session blocked) as toasts on whichever
+ * screen is open: a restart can start from Home, Servers or App routing.
+ */
+@Composable
+private fun ServerSessionNotices(toaster: ToasterState) {
+    val viewModel = activityViewModel<MainViewModel>()
+    val notice by viewModel.notice.collectAsStateWithLifecycle()
+    LaunchedEffect(notice?.id) {
+        val current = notice ?: return@LaunchedEffect
+        toaster.show(current.message, tone = ToastTone.Error, detail = current.detail)
+        viewModel.consumeNotice(current.id)
     }
 }
 
