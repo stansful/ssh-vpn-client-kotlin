@@ -2974,7 +2974,7 @@ internal class KotlinTunForwarder(
             }
         }
 
-        /** Bounded so one busy flow cannot monopolize a control worker, mirroring the TCP uploader. */
+        /** Bounded so one busy flow cannot monopolize a relay worker. */
         private fun drainUplink() {
             var written = 0
             while (written < MAX_UDP_DATAGRAMS_PER_UPLINK_RUN) {
