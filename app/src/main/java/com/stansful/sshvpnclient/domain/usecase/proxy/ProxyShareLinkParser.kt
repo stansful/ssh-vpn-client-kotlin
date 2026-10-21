@@ -79,7 +79,7 @@ class ProxyShareLinkParser {
             ?: return ProxyParseResult.Failure(ProxyParseReasons.HOST_MISSING)
         val port = uri.port.takeIf { it in 1..65_535 }
             ?: return ProxyParseResult.Failure(ProxyParseReasons.PORT_INVALID)
-        val credential = uri.rawUserInfo?.let(::decodeShareLinkComponent)?.takeIf(String::isNotBlank)
+        val credential = uri.rawUserInfo?.let(::decodeShareLinkUserInfo)?.takeIf(String::isNotBlank)
             ?: return ProxyParseResult.Failure(
                 if (protocol == ProxyProtocol.TROJAN) "Password is missing" else "UUID is missing",
             )
@@ -202,8 +202,21 @@ internal fun parseShareLinkQuery(rawQuery: String?, trimValues: Boolean = true):
         .toMap()
 }
 
+/**
+ * Form decoding, as share links use it in their query and name: `+` is a space, as Go's
+ * `url.ParseQuery` and the common panels read it (an XHTTP `extra` JSON arrives with its spaces as `+`).
+ */
 internal fun decodeShareLinkComponent(value: String): String {
     return URLDecoder.decode(value, StandardCharsets.UTF_8.name())
+}
+
+/**
+ * The credential before `@`: percent-escapes are decoded, but a literal `+` stays a plus, as Go's
+ * `url.Userinfo` and `java.net.URI.getUserInfo` read it. A Trojan password or a VLESS id with a `+`
+ * would otherwise reach the server with a space in its place.
+ */
+internal fun decodeShareLinkUserInfo(rawUserInfo: String): String {
+    return decodeShareLinkComponent(rawUserInfo.replace("+", "%2B"))
 }
 
 internal fun sha256Hex(value: String): String {

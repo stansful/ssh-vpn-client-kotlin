@@ -97,7 +97,7 @@ internal class Hysteria2LinkParser {
         val port = serverPorts.first().first
         // Like the official client (Go `url.Userinfo`): the auth is the unescaped userinfo, `user:pass`
         // included, and a literal `+` stays a plus instead of turning into a space as in a query.
-        val credential = link.userInfo?.replace("+", "%2B")?.let(::decodeShareLinkComponent)
+        val credential = link.userInfo?.let(::decodeShareLinkUserInfo)
             ?: query.secret(AUTH_QUERY).orEmpty()
         val parameters = normalizedParameters(query, serverPorts)
         val name = link.fragment?.let(::decodeShareLinkComponent)?.trim().orEmpty().ifBlank {
