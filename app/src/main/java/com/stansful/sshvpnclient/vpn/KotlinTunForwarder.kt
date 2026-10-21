@@ -536,6 +536,40 @@ internal class TunPacketWriter(
     }
 }
 
+/**
+ * Where TCP flows write their uploads into their SSH channels.
+ *
+ * A JSch channel write blocks while the server keeps the channel's window shut: no timeout, deaf to
+ * interrupts, released only by a window adjust or by the channel closing. A destination that stops
+ * reading holds its writer that long. On a small shared pool a handful of such flows held every
+ * worker, and the uploads of every other flow - the first request of a new connection included -
+ * queued behind them: the whole tunnel froze. So a write is handed straight to a thread, never
+ * queued behind another flow's; the caller keeps one in flight per flow, which also keeps each
+ * flow's bytes in order, and the pool has a writer for every flow the table allows. Idle writers
+ * expire, so the threads only exist while flows are actually uploading.
+ */
+internal fun newFlowWriterExecutor(
+    maxActiveTcpSessions: Int,
+    threadFactory: ThreadFactory,
+    keepAliveMs: Long,
+): ThreadPoolExecutor = ThreadPoolExecutor(
+    0,
+    flowWriterLimit(maxActiveTcpSessions),
+    keepAliveMs,
+    TimeUnit.MILLISECONDS,
+    SynchronousQueue(),
+    threadFactory,
+    ThreadPoolExecutor.AbortPolicy(),
+)
+
+/**
+ * One writer per flow in the table, plus a few for flows that just closed: their blocked write only
+ * notices the closed channel on JSch's next 100 ms wake-up.
+ */
+internal fun flowWriterLimit(maxActiveTcpSessions: Int): Int = maxActiveTcpSessions + FLOW_WRITER_THREAD_SLACK
+
+private const val FLOW_WRITER_THREAD_SLACK = 16
+
 internal class KotlinTunForwarder(
     private val vpnInterface: ParcelFileDescriptor,
     sshSession: Session,
@@ -578,6 +612,7 @@ internal class KotlinTunForwarder(
         diagnostics = diagnostics,
         // Closed flows keep their open until it times out, so a table's worth of those comes on top.
         maxConcurrentConnects = 2 * config.maxActiveTcpSessions + CONNECT_THREAD_SLACK,
+        maxActiveTcpSessions = config.maxActiveTcpSessions,
     )
     private val outboundPacketPool = TunPacketBufferPool(
         bufferSize = config.tunMtu,
@@ -1673,6 +1708,7 @@ internal class KotlinTunForwarder(
     private class ForwarderExecutors(
         private val diagnostics: ForwarderDiagnostics,
         maxConcurrentConnects: Int,
+        maxActiveTcpSessions: Int,
     ) {
         /**
          * Opening a `direct-tcpip` channel blocks until the SSH server has reached the destination -
@@ -1690,17 +1726,12 @@ internal class KotlinTunForwarder(
             NamedThreadFactory(CONNECT_THREAD_PREFIX),
             ThreadPoolExecutor.AbortPolicy(),
         )
-        private val controlExecutor = ThreadPoolExecutor(
-            CONTROL_WORKER_THREADS,
-            CONTROL_WORKER_THREADS,
-            WORKER_KEEP_ALIVE_MS,
-            TimeUnit.MILLISECONDS,
-            LinkedBlockingQueue(MAX_CONTROL_QUEUE_SIZE),
-            NamedThreadFactory(CONTROL_THREAD_PREFIX),
-            ThreadPoolExecutor.AbortPolicy(),
-        ).apply {
-            allowCoreThreadTimeOut(true)
-        }
+        /** Upload writes, one writer per flow: see [newFlowWriterExecutor]. */
+        private val uploadExecutor = newFlowWriterExecutor(
+            maxActiveTcpSessions = maxActiveTcpSessions,
+            threadFactory = NamedThreadFactory(UPLOAD_THREAD_PREFIX),
+            keepAliveMs = WORKER_KEEP_ALIVE_MS,
+        )
         private val dnsExecutor = ThreadPoolExecutor(
             DNS_WORKER_THREADS,
             DNS_WORKER_THREADS,
@@ -1749,8 +1780,8 @@ internal class KotlinTunForwarder(
             allowCoreThreadTimeOut(true)
         }
 
-        fun executeControl(task: () -> Unit): Boolean {
-            return execute(CONTROL_POOL_NAME, controlExecutor, task)
+        fun executeUpload(task: () -> Unit): Boolean {
+            return execute(UPLOAD_POOL_NAME, uploadExecutor, task)
         }
 
         fun executeConnect(task: () -> Unit): Boolean {
@@ -1807,7 +1838,7 @@ internal class KotlinTunForwarder(
 
         fun shutdownNow() {
             connectExecutor.shutdownNow()
-            controlExecutor.shutdownNow()
+            uploadExecutor.shutdownNow()
             udpRelayExecutor.shutdownNow()
             dnsExecutor.shutdownNow()
             remoteReadExecutor.shutdownNow()
@@ -2083,7 +2114,7 @@ internal class KotlinTunForwarder(
         }
 
         private fun submitClientFlushTask() {
-            val scheduled = executors.executeControl { flushClientWrites() }
+            val scheduled = executors.executeUpload { flushClientWrites() }
             if (!scheduled) {
                 lock.withLock {
                     writeScheduled = false
@@ -2092,8 +2123,21 @@ internal class KotlinTunForwarder(
             }
         }
 
-        /** Processes at most one coalesced block so busy upload flows cannot monopolize control workers. */
+        /**
+         * Drains this flow's upload into its SSH channel, one coalesced block at a time, on the
+         * writer [scheduleClientFlush] handed it; there is one at a time per flow. A write may block
+         * for as long as the server keeps the channel's window shut. That holds up this flow only,
+         * and closing the channel - a reset, the idle or pressure cleanup, a transport change -
+         * ends it.
+         */
         private fun flushClientWrites() {
+            while (flushNextClientWrite()) {
+                // Each pass writes one block; the next pass picks up whatever arrived meanwhile.
+            }
+        }
+
+        /** Writes one coalesced block; true while the flow has more to drain. */
+        private fun flushNextClientWrite(): Boolean {
             var payloadBatch: CoalescingUploadQueue.Chunk? = null
             var output: OutputStream? = null
             var outputToClose: OutputStream? = null
@@ -2103,7 +2147,7 @@ internal class KotlinTunForwarder(
                 val remote = remoteOutput
                 if (remote == null || state == TcpState.CLOSED) {
                     writeScheduled = false
-                    return
+                    return false
                 }
                 val activeChannel = channel
                 if (activeChannel == null || !isSshChannelOpen(activeChannel)) {
@@ -2126,15 +2170,15 @@ internal class KotlinTunForwarder(
             if (channelUnavailable) {
                 diagnostics.logTcpWriteFailure("SSH channel closed before upload flush")
                 sendResetAndClose()
-                return
+                return false
             }
-            val activeChannel = batchChannel ?: return
+            val activeChannel = batchChannel ?: return false
             outputToClose?.let { closingOutput ->
                 completeClientOutputClose(closingOutput, activeChannel)
-                return
+                return false
             }
-            val activeOutput = output ?: return
-            val activeBatch = payloadBatch ?: return
+            val activeOutput = output ?: return false
+            val activeBatch = payloadBatch ?: return false
             try {
                 if (!isSshChannelOpen(activeChannel)) {
                     throw EOFException("SSH channel closed before upload batch")
@@ -2153,10 +2197,10 @@ internal class KotlinTunForwarder(
             } catch (error: Exception) {
                 diagnostics.logTcpWriteFailure(error.message ?: error::class.java.simpleName)
                 sendResetAndClose()
-                return
+                return false
             }
 
-            val shouldReschedule = lock.withLock {
+            return lock.withLock {
                 if (state == TcpState.CLOSED) {
                     writeScheduled = false
                     false
@@ -2166,9 +2210,6 @@ internal class KotlinTunForwarder(
                     writeScheduled = false
                     false
                 }
-            }
-            if (shouldReschedule) {
-                submitClientFlushTask()
             }
         }
 
@@ -3765,13 +3806,13 @@ internal class KotlinTunForwarder(
 
     private companion object {
         const val READ_THREAD_NAME = "kotlin-tun-forwarder"
-        const val CONTROL_THREAD_PREFIX = "kotlin-tun-control"
+        const val UPLOAD_THREAD_PREFIX = "kotlin-tun-upload"
         const val CONNECT_THREAD_PREFIX = "kotlin-tun-connect"
         const val DNS_THREAD_PREFIX = "kotlin-tun-dns"
         const val DNS_TIMEOUT_THREAD_PREFIX = "kotlin-tun-dns-timeout"
         const val REMOTE_READ_THREAD_PREFIX = "kotlin-tun-read"
         const val CLEANUP_THREAD_PREFIX = "kotlin-tun-cleanup"
-        const val CONTROL_POOL_NAME = "control"
+        const val UPLOAD_POOL_NAME = "upload"
         const val CONNECT_POOL_NAME = "connect"
         const val DNS_POOL_NAME = "dns"
         const val DNS_TIMEOUT_POOL_NAME = "dns-timeout"
@@ -3781,8 +3822,6 @@ internal class KotlinTunForwarder(
         const val UDP_RELAY_POOL_NAME = "udp-relay"
         const val UDP_RELAY_WORKER_THREADS = HARD_MAX_ACTIVE_UDP_RELAY_SESSIONS
         const val MAX_UDP_RELAY_QUEUE_SIZE = 256
-        const val CONTROL_WORKER_THREADS = 8
-        const val MAX_CONTROL_QUEUE_SIZE = 1_024
         const val CONNECT_THREAD_SLACK = 32
         // A query holds its worker until its resolver answers or its time is up.
         const val DNS_WORKER_THREADS = 16
