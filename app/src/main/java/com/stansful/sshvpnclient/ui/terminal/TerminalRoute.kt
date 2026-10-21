@@ -27,8 +27,9 @@ import com.stansful.sshvpnclient.ui.shell.navigateTopLevel
  * background or after a reconnect), and closes on leave, `ON_STOP` and disconnect — closing never
  * touches the VPN. A configuration change (rotation, dark mode, multi-window, folding) is not a
  * leave: the Activity is recreated around the same Activity-scoped [MainViewModel], so the shell,
- * its output and the typed command carry over and the new screen's `ON_START` finds the shell open.
- * The typed command stays in memory only (the ViewModel, never the saved instance state).
+ * its output and the typed command carry over and the new screen's `ON_START` finds the shell open
+ * (or, for a shell that had ended or failed, keeps that screen until Restart). The typed command
+ * stays in memory only (the ViewModel, never the saved instance state).
  */
 @Composable
 fun TerminalRoute(
@@ -55,7 +56,8 @@ fun TerminalRoute(
     )
     LaunchedEffect(started, connected, enabled) {
         when {
-            started && connected && enabled -> viewModel.openTerminal()
+            started && connected && enabled ->
+                if (opensTerminalAutomatically(uiState.terminalState)) viewModel.openTerminal()
             !connected -> viewModel.closeTerminal()
         }
     }
@@ -132,6 +134,15 @@ internal fun TerminalShellLifecycleEffect(
  * only being recreated for a configuration change: its ViewModel, and with it the shell, survives.
  */
 internal fun closesTerminalOnStop(changingConfigurations: Boolean): Boolean = !changingConfigurations
+
+/**
+ * Whether the screen opens the shell by itself (on `ON_START`, after a reconnect). Not over a shell
+ * that has ended or failed: its output and error stay until Restart, also when the Activity is
+ * recreated around them. Leaving the screen or the background closes the shell into a fresh state,
+ * so the next `ON_START` still opens one.
+ */
+internal fun opensTerminalAutomatically(terminal: TerminalUiState): Boolean =
+    terminal.isOpen || terminal.isConnecting || terminal.errorMessage == null
 
 /**
  * Maps the ViewModel's terminal state to the screen. A closed shell that produced output is "ended"
