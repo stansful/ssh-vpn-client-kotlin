@@ -5,6 +5,7 @@ import com.stansful.sshvpnclient.data.proxy.SQLITE_QUERY_BATCH_SIZE
 import com.stansful.sshvpnclient.data.proxy.sqliteQueryBatches
 import com.stansful.sshvpnclient.data.secret.SecretIds
 import com.stansful.sshvpnclient.data.secret.SecretStorage
+import com.stansful.sshvpnclient.data.secret.readableSecretIds
 import com.stansful.sshvpnclient.domain.model.ParsedProxyProfile
 import com.stansful.sshvpnclient.domain.model.ProxyImportResult
 import com.stansful.sshvpnclient.domain.model.ProxyProfile
@@ -122,24 +123,46 @@ class RoomSmartProxyProfileRepository(
                 .filterNot(allowedFingerprints::contains)
                 .mapNotNull { fingerprint -> existingByFingerprint[fingerprint]?.id }
                 .toSet()
+            // A row can outlive its link: the secret store starts over when its Keystore key is
+            // gone. Such a row takes the link from this sync, or it would stay unusable for good.
+            val readableSecretIds = secretStorage.readableSecretIds(
+                uniqueProfiles.mapNotNull { parsed -> existingByFingerprint[parsed.fingerprint]?.secretId },
+            )
             val entitiesToUpsert = ArrayList<SmartProxyProfileEntity>(uniqueProfiles.size)
             val secretsToSave = LinkedHashMap<String, String>(uniqueProfiles.size)
+            val unreadableSecretIds = ArrayList<String>()
 
             uniqueProfiles.forEach { parsed ->
                 if (parsed.transport == ProxyTransport.UNKNOWN || parsed.security == ProxySecurity.UNKNOWN) {
                     unsupported += 1
                 }
                 val existing = existingByFingerprint[parsed.fingerprint]
+                val existingReadable = existing != null && existing.secretId in readableSecretIds
                 if (existing != null && (source != ProxyProfileSource.REMOTE || existing.source != source.name)) {
-                    duplicates += 1
+                    if (existingReadable) {
+                        duplicates += 1
+                        return@forEach
+                    }
+                    // Still a duplicate of that row, so the row keeps its source and state; only
+                    // its lost link is restored.
+                    val secretId = SecretIds.smartProxyProfileRevision(
+                        profileId = existing.id,
+                        revisionId = UUID.randomUUID().toString(),
+                    ).also { newSecretId -> secretsToSave[newSecretId] = parsed.rawUri }
+                    entitiesToUpsert += existing.copy(secretId = secretId)
+                    unreadableSecretIds += existing.secretId
+                    updated += 1
                     return@forEach
                 }
 
                 val id = existing?.id ?: UUID.randomUUID().toString()
-                val secretId = existing?.secretId ?: SecretIds.smartProxyProfileRevision(
+                val secretId = existing?.secretId?.takeIf { existingReadable } ?: SecretIds.smartProxyProfileRevision(
                     profileId = id,
                     revisionId = UUID.randomUUID().toString(),
                 ).also { newSecretId -> secretsToSave[newSecretId] = parsed.rawUri }
+                if (existing != null && !existingReadable) {
+                    unreadableSecretIds += existing.secretId
+                }
                 entitiesToUpsert += parsed.toSmartEntity(
                     id = id,
                     source = source,
@@ -162,6 +185,8 @@ class RoomSmartProxyProfileRepository(
                             successful.isNotEmpty(),
                     )
                     deleteSecretsBestEffort(rejectedEntities.map(SmartProxyProfileEntity::secretId))
+                    // Whatever is left under the replaced ids can't be read; nothing points at it.
+                    deleteSecretsBestEffort(unreadableSecretIds)
                 }
             } catch (error: Exception) {
                 withContext(NonCancellable) {

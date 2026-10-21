@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -347,6 +348,54 @@ class RoomSmartProxyProfileRepositoryBatchTest {
     }
 
     @Test
+    fun `catalog sync gives profiles whose secret store started over their links back`() = runBlocking {
+        val dao = RecordingSmartProxyProfileDao(emptyMap())
+        val secrets = RecordingSmartSecretStorage(emptyMap())
+        val repository = repository(dao, secrets)
+        val catalog = listOf(
+            "vless://00000000-0000-4000-8000-000000000007@one.test:443?security=tls#One",
+            "vless://00000000-0000-4000-8000-000000000008@two.test:443?security=tls#Two",
+        )
+        repository.import(catalog.joinToString("\n"), ProxyProfileSource.REMOTE, "https://example.test/smart")
+        val originals = dao.remainingEntities().associateBy(SmartProxyProfileEntity::id)
+        secrets.startOver()
+        assertTrue(repository.getByIds(originals.keys.toList()).isEmpty())
+
+        val result = repository.import(
+            catalog.joinToString("\n"),
+            ProxyProfileSource.REMOTE,
+            "https://example.test/smart",
+        )
+
+        assertEquals(2, result.updated)
+        assertEquals(originals.keys, dao.remainingIds())
+        val profiles = repository.getByIds(originals.keys.toList())
+        assertEquals(catalog.toSet(), profiles.map { profile -> profile.rawUri }.toSet())
+        dao.remainingEntities().forEach { entity ->
+            assertTrue(entity.secretId.startsWith("smart-proxy-profile-"))
+            assertNotEquals(originals.getValue(entity.id).secretId, entity.secretId)
+        }
+        assertEquals(originals.values.map(SmartProxyProfileEntity::secretId).toSet(), secrets.deletedSecretIds)
+    }
+
+    @Test
+    fun `catalog sync keeps the stored links of profiles that can still read them`() = runBlocking {
+        val dao = RecordingSmartProxyProfileDao(emptyMap())
+        val secrets = RecordingSmartSecretStorage(emptyMap())
+        val repository = repository(dao, secrets)
+        val link = "vless://00000000-0000-4000-8000-000000000009@kept.test:443?security=tls#Kept"
+        repository.import(link, ProxyProfileSource.REMOTE, "https://example.test/smart")
+        val original = dao.remainingEntities().single()
+
+        val result = repository.import(link, ProxyProfileSource.REMOTE, "https://example.test/smart")
+
+        assertEquals(1, result.updated)
+        assertEquals(original.secretId, dao.remainingEntities().single().secretId)
+        assertEquals(1, secrets.savedSecrets.size)
+        assertTrue(secrets.deletedSecretIds.isEmpty())
+    }
+
+    @Test
     fun `remote import expires rows left over from a previous source URL`() = runBlocking {
         val leftover = smartProfileEntity(id = "leftover")
         val dao = RecordingSmartProxyProfileDao(mapOf(leftover.id to leftover))
@@ -566,6 +615,11 @@ private class RecordingSmartSecretStorage(
     override suspend fun deleteSecret(id: String) {
         secrets.remove(id)
         deletedSecretIds += id
+    }
+
+    /** What the store looks like after it started over: every saved value is gone. */
+    fun startOver() {
+        secrets.clear()
     }
 }
 
