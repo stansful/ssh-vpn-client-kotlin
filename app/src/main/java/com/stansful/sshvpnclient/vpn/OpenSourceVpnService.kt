@@ -138,9 +138,43 @@ class OpenSourceVpnService : android.net.VpnService() {
                 )
             }
             ACTION_DISCONNECT -> disconnect(startId)
+            android.net.VpnService.SERVICE_INTERFACE -> handleAlwaysOnStart(startId)
         }
         return START_NOT_STICKY
     }
+
+    /**
+     * Android's own start (Always-on VPN): [AlwaysOnVpnStarter] brings back the last mode, which may be
+     * another service's. Android may have used startForegroundService(), so the deadline is met first,
+     * unless this service already runs its session in the foreground (re-posting would reset its notice).
+     */
+    private fun handleAlwaysOnStart(startId: Int) {
+        if (!ownsAlwaysOnReceiverSession()) startVpnForeground()
+        appContainer.alwaysOnVpnStarter.start { releaseAlwaysOnStart(startId) }
+    }
+
+    /** Main thread, like every stop of this service; a newer command makes stopSelfResult() refuse. */
+    private fun releaseAlwaysOnStart(startId: Int) {
+        if (serviceDestroyed) return
+        // A run whose state another mode took over is already winding down; stopping is safe then.
+        if (!mayStopAfterAlwaysOnStart(
+                state = appContainer.vpnConnectionRepository.currentState,
+                receiver = VpnSessionOwner.OPEN_SOURCE,
+                receiverRunActive = false,
+            )
+        ) {
+            return
+        }
+        if (stopSelfResult(startId)) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+    }
+
+    private fun ownsAlwaysOnReceiverSession(): Boolean = isVpnSessionOwnedBy(
+        state = appContainer.vpnConnectionRepository.currentState,
+        owner = VpnSessionOwner.OPEN_SOURCE,
+        transport = VpnTransportType.XRAY,
+    )
 
     override fun onDestroy() {
         serviceDestroyed = true
