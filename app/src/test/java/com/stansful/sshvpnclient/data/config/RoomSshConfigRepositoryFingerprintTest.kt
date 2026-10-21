@@ -1,6 +1,8 @@
 package com.stansful.sshvpnclient.data.config
 
 import com.stansful.sshvpnclient.data.secret.SecretStorage
+import com.stansful.sshvpnclient.domain.model.AuthType
+import com.stansful.sshvpnclient.domain.model.SshConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
@@ -75,10 +77,50 @@ class RoomSshConfigRepositoryFingerprintTest {
         assertEquals(FIRST_KEY, dao.entity("vps")?.fingerprint)
     }
 
+    @Test
+    fun `saving a server that did not touch the fingerprint keeps the one saved at write time`() = runBlocking {
+        val dao = FakeSshConfigDao(configEntity(id = "vps", fingerprint = null))
+        val repository = repository(dao)
+        val edited = server(fingerprint = null).copy(note = "Rack 2")
+        // The service pins the key after the editor read the server, before its save is written.
+        dao.beforeKeepingUpsert = { dao.pinFingerprintIfAbsent("vps", FIRST_KEY) }
+
+        repository.update(edited, keepSavedFingerprint = true)
+
+        assertEquals(FIRST_KEY, dao.entity("vps")?.fingerprint)
+        assertEquals("Rack 2", dao.entity("vps")?.note)
+    }
+
+    @Test
+    fun `saving a fingerprint typed in the editor replaces the saved one`() = runBlocking {
+        val dao = FakeSshConfigDao(configEntity(id = "vps", fingerprint = USER_KEY))
+
+        repository(dao).update(server(fingerprint = null), keepSavedFingerprint = false)
+
+        assertNull(dao.entity("vps")?.fingerprint)
+    }
+
     private fun repository(dao: SshConfigDao) = RoomSshConfigRepository(
         dao = dao,
         secretStorage = NoSecrets,
         ioDispatcher = Dispatchers.Unconfined,
+    )
+
+    private fun server(fingerprint: String?) = SshConfig(
+        id = "vps",
+        name = "Home VPS",
+        host = "vps.example.net",
+        port = 22,
+        username = "root",
+        authType = AuthType.PRIVATE_KEY,
+        password = null,
+        privateKeyId = "key-1",
+        fingerprint = fingerprint,
+        keepAliveIntervalSec = 30,
+        enableUdpForwarding = false,
+        note = null,
+        createdAt = 1L,
+        updatedAt = 3L,
     )
 
     private companion object {
@@ -92,7 +134,15 @@ private class FakeSshConfigDao(vararg initial: SshConfigEntity) : SshConfigDao()
     private val entities = initial.associateBy(SshConfigEntity::id).toMutableMap()
     val pinCalls = mutableListOf<Pair<String, String>>()
 
+    /** Runs inside [upsertKeepingFingerprint] before its read: a write landing between the two steps. */
+    var beforeKeepingUpsert: suspend () -> Unit = {}
+
     fun entity(id: String): SshConfigEntity? = entities[id]
+
+    override suspend fun upsertKeepingFingerprint(entity: SshConfigEntity) {
+        beforeKeepingUpsert()
+        super.upsertKeepingFingerprint(entity)
+    }
 
     override suspend fun pinFingerprintIfAbsent(id: String, fingerprint: String): Int {
         pinCalls += id to fingerprint

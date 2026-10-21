@@ -54,6 +54,17 @@ abstract class SshConfigDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun upsert(entity: SshConfigEntity)
 
+    /**
+     * Writes [entity] with the fingerprint saved now instead of its own, read and written in one
+     * transaction: a host key pinned on first use or accepted while the editor was open survives a save
+     * that did not touch the field. Writes nothing if the server is gone.
+     */
+    @Transaction
+    open suspend fun upsertKeepingFingerprint(entity: SshConfigEntity) {
+        val saved = getById(entity.id) ?: return
+        upsert(entity.copy(fingerprint = saved.fingerprint))
+    }
+
     @Query("DELETE FROM ssh_configs WHERE id = :id")
     abstract suspend fun deleteById(id: String)
 

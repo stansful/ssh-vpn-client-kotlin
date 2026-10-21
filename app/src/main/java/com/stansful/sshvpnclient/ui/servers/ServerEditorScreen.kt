@@ -173,6 +173,8 @@ internal fun ServerEditorScreen(
                     form = form,
                     hostKeyChange = state.hostKeyChange,
                     acceptingHostKey = state.isAcceptingHostKey,
+                    // Save also writes the fingerprint: the two never run together.
+                    acceptEnabled = !busy,
                     onFormChange = onFormChange,
                     onOpenActivity = onOpenActivity,
                     onAcceptHostKey = onAcceptHostKey,

@@ -69,7 +69,7 @@ class RoomSshConfigRepository(
         }
     }
 
-    override suspend fun update(config: SshConfig) {
+    override suspend fun update(config: SshConfig, keepSavedFingerprint: Boolean) {
         withContext(ioDispatcher) {
             val existing = dao.getById(config.id) ?: return@withContext
             val passwordSecretId = savePasswordIfNeeded(config, existing.passwordSecretId)
@@ -78,13 +78,13 @@ class RoomSshConfigRepository(
                 existing.passwordSecretId?.let { secretStorage.deleteSecret(it) }
             }
 
-            dao.upsert(
-                config.toEntity(
-                    passwordSecretId = passwordSecretId,
-                    isSelected = existing.isSelected,
-                    createdAt = existing.createdAt,
-                ),
+            val entity = config.toEntity(
+                passwordSecretId = passwordSecretId,
+                isSelected = existing.isSelected,
+                createdAt = existing.createdAt,
             )
+            // Not `existing.fingerprint`: a pin written since that read must not be undone.
+            if (keepSavedFingerprint) dao.upsertKeepingFingerprint(entity) else dao.upsert(entity)
         }
     }
 

@@ -58,7 +58,7 @@ class AcceptSshHostKeyUseCaseTest {
         override suspend fun getAll(): List<SshConfig> = emptyList()
         override suspend fun getById(id: String): SshConfig? = null
         override suspend fun create(config: SshConfig) = Unit
-        override suspend fun update(config: SshConfig) = Unit
+        override suspend fun update(config: SshConfig, keepSavedFingerprint: Boolean) = Unit
         override suspend fun delete(id: String) = Unit
         override suspend fun selectConfig(id: String) = Unit
         override suspend fun getSelectedConfig(): SshConfig? = null
