@@ -267,5 +267,9 @@ private class FakeVpnConnectionRepository : VpnConnectionRepository {
         diagnostics += message
     }
 
+    override fun appendNotice(message: String) {
+        diagnostics += message
+    }
+
     override fun clearDiagnostics() = Unit
 }
