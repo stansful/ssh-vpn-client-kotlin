@@ -12,7 +12,12 @@ interface SshConfigRepository {
     suspend fun getAll(): List<SshConfig>
     suspend fun getById(id: String): SshConfig?
     suspend fun create(config: SshConfig)
-    suspend fun update(config: SshConfig)
+    /**
+     * Saves [config] over the stored server. With [keepSavedFingerprint] the fingerprint stored at the
+     * moment of the write is kept instead of [config]'s (the editor did not touch the field, and the
+     * service may have pinned a key meanwhile).
+     */
+    suspend fun update(config: SshConfig, keepSavedFingerprint: Boolean = false)
     suspend fun delete(id: String)
     suspend fun selectConfig(id: String)
     suspend fun getSelectedConfig(): SshConfig?

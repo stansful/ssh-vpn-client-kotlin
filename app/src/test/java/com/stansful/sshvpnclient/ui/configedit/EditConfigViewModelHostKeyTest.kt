@@ -18,11 +18,13 @@ import com.stansful.sshvpnclient.domain.usecase.config.UpdateSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyByIdUseCase
 import com.stansful.sshvpnclient.domain.usecase.key.GetSshPrivateKeyListUseCase
 import com.stansful.sshvpnclient.ui.keys.SshKeyTraitsReader
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -71,6 +73,82 @@ class EditConfigViewModelHostKeyTest {
 
         runBlocking { configs.pinFingerprintIfAbsent(SERVER_ID, NEW_KEY) }
         viewModel.updateForm { it.copy(note = "Rack 2") }
+        viewModel.save()
+        idle()
+
+        assertTrue(viewModel.uiState.value.isSaved)
+        assertEquals(NEW_KEY, configs.stored().fingerprint)
+        assertEquals("Rack 2", configs.stored().note)
+    }
+
+    @Test
+    fun `a key pinned on first use while the save is writing survives it`() {
+        val configs = FakeConfigs(server(fingerprint = null))
+        val viewModel = viewModel(configs)
+        idle()
+
+        // The service pins the key after the save started, right before the row is written.
+        configs.duringUpdate = { configs.pinFingerprintIfAbsent(SERVER_ID, NEW_KEY) }
+        viewModel.updateForm { it.copy(note = "Rack 2") }
+        viewModel.save()
+        idle()
+
+        assertTrue(viewModel.uiState.value.isSaved)
+        assertEquals(NEW_KEY, configs.stored().fingerprint)
+        assertEquals("Rack 2", configs.stored().note)
+    }
+
+    @Test
+    fun `accept new key waits out a save in flight instead of racing it`() = runBlocking {
+        val configs = FakeConfigs(server(fingerprint = OLD_KEY))
+        val change = SshHostKeyChange(SERVER_ID, pinnedFingerprint = OLD_KEY, observedFingerprint = NEW_KEY)
+        changes.record(change)
+        val viewModel = viewModel(configs)
+        idle()
+        val gate = CompletableDeferred<Unit>()
+        configs.duringUpdate = { gate.await() }
+
+        viewModel.updateForm { it.copy(note = "Rack 2") }
+        viewModel.save()
+        idle()
+        assertTrue(viewModel.uiState.value.isSaving)
+        viewModel.acceptNewHostKey()
+        idle()
+
+        assertFalse(viewModel.uiState.value.isAcceptingHostKey)
+        assertNull(viewModel.uiState.value.hostKeyAcceptResult)
+        assertEquals(OLD_KEY, configs.stored().fingerprint)
+        assertEquals(change, changes.observe(SERVER_ID).first())
+
+        gate.complete(Unit)
+        idle()
+        assertTrue(viewModel.uiState.value.isSaved)
+        assertEquals(OLD_KEY, configs.stored().fingerprint)
+    }
+
+    @Test
+    fun `save waits out an accept in flight so it cannot put the old key back`() = runBlocking {
+        val configs = FakeConfigs(server(fingerprint = OLD_KEY))
+        changes.record(SshHostKeyChange(SERVER_ID, pinnedFingerprint = OLD_KEY, observedFingerprint = NEW_KEY))
+        val viewModel = viewModel(configs)
+        idle()
+        val gate = CompletableDeferred<Unit>()
+        configs.duringReplace = { gate.await() }
+
+        viewModel.acceptNewHostKey()
+        idle()
+        assertTrue(viewModel.uiState.value.isAcceptingHostKey)
+        viewModel.updateForm { it.copy(note = "Rack 2") }
+        viewModel.save()
+        idle()
+
+        assertFalse(viewModel.uiState.value.isSaving)
+        assertFalse(viewModel.uiState.value.isSaved)
+        assertEquals(0, configs.updateCount)
+
+        gate.complete(Unit)
+        idle()
+        assertEquals(HostKeyAcceptResult.Accepted, viewModel.uiState.value.hostKeyAcceptResult)
         viewModel.save()
         idle()
 
@@ -160,6 +238,15 @@ class EditConfigViewModelHostKeyTest {
     private class FakeConfigs(initial: SshConfig) : SshConfigRepository {
         private val configs = linkedMapOf(initial.id to initial)
 
+        /** Runs inside [update] before the row is written: a write landing while the save is in flight. */
+        var duringUpdate: suspend () -> Unit = {}
+
+        /** Runs inside [replaceFingerprint] before it writes, to hold "Accept new key" in flight. */
+        var duringReplace: suspend () -> Unit = {}
+
+        var updateCount = 0
+            private set
+
         fun stored(): SshConfig = configs.getValue(SERVER_ID)
 
         override suspend fun getById(id: String): SshConfig? = configs[id]
@@ -168,8 +255,12 @@ class EditConfigViewModelHostKeyTest {
             configs[config.id] = config
         }
 
-        override suspend fun update(config: SshConfig) {
-            if (config.id in configs) configs[config.id] = config
+        /** Like the Room repository: the kept fingerprint is read in the same step as the write. */
+        override suspend fun update(config: SshConfig, keepSavedFingerprint: Boolean) {
+            updateCount += 1
+            duringUpdate()
+            val saved = configs[config.id] ?: return
+            configs[config.id] = if (keepSavedFingerprint) config.copy(fingerprint = saved.fingerprint) else config
         }
 
         override suspend fun delete(id: String) {
@@ -183,6 +274,7 @@ class EditConfigViewModelHostKeyTest {
         }
 
         override suspend fun replaceFingerprint(id: String, fingerprint: String): Boolean {
+            duringReplace()
             val config = configs[id] ?: return false
             configs[id] = config.copy(fingerprint = fingerprint)
             return true

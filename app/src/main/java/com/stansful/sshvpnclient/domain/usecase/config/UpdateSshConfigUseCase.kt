@@ -8,9 +8,10 @@ class UpdateSshConfigUseCase(
     private val repository: SshConfigRepository,
     private val validator: SshConfigValidator = SshConfigValidator(),
 ) {
-    suspend operator fun invoke(config: SshConfig) {
+    /** [keepSavedFingerprint]: see [SshConfigRepository.update]. */
+    suspend operator fun invoke(config: SshConfig, keepSavedFingerprint: Boolean = false) {
         val errors = validator.validate(config)
         if (errors.isNotEmpty()) throw ValidationException(errors)
-        repository.update(config)
+        repository.update(config, keepSavedFingerprint)
     }
 }

@@ -142,12 +142,13 @@ class EditConfigViewModel(
 
     /**
      * Pins the key the server presented instead of the saved one, right away (other edits still wait
-     * for Save). The next connection checks the new key.
+     * for Save). The next connection checks the new key. Never runs together with [save]: both write the
+     * fingerprint.
      */
     fun acceptNewHostKey() {
         val state = mutableState.value
         val change = state.hostKeyChange ?: return
-        if (state.isAcceptingHostKey) return
+        if (state.isAcceptingHostKey || state.isSaving || state.isSaved) return
         mutableState.update { it.copy(isAcceptingHostKey = true, hostKeyAcceptResult = null) }
         viewModelScope.launch {
             try {
@@ -176,7 +177,8 @@ class EditConfigViewModel(
 
     fun save() {
         val state = mutableState.value
-        if (state.isSaving || state.isSaved) return
+        // An "Accept new key" in flight would race this save over the fingerprint; it takes a moment.
+        if (state.isSaving || state.isSaved || state.isAcceptingHostKey) return
         // A new server gets its id once, so a retried save after a failure cannot create a second copy.
         val form = state.form.withDefaultPrivateKey(state.keys).let { draft ->
             draft.copy(id = draft.id ?: UUID.randomUUID().toString())
@@ -185,20 +187,19 @@ class EditConfigViewModel(
         viewModelScope.launch {
             try {
                 val fingerprintEdited = form.fingerprint.trim() != storedFingerprint.trim()
-                var config = form.toDomain(System.currentTimeMillis())
-                if (state.isEditing && !fingerprintEdited) {
-                    // Not touched here: keep what is stored now, e.g. a key pinned on first use while
-                    // the editor was open.
-                    config = config.copy(fingerprint = getSshConfigByIdUseCase(config.id)?.fingerprint)
-                }
+                val config = form.toDomain(System.currentTimeMillis())
                 if (state.isEditing) {
-                    updateSshConfigUseCase(config)
+                    // Not touched here: the write keeps what is stored at that moment, e.g. a key pinned
+                    // on first use while the editor was open (reading it here first would leave a gap).
+                    updateSshConfigUseCase(config, keepSavedFingerprint = !fingerprintEdited)
                 } else {
                     addSshConfigUseCase(config)
                 }
-                storedFingerprint = config.fingerprint.orEmpty()
-                // A fingerprint set by hand settles a pending "host key changed" either way.
-                if (fingerprintEdited) hostKeyChanges.clear(config.id)
+                if (fingerprintEdited) {
+                    storedFingerprint = config.fingerprint.orEmpty()
+                    // A fingerprint set by hand settles a pending "host key changed" either way.
+                    hostKeyChanges.clear(config.id)
+                }
                 mutableState.update { it.copy(isSaving = false, isSaved = true, errors = emptyMap(), message = null) }
             } catch (error: ValidationException) {
                 mutableState.update {

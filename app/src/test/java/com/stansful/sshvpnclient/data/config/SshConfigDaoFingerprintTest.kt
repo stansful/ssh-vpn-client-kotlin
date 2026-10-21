@@ -7,6 +7,7 @@ import com.stansful.sshvpnclient.data.local.AppDatabase
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -61,6 +62,25 @@ class SshConfigDaoFingerprintTest {
         assertEquals(0, dao.updateFingerprint("missing", OTHER_KEY))
 
         assertEquals(OTHER_KEY, dao.getById("user")?.fingerprint)
+    }
+
+    @Test
+    fun `upsert keeping the fingerprint writes the row but keeps the saved key`() = runBlocking {
+        dao.upsert(configEntity(id = "pinned", fingerprint = FIRST_KEY))
+        dao.upsert(configEntity(id = "unpinned", fingerprint = null))
+
+        dao.upsertKeepingFingerprint(configEntity(id = "pinned", fingerprint = null).copy(note = "Rack 2"))
+        dao.upsertKeepingFingerprint(configEntity(id = "unpinned", fingerprint = OTHER_KEY).copy(note = "Rack 3"))
+
+        assertEquals(configEntity(id = "pinned", fingerprint = FIRST_KEY).copy(note = "Rack 2"), dao.getById("pinned"))
+        assertEquals(configEntity(id = "unpinned", fingerprint = null).copy(note = "Rack 3"), dao.getById("unpinned"))
+    }
+
+    @Test
+    fun `upsert keeping the fingerprint does not bring back a deleted server`() = runBlocking {
+        dao.upsertKeepingFingerprint(configEntity(id = "deleted", fingerprint = FIRST_KEY))
+
+        assertNull(dao.getById("deleted"))
     }
 
     private companion object {

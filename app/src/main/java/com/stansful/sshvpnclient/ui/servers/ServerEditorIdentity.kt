@@ -62,6 +62,7 @@ internal fun IdentitySection(
     form: EditConfigForm,
     hostKeyChange: SshHostKeyChange?,
     acceptingHostKey: Boolean,
+    acceptEnabled: Boolean,
     onFormChange: ((EditConfigForm) -> EditConfigForm) -> Unit,
     onOpenActivity: () -> Unit,
     onAcceptHostKey: () -> Unit,
@@ -88,6 +89,7 @@ internal fun IdentitySection(
                 HostKeyChangedCard(
                     change = change,
                     accepting = acceptingHostKey,
+                    enabled = acceptEnabled,
                     onAccept = onAcceptHostKey,
                     modifier = Modifier.padding(bottom = 16.dp),
                 )
@@ -267,6 +269,7 @@ private fun FingerprintWarning(onOpenActivity: () -> Unit) {
 private fun HostKeyChangedCard(
     change: SshHostKeyChange,
     accepting: Boolean,
+    enabled: Boolean,
     onAccept: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -299,6 +302,7 @@ private fun HostKeyChangedCard(
                     variant = ShadowButtonVariant.DangerTonal,
                     size = ShadowButtonSize.Compact,
                     icon = ShadowIcons.Fingerprint,
+                    enabled = enabled,
                     loading = accepting,
                 )
             }
