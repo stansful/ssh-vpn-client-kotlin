@@ -134,6 +134,7 @@ class ServerEditorScreenshotTest : ScreenshotTest() {
         render("ServerEditor_HostKeyChanged_Night", changed)
         render("ServerEditor_HostKeyChanged_Day", changed, DayColors)
         render("ServerEditor_HostKeyChanged_Phone_Night", changed, size = ScreenSize.PHONE)
+        // Accepting: the button spins, and both Saves are disabled until the new key is written.
         render("ServerEditor_HostKeyAccepting_Night", changed.copy(isAcceptingHostKey = true))
     }
 
