@@ -2,6 +2,7 @@ package com.stansful.sshvpnclient.screenshots.home
 
 import com.stansful.sshvpnclient.domain.model.AppUpdateInfo
 import com.stansful.sshvpnclient.domain.model.AppUpdateState
+import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.GlobalTab
 import com.stansful.sshvpnclient.domain.model.SmartConnectPhase
 import com.stansful.sshvpnclient.domain.model.SmartConnectState
@@ -30,6 +31,7 @@ import com.stansful.sshvpnclient.ui.home.failureNote
 import com.stansful.sshvpnclient.ui.home.hasButton
 import com.stansful.sshvpnclient.ui.home.isSessionActive
 import com.stansful.sshvpnclient.ui.main.TunnelCheckResult
+import com.stansful.sshvpnclient.vpn.SshHostKeyChangedException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -262,6 +264,57 @@ class HomeStateMapperTest {
                 HomeMode.Server,
             ).title,
         )
+    }
+
+    @Test
+    fun `a host key change found during key exchange says sign-in was stopped for every sign-in`() {
+        val error = SshHostKeyChangedException("Home VPS", "SHA256:pinned", "SHA256:new").message!!
+
+        listOf(AuthType.PASSWORD, AuthType.PRIVATE_KEY, null).forEach { auth ->
+            val note = failureNote(error, HomeMode.Server, auth)
+            assertEquals("Host key changed for Home VPS.", note.title)
+            assertTrue(note.message.contains("before your password or key was sent"))
+        }
+    }
+
+    @Test
+    fun `a host key change found after a password sign-in says the password was sent`() {
+        // A fingerprint saved in the editor during a first-use sign-in names another key.
+        val error = SshHostKeyChangedException(
+            "Home VPS",
+            "SHA256:saved-meanwhile",
+            "SHA256:new",
+            afterSignIn = true,
+        ).message!!
+        val state = state(
+            GlobalTab.SHADOW_SSH,
+            main = main(serverSettings, vpn = ssh(VpnConnectionStatus.ERROR, error)),
+        )
+
+        val note = state.notes.filterIsInstance<HomeNote.Failure>().single()
+        assertEquals("Host key changed for Home VPS after sign-in.", note.title)
+        assertFalse(note.message.contains("before your password or key was sent"))
+        assertTrue(note.message.contains("your password was sent"))
+        assertTrue(note.message.contains("change the server's password"))
+        assertEquals(NoteAction.EditServer, note.action)
+    }
+
+    @Test
+    fun `a host key change found after a key sign-in asks for no new password`() {
+        val error = SshHostKeyChangedException(
+            "Office bastion",
+            "SHA256:saved-meanwhile",
+            "SHA256:new",
+            afterSignIn = true,
+        ).message!!
+
+        val note = failureNote(error, HomeMode.Server, AuthType.PRIVATE_KEY)
+
+        assertEquals("Host key changed for Office bastion after sign-in.", note.title)
+        assertTrue(note.message.contains("Sign-in had already finished"))
+        assertTrue(note.message.contains("private key never leaves the phone"))
+        assertFalse(note.message.contains("password"))
+        assertEquals(NoteAction.EditServer, note.action)
     }
 
     @Test

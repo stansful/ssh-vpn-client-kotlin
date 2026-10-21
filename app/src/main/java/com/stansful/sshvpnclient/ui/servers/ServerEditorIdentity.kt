@@ -37,6 +37,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.SshHostKeyChange
 import com.stansful.sshvpnclient.ui.configedit.EditConfigForm
 import com.stansful.sshvpnclient.ui.designsystem.BannerTone
@@ -88,6 +89,7 @@ internal fun IdentitySection(
             (hostKeyChange ?: lastChange[0])?.let { change ->
                 HostKeyChangedCard(
                     change = change,
+                    authType = form.authType,
                     accepting = acceptingHostKey,
                     enabled = acceptEnabled,
                     onAccept = onAcceptHostKey,
@@ -268,6 +270,7 @@ private fun FingerprintWarning(onOpenActivity: () -> Unit) {
 @Composable
 private fun HostKeyChangedCard(
     change: SshHostKeyChange,
+    authType: AuthType,
     accepting: Boolean,
     enabled: Boolean,
     onAccept: () -> Unit,
@@ -278,9 +281,7 @@ private fun HostKeyChangedCard(
     LaunchedEffect(change.observedFingerprint) { requester.bringIntoView() }
     InlineBanner(
         title = "Host key changed.",
-        message = "The server showed a different key than the pinned one, so sign-in was stopped before " +
-            "your password or key was sent. Accept it only if you reinstalled the server or replaced its " +
-            "keys; otherwise someone may be intercepting the connection.",
+        message = hostKeyChangedMessage(change, authType),
         tone = BannerTone.Error,
         modifier = modifier.bringIntoViewRequester(requester),
         action = {
@@ -308,6 +309,28 @@ private fun HostKeyChangedCard(
             }
         },
     )
+}
+
+/**
+ * The host-key-changed card's text. Normally the key differed during key exchange, before sign-in. A
+ * key trusted on first use, though, is compared with a fingerprint saved during that sign-in only once
+ * it has finished ([SshHostKeyChange.afterSignIn]): a password was sent by then, while a private key
+ * itself never leaves the phone (the server only gets a signature for that one connection).
+ */
+internal fun hostKeyChangedMessage(change: SshHostKeyChange, authType: AuthType): String = when {
+    !change.afterSignIn ->
+        "The server showed a different key than the pinned one, so sign-in was stopped before your " +
+            "password or key was sent. Accept it only if you reinstalled the server or replaced its keys; " +
+            "otherwise someone may be intercepting the connection."
+    authType == AuthType.PASSWORD ->
+        "The server showed a different key than the fingerprint saved while it was signing in, and " +
+            "sign-in had already finished, so your password was sent. Accept it only if you reinstalled " +
+            "the server or replaced its keys. If you don't recognise it, change the server's password."
+    else ->
+        "The server showed a different key than the fingerprint saved while it was signing in, and " +
+            "sign-in had already finished; your private key itself never leaves the phone. Accept it only " +
+            "if you reinstalled the server or replaced its keys; otherwise someone may be intercepting " +
+            "the connection."
 }
 
 /** Kind of host-key fingerprint, as the connection's identity check understands it. */

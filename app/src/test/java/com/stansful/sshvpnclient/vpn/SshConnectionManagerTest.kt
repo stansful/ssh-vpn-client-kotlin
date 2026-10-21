@@ -152,6 +152,23 @@ class SshConnectionManagerTest {
             error.message,
         )
         assertEquals(SshFailureKind.HOST_KEY_CHANGED, classifySshFailure(error))
+        assertFalse(error.afterSignIn)
+    }
+
+    @Test
+    fun `a host key change found after sign-in says so`() {
+        val error = SshHostKeyChangedException(
+            serverName = "Home VPS",
+            pinnedFingerprint = "SHA256:saved-meanwhile",
+            observedFingerprint = "SHA256:new",
+            afterSignIn = true,
+        )
+
+        assertEquals(
+            "Host key changed for Home VPS after sign-in. Open the server to review the new key.",
+            error.message,
+        )
+        assertEquals(SshFailureKind.HOST_KEY_CHANGED, classifySshFailure(error))
     }
 
     @Test

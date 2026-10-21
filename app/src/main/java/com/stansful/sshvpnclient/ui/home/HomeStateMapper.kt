@@ -20,6 +20,7 @@ import com.stansful.sshvpnclient.ui.main.MainUiState
 import com.stansful.sshvpnclient.ui.main.TunnelCheckResult
 import com.stansful.sshvpnclient.ui.opensource.OpenSourceUiState
 import com.stansful.sshvpnclient.ui.smartconnect.SmartConnectUiState
+import com.stansful.sshvpnclient.vpn.HOST_KEY_CHANGED_AFTER_SIGN_IN
 import java.util.Locale
 
 /**
@@ -247,7 +248,7 @@ private fun serverState(sources: HomeSources): ModeState {
     val notes = buildList {
         if (status == VpnConnectionStatus.RECONNECTING) add(HomeNote.ServerReconnecting)
         if (status == VpnConnectionStatus.ERROR && error != null && !permissionError) {
-            add(failureNote(error, HomeMode.Server))
+            add(failureNote(error, HomeMode.Server, selected?.authType))
         }
         if (error == VPN_PERMISSION_REQUIRED) add(HomeNote.Info(PERMISSION_REQUIRED_NOTE))
     }
@@ -1060,8 +1061,11 @@ private fun errorHero(headline: String, description: String, enabled: Boolean) =
     orbEnabled = enabled,
 )
 
-/** Error text from the domain, with the fix the user can reach from Home. */
-internal fun failureNote(message: String, mode: HomeMode): HomeNote.Failure {
+/**
+ * Error text from the domain, with the fix the user can reach from Home. [authType]: the selected
+ * server's sign-in, for advice that depends on it (null: unknown, the password advice applies).
+ */
+internal fun failureNote(message: String, mode: HomeMode, authType: AuthType? = null): HomeNote.Failure {
     val sentence = if (message.endsWith(".")) message else "$message."
     return when {
         mode == HomeMode.Server && message.startsWith("Selected SSH key not found") ->
@@ -1070,15 +1074,16 @@ internal fun failureNote(message: String, mode: HomeMode): HomeNote.Failure {
                 "Pick another key or add it again.",
                 NoteAction.EditServer,
             )
-        // "Host key changed for <server>. Open the server to review and accept the new key."
-        mode == HomeMode.Server && message.startsWith("Host key changed") ->
+        // "Host key changed for <server>. Open the server to review and accept the new key.", or
+        // "Host key changed for <server> after sign-in. Open the server to review the new key."
+        mode == HomeMode.Server && message.startsWith("Host key changed") -> {
+            val title = message.substringBefore(". Open the server")
             HomeNote.Failure(
-                message.substringBefore(". Open the server").let { title ->
-                    if (title.endsWith(".")) title else "$title."
-                },
-                "Sign-in was stopped before your password or key was sent. Open the server to review the new key.",
+                if (title.endsWith(".")) title else "$title.",
+                hostKeyChangedNote(afterSignIn = title.endsWith(HOST_KEY_CHANGED_AFTER_SIGN_IN), authType),
                 NoteAction.EditServer,
             )
+        }
         mode == HomeMode.Server && message.startsWith("Authentication failed") ->
             HomeNote.Failure(sentence, "Check the password or key in the server's settings.", NoteAction.EditServer)
         mode == HomeMode.Server && message.startsWith("Invalid private key") ->
@@ -1087,6 +1092,20 @@ internal fun failureNote(message: String, mode: HomeMode): HomeNote.Failure {
             HomeNote.Failure(sentence, "Pick at least one app in App routing.", NoteAction.PickApps)
         else -> HomeNote.Failure(sentence, "See Connection activity for details.", NoteAction.OpenActivity)
     }
+}
+
+/**
+ * Normally the key differed during key exchange, before sign-in. After a sign-in that trusted the key on
+ * first use ([afterSignIn]), the password was sent already; a private key itself never leaves the phone.
+ */
+private fun hostKeyChangedNote(afterSignIn: Boolean, authType: AuthType?): String = when {
+    !afterSignIn ->
+        "Sign-in was stopped before your password or key was sent. Open the server to review the new key."
+    authType == AuthType.PRIVATE_KEY ->
+        "Sign-in had already finished; your private key never leaves the phone. Open the server to review the new key."
+    else ->
+        "Sign-in had already finished, so your password was sent. If you don't recognise the new key, " +
+            "change the server's password. Open the server to review it."
 }
 
 private fun appRoutingChip(settings: AppSettings): HomeChip.AppRouting {

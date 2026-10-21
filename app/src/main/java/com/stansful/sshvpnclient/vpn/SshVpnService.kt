@@ -904,6 +904,8 @@ class SshVpnService : android.net.VpnService() {
                 serverName = config.name.ifBlank { config.host },
                 pinnedFingerprint = pinnedMeanwhile,
                 observedFingerprint = fingerprint,
+                // Unlike the check during key exchange, this one comes after the password or key was used.
+                afterSignIn = true,
             )
         }
         when {
@@ -954,6 +956,7 @@ class SshVpnService : android.net.VpnService() {
                 configId = configId,
                 pinnedFingerprint = error.pinnedFingerprint,
                 observedFingerprint = observed,
+                afterSignIn = error.afterSignIn,
             ),
         )
     }
