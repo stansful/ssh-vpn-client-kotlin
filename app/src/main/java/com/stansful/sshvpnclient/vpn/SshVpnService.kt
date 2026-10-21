@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.net.Network
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.Process
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.jcraft.jsch.Session
@@ -815,6 +816,7 @@ class SshVpnService : android.net.VpnService() {
             val resourceProfile = selectTunResourceProfile(
                 isLowRamDevice = isLowRamDevice,
                 isPowerSaveMode = powerManager.isPowerSaveMode,
+                is64BitProcess = Process.is64Bit(),
             )
             appContainer.tun2SocksManager.start(
                 owner = vpnTunnelOwner,

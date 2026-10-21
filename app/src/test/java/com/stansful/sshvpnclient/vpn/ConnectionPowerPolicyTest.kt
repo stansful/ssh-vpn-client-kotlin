@@ -57,7 +57,7 @@ class ConnectionPowerPolicyTest {
                 tunWriteQueueCapacity = 512,
                 outboundPacketPoolCapacity = 128,
             ),
-            selectTunResourceProfile(isLowRamDevice = false, isPowerSaveMode = false),
+            selectTunResourceProfile(isLowRamDevice = false, isPowerSaveMode = false, is64BitProcess = true),
         )
     }
 
@@ -71,7 +71,7 @@ class ConnectionPowerPolicyTest {
                 tunWriteQueueCapacity = 256,
                 outboundPacketPoolCapacity = 32,
             ),
-            selectTunResourceProfile(isLowRamDevice = false, isPowerSaveMode = true),
+            selectTunResourceProfile(isLowRamDevice = false, isPowerSaveMode = true, is64BitProcess = true),
         )
     }
 
@@ -85,7 +85,33 @@ class ConnectionPowerPolicyTest {
                 tunWriteQueueCapacity = 256,
                 outboundPacketPoolCapacity = 32,
             ),
-            selectTunResourceProfile(isLowRamDevice = true, isPowerSaveMode = true),
+            selectTunResourceProfile(isLowRamDevice = true, isPowerSaveMode = true, is64BitProcess = true),
+        )
+    }
+
+    @Test
+    fun `a 32-bit process gets the battery saver flow cap and keeps everything else`() {
+        listOf(false to false, false to true, true to false, true to true).forEach { (lowRam, powerSave) ->
+            val wide = selectTunResourceProfile(lowRam, powerSave, is64BitProcess = true)
+            val narrow = selectTunResourceProfile(lowRam, powerSave, is64BitProcess = false)
+
+            assertEquals(
+                wide.copy(maxActiveTcpSessions = minOf(wide.maxActiveTcpSessions, MAX_32_BIT_PROCESS_TCP_SESSIONS)),
+                narrow,
+            )
+        }
+        assertEquals(64, MAX_32_BIT_PROCESS_TCP_SESSIONS)
+        assertEquals(
+            selectTunResourceProfile(isLowRamDevice = false, isPowerSaveMode = true, is64BitProcess = true)
+                .maxActiveTcpSessions,
+            selectTunResourceProfile(isLowRamDevice = false, isPowerSaveMode = false, is64BitProcess = false)
+                .maxActiveTcpSessions,
+        )
+        // Low-RAM devices already keep a smaller table.
+        assertEquals(
+            32,
+            selectTunResourceProfile(isLowRamDevice = true, isPowerSaveMode = false, is64BitProcess = false)
+                .maxActiveTcpSessions,
         )
     }
 
@@ -97,10 +123,10 @@ class ConnectionPowerPolicyTest {
         )
         val sshTcpMss = VpnTunnelMode.SSH.mtu - IPV4_TCP_HEADER_BYTES
         val profiles = listOf(
-            selectTunResourceProfile(isLowRamDevice = false, isPowerSaveMode = false),
-            selectTunResourceProfile(isLowRamDevice = false, isPowerSaveMode = true),
-            selectTunResourceProfile(isLowRamDevice = true, isPowerSaveMode = false),
-            selectTunResourceProfile(isLowRamDevice = true, isPowerSaveMode = true),
+            selectTunResourceProfile(isLowRamDevice = false, isPowerSaveMode = false, is64BitProcess = true),
+            selectTunResourceProfile(isLowRamDevice = false, isPowerSaveMode = true, is64BitProcess = true),
+            selectTunResourceProfile(isLowRamDevice = true, isPowerSaveMode = false, is64BitProcess = true),
+            selectTunResourceProfile(isLowRamDevice = true, isPowerSaveMode = true, is64BitProcess = true),
         )
 
         assertEquals(1_325_000L, targetBandwidthDelayProductBytes)

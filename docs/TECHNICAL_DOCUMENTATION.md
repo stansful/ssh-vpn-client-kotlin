@@ -558,6 +558,7 @@ SSH не умеет форвардить UDP: `direct-tcpip` - это тольк
 - MSS вычисляется из TUN MTU (`8460` при MTU `8500`), TCP/IP packet строится без промежуточной копии payload.
 - Во всех профилях JSch local channel receive window, outer SSH socket request и dynamic input-buffer ceiling равны 4 MiB; upload queue — 512 KiB на flow, TUN write queue — 256 пакетов. Это сохраняет минимум `2 × BDP` для 100 Мбит/с при RTT 106 мс и не урезает активную передачу в Battery Saver.
 - Normal/Battery Saver/Android low-RAM уменьшают только session cap `128/64/32` и retained packet pool `64/32/32`. Профиль применяется при построении нового TUN pipeline.
+- 32-битный процесс (`Process.is64Bit() == false`: APK `armeabi-v7a`/`x86`) получает session cap не больше `64`, остальное в профиле не меняется. У TCP-потока до трёх своих потоков (remote reader, upload writer, connect, пока открытие закрытого потока ещё ждёт таймаута) по ~1 MiB стека: при `128` потоках пулы upload и connect вырастают до `144 + 288`, плюс до `168` reader'ов - около 600 MiB адресного пространства, которое 32-битный процесс делит с heap ART, boot image и native-библиотеками. При `64` потолки upload и connect - `80 + 160`, а reader'ов столько, сколько открытых каналов.
 - Upload queue управляет advertised TCP window. Любое отправленное нулевое окно остаётся sticky до отдельного положительного reopen ACK на актуальном sequence; обычный positive packet со старым sequence не может ошибочно снять latch. FIN закрывает SSH output после drain очереди.
 - Принятые payload coalesce-ятся в максимум восемь блоков по 64 KiB при capacity 512 KiB; два завершённых блока кешируются для повторного использования. Byte capacity является единственным advertised limit, поэтому мелкие сегменты не сжимают окно раньше времени. Rejected/duplicate/zero-window payload проверяется до копирования.
 - Upload flush - один writer на flow за раз (порядок байт сохраняется), он пишет очередь блоками по 64 KiB, пока она не опустеет, затем закрывает SSH output после FIN. Fairness между параллельными upload больше не зависит от общего пула: у каждого flow свой writer.
@@ -1315,7 +1316,7 @@ Backup:
 - `KeystoreHasKeyTest` - найденный ключ есть без пробного ключа; «ключа нет» только когда оба раунда согласны; никакая непрерывная серия сбоев Keystore (в том числе та, что сбивала прежний порядок «проба, потом ключ») не превращает существующий ключ в отсутствующий; сбой создания или удаления пробного ключа и прерванная пауза дают «нет вердикта».
 - `ReconnectSupervisorTest` - backoff (включая screen-off), поколения линков, устаревшие триггеры (время постановки в очередь, id линка), прерывание ожидания и его пределы, лестница деградации, flapping, throttle строк триггеров.
 - `ReconnectBackoffTest` - exponential backoff.
-- `ConnectionPowerPolicyTest` - cadence, network handoff и stable-connection backoff policy.
+- `ConnectionPowerPolicyTest` - cadence, network handoff и stable-connection backoff policy; TUN-профили, в том числе cap `64` для 32-битного процесса без других изменений профиля.
 - `TunPacketWriterTest` - ownership/recycle pooled packets и корректная длина TUN write.
 - `CoalescedActivityTimestampTest` - ограничение частоты activity timestamp updates.
 - `TunForwarderConfigTest` - normal/low-RAM flow limits и pressure thresholds.
