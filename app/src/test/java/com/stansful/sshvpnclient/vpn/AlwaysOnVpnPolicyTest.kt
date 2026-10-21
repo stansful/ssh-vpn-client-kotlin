@@ -149,6 +149,79 @@ class AlwaysOnVpnPolicyTest {
     }
 
     @Test
+    fun `android's start has nothing to settle when no session end was refused`() {
+        var stops = 0
+        val settlement = RefusedSessionStop().settle {
+            stops += 1
+            true
+        }
+
+        assertEquals(RefusedStopSettlement.NONE, settlement)
+        assertEquals(0, stops)
+    }
+
+    @Test
+    fun `android's start settles a session end its queued start id refused`() {
+        // Connect was start 2; Android's start 3 was queued when the connect failed: stopSelfResult(2)
+        // refused, the error stayed unpublished. Start 3 is the newest now, so its stop goes through.
+        val refused = RefusedSessionStop()
+        var finished = 0
+        refused.record(isCurrent = { true }, finish = { finished += 1 })
+
+        assertEquals(RefusedStopSettlement.STOPPED, refused.settle { true })
+        assertEquals(1, finished)
+        // Settled once: a duplicate start of Android finds nothing left.
+        assertEquals(RefusedStopSettlement.NONE, refused.settle { true })
+        assertEquals(1, finished)
+    }
+
+    @Test
+    fun `a command newer than android's start keeps the session end waiting`() {
+        val refused = RefusedSessionStop()
+        var finished = 0
+        refused.record(isCurrent = { true }, finish = { finished += 1 })
+
+        assertEquals(RefusedStopSettlement.STILL_REFUSED, refused.settle { false })
+        assertEquals(0, finished)
+        // That newer command was another start of Android: it settles the end.
+        assertEquals(RefusedStopSettlement.STOPPED, refused.settle { true })
+        assertEquals(1, finished)
+    }
+
+    @Test
+    fun `a command of the app delivered since makes the refused end stale`() {
+        val refused = RefusedSessionStop()
+        var current = false
+        var stops = 0
+        var finished = 0
+        refused.record(isCurrent = { current }, finish = { finished += 1 })
+
+        val settlement = refused.settle {
+            stops += 1
+            true
+        }
+
+        assertEquals(RefusedStopSettlement.NONE, settlement)
+        assertEquals(0, stops)
+        assertEquals(0, finished)
+        // Dropped for good: the command ids it checks only grow.
+        current = true
+        assertEquals(RefusedStopSettlement.NONE, refused.settle { true })
+        assertEquals(0, finished)
+    }
+
+    @Test
+    fun `a newer refused session end replaces the older one`() {
+        val refused = RefusedSessionStop()
+        val finished = mutableListOf<String>()
+        refused.record(isCurrent = { true }, finish = { finished += "failed connect" })
+        refused.record(isCurrent = { true }, finish = { finished += "disconnect" })
+
+        assertEquals(RefusedStopSettlement.STOPPED, refused.settle { true })
+        assertEquals(listOf("disconnect"), finished)
+    }
+
+    @Test
     fun `skipped start names the mode and what to fix for every reason`() {
         val texts = QuickTileOpenAppReason.entries.map { reason ->
             alwaysOnSkippedDiagnostic(VpnSessionOwner.OPEN_SOURCE, reason)
@@ -187,6 +260,10 @@ class AlwaysOnVpnPolicyTest {
         assertEquals(
             "Always-on VPN: Routes failed to start: boom",
             alwaysOnFailedDiagnostic(VpnSessionOwner.OPEN_SOURCE, "boom"),
+        )
+        assertEquals(
+            "Always-on VPN: Android's start ignored, Server had just ended",
+            alwaysOnEndedSessionDiagnostic(VpnSessionOwner.SHADOW_SSH),
         )
     }
 
