@@ -244,6 +244,52 @@ class HomeStateMapperTest {
     }
 
     @Test
+    fun `a changed host key sends the user to the server to review the new key`() {
+        val note = failureNote(
+            "Host key changed for Home VPS. Open the server to review and accept the new key.",
+            HomeMode.Server,
+        )
+
+        assertEquals("Host key changed for Home VPS.", note.title)
+        assertTrue(note.message.contains("before your password or key was sent"))
+        assertEquals(NoteAction.EditServer, note.action)
+        assertTrue(note.hasButton)
+        // A name with its own full stop keeps it.
+        assertEquals(
+            "Host key changed for Lab. Rack 2.",
+            failureNote(
+                "Host key changed for Lab. Rack 2. Open the server to review and accept the new key.",
+                HomeMode.Server,
+            ).title,
+        )
+    }
+
+    @Test
+    fun `a server error that stopped retrying after failed sign-ins points at the credentials`() {
+        val note = failureNote(
+            "Authentication failed: server rejected this private key for user 'deploy'",
+            HomeMode.Server,
+        )
+
+        assertEquals(NoteAction.EditServer, note.action)
+        assertEquals("Check the password or key in the server's settings.", note.message)
+    }
+
+    @Test
+    fun `a server in error after a changed host key shows the note under the error hero`() {
+        val error = "Host key changed for Home VPS. Open the server to review and accept the new key."
+        val state = state(
+            GlobalTab.SHADOW_SSH,
+            main = main(serverSettings, vpn = ssh(VpnConnectionStatus.ERROR, error)),
+        )
+
+        assertEquals(OrbState.Error, state.hero.orb)
+        val note = state.notes.filterIsInstance<HomeNote.Failure>().single()
+        assertEquals(NoteAction.EditServer, note.action)
+        assertTrue(note.title.startsWith("Host key changed for"))
+    }
+
+    @Test
     fun `a Route library search does not hide the active route on Home`() {
         val settings = settings(GlobalTab.OPEN_SOURCE)
         val searched = routes(settings).copy(profiles = emptyList())

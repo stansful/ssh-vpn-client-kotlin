@@ -17,4 +17,13 @@ interface SshConfigRepository {
     suspend fun selectConfig(id: String)
     suspend fun getSelectedConfig(): SshConfig?
     suspend fun getUsageCountForKey(keyId: String): Int
+
+    /**
+     * Pins [fingerprint] as server [id]'s host key if it has none saved yet (trust on first use). Never
+     * replaces a saved fingerprint. Returns true when this call saved it.
+     */
+    suspend fun pinFingerprintIfAbsent(id: String, fingerprint: String): Boolean
+
+    /** Replaces server [id]'s host key fingerprint (the user accepted a changed key). Returns true if saved. */
+    suspend fun replaceFingerprint(id: String, fingerprint: String): Boolean
 }
