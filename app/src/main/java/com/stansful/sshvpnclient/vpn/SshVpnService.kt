@@ -17,6 +17,7 @@ import com.stansful.sshvpnclient.SshVpnApplication
 import com.stansful.sshvpnclient.domain.model.AppSettings
 import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.SshConfig
+import com.stansful.sshvpnclient.domain.model.SshHostKeyChange
 import com.stansful.sshvpnclient.domain.model.SshPrivateKey
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
@@ -599,6 +600,7 @@ class SshVpnService : android.net.VpnService() {
                         causeMessage = error.cause?.message,
                     )
                     if (decision is SshRetryDecision.Stop) {
+                        if (error is SshHostKeyChangedException) rememberHostKeyChange(config.id, error)
                         failConnectionAndStop(
                             runId = runId,
                             commandId = commandId,
@@ -836,6 +838,8 @@ class SshVpnService : android.net.VpnService() {
      * whatever ends up pinned (the observed key if saving failed). Returns the config to connect with.
      */
     private suspend fun trustHostKey(config: SshConfig, hostKey: SshHostKeyTrust, runId: Long): SshConfig {
+        // The key matched or is about to be pinned: an earlier "host key changed" no longer applies.
+        appContainer.sshHostKeyChangeRepository.clear(config.id)
         if (hostKey !is SshHostKeyTrust.FirstUse) return config
         val repository = appContainer.sshConfigRepository
         val fingerprint = hostKey.fingerprint
@@ -860,6 +864,18 @@ class SshVpnService : android.net.VpnService() {
             null
         }
         return config.copy(fingerprint = saved ?: fingerprint)
+    }
+
+    /** Keeps the key a server presented instead of its pinned one, for "Accept new key" in the editor. */
+    private fun rememberHostKeyChange(configId: String, error: SshHostKeyChangedException) {
+        val observed = error.observedFingerprint ?: return
+        appContainer.sshHostKeyChangeRepository.record(
+            SshHostKeyChange(
+                configId = configId,
+                pinnedFingerprint = error.pinnedFingerprint,
+                observedFingerprint = observed,
+            ),
+        )
     }
 
     private suspend fun monitorActiveConnection(

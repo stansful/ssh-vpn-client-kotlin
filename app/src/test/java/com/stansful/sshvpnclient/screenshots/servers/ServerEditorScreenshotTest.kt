@@ -3,6 +3,7 @@ package com.stansful.sshvpnclient.screenshots.servers
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import com.stansful.sshvpnclient.domain.model.AuthType
+import com.stansful.sshvpnclient.domain.model.SshHostKeyChange
 import com.stansful.sshvpnclient.screenshots.ScreenSize
 import com.stansful.sshvpnclient.screenshots.ScreenshotScope
 import com.stansful.sshvpnclient.screenshots.ScreenshotTest
@@ -67,6 +68,7 @@ class ServerEditorScreenshotTest : ScreenshotTest() {
                 onKeySelect = {},
                 onAddKey = {},
                 onOpenActivity = {},
+                onAcceptHostKey = {},
             )
         }
     }
@@ -117,6 +119,22 @@ class ServerEditorScreenshotTest : ScreenshotTest() {
                 attempted = true,
             ),
         )
+    }
+
+    /** The last connection met a different host key: the coral card with "Accept new key". */
+    @Test
+    fun hostKeyChanged() {
+        val changed = keyAuth.copy(
+            hostKeyChange = SshHostKeyChange(
+                configId = "office",
+                pinnedFingerprint = keyAuth.form.fingerprint,
+                observedFingerprint = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+            ),
+        )
+        render("ServerEditor_HostKeyChanged_Night", changed)
+        render("ServerEditor_HostKeyChanged_Day", changed, DayColors)
+        render("ServerEditor_HostKeyChanged_Phone_Night", changed, size = ScreenSize.PHONE)
+        render("ServerEditor_HostKeyAccepting_Night", changed.copy(isAcceptingHostKey = true))
     }
 
     @Test

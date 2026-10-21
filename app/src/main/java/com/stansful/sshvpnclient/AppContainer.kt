@@ -3,6 +3,7 @@ package com.stansful.sshvpnclient
 import android.content.Context
 import androidx.room.Room
 import com.stansful.sshvpnclient.data.apps.PackageManagerInstalledAppsRepository
+import com.stansful.sshvpnclient.data.config.InMemorySshHostKeyChangeRepository
 import com.stansful.sshvpnclient.data.config.RoomSshConfigRepository
 import com.stansful.sshvpnclient.data.key.RoomSshPrivateKeyRepository
 import com.stansful.sshvpnclient.data.local.AppDatabase
@@ -30,11 +31,13 @@ import com.stansful.sshvpnclient.domain.repository.InstalledAppsRepository
 import com.stansful.sshvpnclient.domain.repository.ProxyProfileRepository
 import com.stansful.sshvpnclient.domain.repository.ProxySourceSynchronizer
 import com.stansful.sshvpnclient.domain.repository.SshConfigRepository
+import com.stansful.sshvpnclient.domain.repository.SshHostKeyChangeRepository
 import com.stansful.sshvpnclient.domain.repository.SshPrivateKeyRepository
 import com.stansful.sshvpnclient.domain.repository.SmartProxyProfileRepository
 import com.stansful.sshvpnclient.domain.repository.SmartProxySourceSynchronizer
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import com.stansful.sshvpnclient.domain.repository.XrayCoreUpdateRepository
+import com.stansful.sshvpnclient.domain.usecase.config.AcceptSshHostKeyUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.AddSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.DeleteSshConfigUseCase
 import com.stansful.sshvpnclient.domain.usecase.config.GetSshConfigByIdUseCase
@@ -95,6 +98,11 @@ class AppContainer(
             dao = database.sshConfigDao(),
             secretStorage = secretStorage,
         )
+    }
+
+    /** Changed SSH host keys seen by the service, for the server editor's "Accept new key". */
+    val sshHostKeyChangeRepository: SshHostKeyChangeRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        InMemorySshHostKeyChangeRepository()
     }
 
     val sshPrivateKeyRepository: SshPrivateKeyRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
@@ -203,6 +211,7 @@ class AppContainer(
     val deleteSshConfigUseCase by lazy { DeleteSshConfigUseCase(sshConfigRepository) }
     val getSshConfigByIdUseCase by lazy { GetSshConfigByIdUseCase(sshConfigRepository) }
     val selectSshConfigUseCase by lazy { SelectSshConfigUseCase(sshConfigRepository) }
+    val acceptSshHostKeyUseCase by lazy { AcceptSshHostKeyUseCase(sshConfigRepository, sshHostKeyChangeRepository) }
 
     val addSshPrivateKeyUseCase by lazy { AddSshPrivateKeyUseCase(sshPrivateKeyRepository) }
     val updateSshPrivateKeyUseCase by lazy { UpdateSshPrivateKeyUseCase(sshPrivateKeyRepository) }
