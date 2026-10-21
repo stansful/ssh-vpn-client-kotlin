@@ -80,7 +80,10 @@ class AppContainer(
     }
 
     private val secretStorage by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        TinkSecretStorage(appContext)
+        TinkSecretStorage(
+            context = appContext,
+            log = { message -> vpnConnectionRepository.appendDiagnostic(message) },
+        )
     }
 
     val sshConfigRepository: SshConfigRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {

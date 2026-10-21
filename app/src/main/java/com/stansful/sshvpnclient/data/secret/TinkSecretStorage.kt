@@ -22,6 +22,8 @@ import kotlinx.coroutines.withContext
 class TinkSecretStorage(
     context: Context,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /** Diagnostics only: told when an unreadable keyset is discarded. */
+    private val log: (String) -> Unit = {},
 ) : SecretStorage {
     private val appContext = context.applicationContext
     private val migrationLock = Any()
@@ -34,15 +36,39 @@ class TinkSecretStorage(
         appContext.getSharedPreferences(MIGRATION_FILE_NAME, Context.MODE_PRIVATE)
     }
 
+    private val keysetPreferences: SharedPreferences by lazy {
+        appContext.getSharedPreferences(KEYSET_PREF_FILE_NAME, Context.MODE_PRIVATE)
+    }
+
     private val aead: Aead by lazy {
         AeadConfig.register()
-        AndroidKeysetManager.Builder()
+        RecoveringKeysetLoader(
+            loadKeyset = ::loadKeysetAead,
+            isKeysetStored = { keysetPreferences.contains(KEYSET_NAME) },
+            masterKeyExists = { androidKeystoreHasKey(MASTER_KEY_ALIAS) },
+            discardKeyset = ::discardUnreadableKeyset,
+            log = log,
+        ).load()
+    }
+
+    private fun loadKeysetAead(): Aead {
+        return AndroidKeysetManager.Builder()
             .withSharedPref(appContext, KEYSET_NAME, KEYSET_PREF_FILE_NAME)
             .withKeyTemplate(KeyTemplates.get(TINK_AEAD_TEMPLATE))
             .withMasterKeyUri(ANDROID_KEYSTORE_URI)
             .build()
             .keysetHandle
             .getPrimitive(Aead::class.java)
+    }
+
+    /**
+     * Ciphertexts first: should the process die in between, the keyset is still there, fails again
+     * and is discarded on the next start, instead of a fresh keyset sitting next to stale ciphertexts.
+     */
+    @SuppressLint("UseKtx") // Both commit results are required before a new keyset is written.
+    private fun discardUnreadableKeyset() {
+        check(preferences.edit().clear().commit()) { "Could not discard unreadable secrets" }
+        check(keysetPreferences.edit().remove(KEYSET_NAME).commit()) { "Could not discard the unreadable keyset" }
     }
 
     override suspend fun saveSecret(id: String, value: String) {
@@ -261,7 +287,8 @@ class TinkSecretStorage(
         const val KEY_LEGACY_MIGRATION_COUNT = "legacy_migration_count"
         const val KEY_LEGACY_MIGRATION_ERROR = "legacy_migration_error"
         const val LEGACY_SECRET_FILE_NAME = "ssh_vpn_secrets"
-        const val ANDROID_KEYSTORE_URI = "android-keystore://ssh_vpn_secret_master_key"
+        const val MASTER_KEY_ALIAS = "ssh_vpn_secret_master_key"
+        const val ANDROID_KEYSTORE_URI = "android-keystore://$MASTER_KEY_ALIAS"
         const val TINK_AEAD_TEMPLATE = "AES256_GCM"
         const val ASSOCIATED_DATA_PREFIX = "ssh-vpn-secret:"
     }
