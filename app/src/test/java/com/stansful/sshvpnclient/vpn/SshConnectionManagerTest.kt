@@ -152,6 +152,7 @@ class SshConnectionManagerTest {
             "Host key changed for Home VPS. Open the server to review and accept the new key.",
             error.message,
         )
+        assertEquals(SshFailureKind.HOST_KEY_CHANGED, classifySshFailure(error))
     }
 
     @Test
