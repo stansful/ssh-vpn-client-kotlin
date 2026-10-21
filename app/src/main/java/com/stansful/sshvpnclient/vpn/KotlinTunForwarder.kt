@@ -634,7 +634,7 @@ internal class KotlinTunForwarder(
     private val dnsFailureStreak = AtomicInteger(0)
 
     /** Resolvers that did not answer through the current transport, and until when to skip them. */
-    private val silentResolvers = ConcurrentHashMap<Int, Long>()
+    private val silentResolvers = SilentResolverTracker(nowMs = ::elapsedRealtimeMs)
     private val degradationReported = AtomicBoolean(false)
     private val terminalError = AtomicReference<String?>(null)
     private val pressureCleanupScheduled = AtomicBoolean(false)
@@ -725,7 +725,7 @@ internal class KotlinTunForwarder(
         synchronized(transportLock) {
             transportGeneration += 1
             sshSessionReference.set(null)
-            resetDnsFailureStateLocked()
+            resetDnsTransportStateLocked()
             closeSessions(resetClients = true)
             closeActiveDnsChannels()
             closeUdpSessions()
@@ -736,7 +736,7 @@ internal class KotlinTunForwarder(
         check(sshSession.isConnected) { "SSH session is not connected" }
         synchronized(transportLock) {
             transportGeneration += 1
-            resetDnsFailureStateLocked()
+            resetDnsTransportStateLocked()
             closeSessions()
             closeActiveDnsChannels()
             closeUdpSessions()
@@ -1226,7 +1226,7 @@ internal class KotlinTunForwarder(
             return
         }
         val sshSession = transport.session
-        val upstreams = TunnelDnsPolicy.upstreamsFor(dnsServerAddress, ::isResolverSilent)
+        val upstreams = TunnelDnsPolicy.upstreamsFor(dnsServerAddress, silentResolvers::isSilent)
         try {
             val response = resolveThroughTunnel(
                 sshSession = sshSession,
@@ -1293,7 +1293,7 @@ internal class KotlinTunForwarder(
                     deadlineAtMs = startedAtMs + budgetMs,
                     transportGeneration = transportGeneration,
                 )
-                silentResolvers.remove(upstream)
+                silentResolvers.markAnswered(upstream)
                 return response
             } catch (error: Exception) {
                 lastError = error
@@ -1304,6 +1304,7 @@ internal class KotlinTunForwarder(
                         resolver = upstream,
                         next = upstreams.getOrNull(index + 1),
                         message = error.message ?: error::class.java.simpleName,
+                        transportGeneration = transportGeneration,
                     )
                 }
             }
@@ -1311,16 +1312,13 @@ internal class KotlinTunForwarder(
         throw lastError ?: SocketTimeoutException("DNS over SSH timed out after ${config.dnsQueryTimeoutMs}ms")
     }
 
-    private fun isResolverSilent(resolver: Int): Boolean {
-        val silentUntilMs = silentResolvers[resolver] ?: return false
-        if (elapsedRealtimeMs() < silentUntilMs) return true
-        silentResolvers.remove(resolver, silentUntilMs)
-        return false
-    }
-
-    private fun markResolverSilent(resolver: Int, next: Int?, message: String) {
-        val previous = silentResolvers.put(resolver, elapsedRealtimeMs() + TunnelDnsPolicy.SILENT_RESOLVER_COOLDOWN_MS)
-        if (previous != null) return
+    private fun markResolverSilent(
+        resolver: Int,
+        next: Int?,
+        message: String,
+        transportGeneration: Long,
+    ) {
+        if (!silentResolvers.markSilent(resolver, transportGeneration)) return
         diagnostics.logSilentResolver(
             resolver = addressToString(resolver),
             next = next?.let(::addressToString),
@@ -1399,10 +1397,14 @@ internal class KotlinTunForwarder(
         }
     }
 
+    /**
+     * Only the failure streak: a fallback resolver answering says nothing about the resolvers that
+     * stayed silent before it, so their marks keep their cooldown.
+     */
     private fun recordDnsSuccess(expectedTransport: DnsTransport) {
         synchronized(transportLock) {
             if (isDnsTransportActiveLocked(expectedTransport)) {
-                resetDnsFailureStateLocked()
+                resetDnsFailureStreakLocked()
             }
         }
     }
@@ -1430,10 +1432,15 @@ internal class KotlinTunForwarder(
         return true
     }
 
-    private fun resetDnsFailureStateLocked() {
+    private fun resetDnsFailureStreakLocked() {
         dnsFailureStreak.set(0)
         degradationReported.set(false)
-        silentResolvers.clear()
+    }
+
+    /** The transport changed: failures and silent resolvers it saw belong to the old one. */
+    private fun resetDnsTransportStateLocked() {
+        resetDnsFailureStreakLocked()
+        silentResolvers.onTransportChanged(transportGeneration)
     }
 
     private fun isDnsTransportActiveLocked(expectedTransport: DnsTransport): Boolean {

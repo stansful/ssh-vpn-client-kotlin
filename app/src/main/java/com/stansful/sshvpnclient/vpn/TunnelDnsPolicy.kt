@@ -1,5 +1,7 @@
 package com.stansful.sshvpnclient.vpn
 
+import java.util.concurrent.ConcurrentHashMap
+
 /**
  * Which resolvers a DNS query from the TUN is asked, and for how long. Everything goes through the
  * SSH server, over DNS-over-TCP on port 53 and nothing else.
@@ -86,4 +88,51 @@ internal object TunnelDnsPolicy {
     private const val IPV4_OCTETS = 4
     private const val OCTET_MAX = 255
     private const val BITS_PER_OCTET = 8
+}
+
+/**
+ * Resolvers that stayed silent through the current SSH transport, and until when to skip them.
+ *
+ * A mark holds for its whole cooldown whatever else answers meanwhile: the tunnel's resolvers
+ * answering says nothing about the phone's router, and dropping every mark on any answer made each
+ * uncached lookup wait out the silent resolver's budget again. Only the resolver itself answering
+ * clears its mark early. Marks belong to the transport that produced them: a new SSH session starts
+ * with none, and a mark from a query that outlived its transport is ignored.
+ */
+internal class SilentResolverTracker(
+    private val nowMs: () -> Long,
+    private val cooldownMs: Long = TunnelDnsPolicy.SILENT_RESOLVER_COOLDOWN_MS,
+) {
+    private val silentUntilMs = ConcurrentHashMap<Int, Long>()
+    private val lock = Any()
+    private var transportGeneration = 0L
+
+    fun isSilent(resolver: Int): Boolean {
+        val untilMs = silentUntilMs[resolver] ?: return false
+        if (nowMs() < untilMs) return true
+        silentUntilMs.remove(resolver, untilMs)
+        return false
+    }
+
+    /**
+     * Skips [resolver] for the cooldown, unless the mark comes from another transport than the
+     * current one. True when it was not silent before, which is when the change is worth a log line.
+     */
+    fun markSilent(resolver: Int, transportGeneration: Long): Boolean = synchronized(lock) {
+        if (transportGeneration != this.transportGeneration) return false
+        val now = nowMs()
+        val previousUntilMs = silentUntilMs.put(resolver, now + cooldownMs)
+        previousUntilMs == null || now >= previousUntilMs
+    }
+
+    /** [resolver] answered, so it is not silent any more. */
+    fun markAnswered(resolver: Int) {
+        silentUntilMs.remove(resolver)
+    }
+
+    /** A new SSH transport reaches other resolvers: the old verdicts no longer apply. */
+    fun onTransportChanged(transportGeneration: Long) = synchronized(lock) {
+        this.transportGeneration = transportGeneration
+        silentUntilMs.clear()
+    }
 }
