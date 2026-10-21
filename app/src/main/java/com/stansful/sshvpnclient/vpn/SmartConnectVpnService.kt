@@ -82,6 +82,8 @@ class SmartConnectVpnService : android.net.VpnService() {
     private var deviceInteractive = true
     @Volatile
     private var lastStartId = 0
+    /** Main thread only: the newest Always-on start this service kept running through ([sessionStopStartId]). */
+    private var keptAlwaysOnStartId = 0
     @Volatile
     private var lastNotice: AutoNotice? = null
 
@@ -183,17 +185,19 @@ class SmartConnectVpnService : android.net.VpnService() {
     /** Main thread, like every stop of this service; a newer command makes stopSelfResult() refuse. */
     private fun releaseAlwaysOnStart(startId: Int) {
         if (serviceDestroyed) return
-        if (!mayStopAfterAlwaysOnStart(
+        if (mayStopAfterAlwaysOnStart(
                 state = appContainer.vpnConnectionRepository.currentState,
                 receiver = VpnSessionOwner.SMART_CONNECT,
                 // A restored run (redelivered ACTION_START) owns the global state only once it rehydrates.
                 receiverRunActive = !userRequestedStop,
             )
         ) {
-            return
-        }
-        if (stopSelfResult(startId)) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            if (stopSelfResult(startId)) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+        } else {
+            // The Auto run (running, or its start just queued) stops this service when it ends.
+            keptAlwaysOnStartId = startId
         }
     }
 
@@ -1065,7 +1069,7 @@ class SmartConnectVpnService : android.net.VpnService() {
         cleanupOwnedVpnRuntime()
         withContext(Dispatchers.Main.immediate) {
             if (!isLifecycleCommandCurrent(runId, commandId, startId)) return@withContext
-            if (!stopSelfResult(startId)) return@withContext
+            if (!stopSelfResult(sessionStopStartId(startId, keptAlwaysOnStartId))) return@withContext
             val repository = appContainer.vpnConnectionRepository
             if (repository.currentState.sessionOwner == VpnSessionOwner.SMART_CONNECT ||
                 repository.currentState.sessionOwner == null
@@ -1079,7 +1083,7 @@ class SmartConnectVpnService : android.net.VpnService() {
     private suspend fun finishStopIfCurrent(runId: Long, commandId: Long, startId: Int) {
         withContext(Dispatchers.Main.immediate) {
             if (!isLifecycleCommandCurrent(runId, commandId, startId)) return@withContext
-            if (!stopSelfResult(startId)) return@withContext
+            if (!stopSelfResult(sessionStopStartId(startId, keptAlwaysOnStartId))) return@withContext
             val repository = appContainer.vpnConnectionRepository
             if (repository.currentState.sessionOwner == VpnSessionOwner.SMART_CONNECT) {
                 repository.setDisconnected()
@@ -1116,7 +1120,7 @@ class SmartConnectVpnService : android.net.VpnService() {
         )
         withContext(Dispatchers.Main.immediate) {
             if (!isLifecycleCommandCurrent(runId, commandId, startId)) return@withContext
-            stopSelfResult(startId)
+            stopSelfResult(sessionStopStartId(startId, keptAlwaysOnStartId))
             stopForeground(STOP_FOREGROUND_REMOVE)
         }
     }
@@ -1135,7 +1139,7 @@ class SmartConnectVpnService : android.net.VpnService() {
             if (repository.currentState.sessionOwner == VpnSessionOwner.SMART_CONNECT) {
                 repository.setError(repository.currentState.activeConfigId, message)
             }
-            stopSelfResult(startId)
+            stopSelfResult(sessionStopStartId(startId, keptAlwaysOnStartId))
             stopForeground(STOP_FOREGROUND_REMOVE)
         }
     }

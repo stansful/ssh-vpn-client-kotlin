@@ -54,6 +54,8 @@ class SshVpnService : android.net.VpnService() {
     private val lifecycleCommandId = AtomicLong(0L)
     @Volatile
     private var lastStartId: Int = 0
+    /** Main thread only: the newest Always-on start this service kept running through ([sessionStopStartId]). */
+    private var keptAlwaysOnStartId: Int = 0
 
     /**
      * Everything that asks the connection loop to look at its transport. The loop is the only
@@ -206,16 +208,18 @@ class SshVpnService : android.net.VpnService() {
     private fun releaseAlwaysOnStart(startId: Int) {
         if (serviceDestroyed) return
         // A run whose state another mode took over is already winding down; stopping is safe then.
-        if (!mayStopAfterAlwaysOnStart(
+        if (mayStopAfterAlwaysOnStart(
                 state = appContainer.vpnConnectionRepository.currentState,
                 receiver = VpnSessionOwner.SHADOW_SSH,
                 receiverRunActive = false,
             )
         ) {
-            return
-        }
-        if (stopSelfResult(startId)) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            if (stopSelfResult(startId)) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+        } else {
+            // The session (running, or its connect just queued) stops this service when it ends.
+            keptAlwaysOnStartId = startId
         }
     }
 
@@ -1140,7 +1144,7 @@ class SshVpnService : android.net.VpnService() {
         if (requireActiveConnection && !isActiveConnectionCommandCurrent(runId, commandId)) {
             return@withContext false
         }
-        if (!stopSelfResult(startId)) {
+        if (!stopSelfResult(sessionStopStartId(startId, keptAlwaysOnStartId))) {
             return@withContext false
         }
         mutation()

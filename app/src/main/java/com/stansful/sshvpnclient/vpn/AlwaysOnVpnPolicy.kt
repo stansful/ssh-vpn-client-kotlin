@@ -44,6 +44,18 @@ internal fun mayStopAfterAlwaysOnStart(
     return !receiverRunActive && state.sessionOwner != receiver
 }
 
+/**
+ * The start id a service passes to stopSelfResult() when its own session stops or fails. An Android
+ * start the service kept running through ([mayStopAfterAlwaysOnStart] said no) is newer than the
+ * session's command but needs no stop of its own, so it must not make that stop look superseded;
+ * a command of the app queued after it still does, and the lifecycle command id still guards the
+ * commands already delivered. Without this, a session that fails after such a start keeps its
+ * "Connecting" state and notification forever.
+ */
+internal fun sessionStopStartId(sessionStartId: Int, keptAlwaysOnStartId: Int): Int {
+    return maxOf(sessionStartId, keptAlwaysOnStartId)
+}
+
 internal fun alwaysOnIgnoredDiagnostic(decision: AlwaysOnStartDecision.Ignore): String {
     val session = decision.owner?.alwaysOnModeLabel() ?: "a session"
     return "Always-on VPN: Android's start ignored, $session is already ${decision.status.alwaysOnLabel()}"
