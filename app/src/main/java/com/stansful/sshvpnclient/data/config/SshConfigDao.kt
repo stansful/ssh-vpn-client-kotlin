@@ -88,9 +88,15 @@ abstract class SshConfigDao {
     )
     abstract suspend fun pinFingerprintIfAbsent(id: String, fingerprint: String): Int
 
-    /** Replaces the host key fingerprint; returns the number of rows changed (0 or 1). */
-    @Query("UPDATE ssh_configs SET fingerprint = :fingerprint WHERE id = :id")
-    abstract suspend fun updateFingerprint(id: String, fingerprint: String): Int
+    /**
+     * Replaces the host key fingerprint, but only while the saved one is still [expected] (the pin the
+     * user reviewed), in one statement. Returns the number of rows changed (0 or 1).
+     */
+    @Query(
+        "UPDATE ssh_configs SET fingerprint = :fingerprint " +
+            "WHERE id = :id AND TRIM(fingerprint) = :expected",
+    )
+    abstract suspend fun replaceFingerprint(id: String, expected: String, fingerprint: String): Int
 
     @Transaction
     open suspend fun selectConfig(id: String) {

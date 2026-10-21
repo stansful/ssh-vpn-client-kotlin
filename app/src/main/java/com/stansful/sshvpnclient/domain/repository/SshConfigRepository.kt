@@ -29,6 +29,10 @@ interface SshConfigRepository {
      */
     suspend fun pinFingerprintIfAbsent(id: String, fingerprint: String): Boolean
 
-    /** Replaces server [id]'s host key fingerprint (the user accepted a changed key). Returns true if saved. */
-    suspend fun replaceFingerprint(id: String, fingerprint: String): Boolean
+    /**
+     * Replaces server [id]'s host key fingerprint with [fingerprint] (the user accepted a changed key),
+     * only while the saved one is still [expected], the pin the user reviewed: a fingerprint changed in
+     * the meantime is never overwritten. Returns true if saved.
+     */
+    suspend fun replaceFingerprint(id: String, expected: String, fingerprint: String): Boolean
 }

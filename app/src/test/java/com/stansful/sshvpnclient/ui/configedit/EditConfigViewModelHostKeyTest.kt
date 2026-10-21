@@ -200,6 +200,23 @@ class EditConfigViewModelHostKeyTest {
         assertEquals(OLD_KEY, viewModel.uiState.value.form.fingerprint)
     }
 
+    @Test
+    fun `accepting over a fingerprint changed elsewhere since the warning keeps that fingerprint`() = runBlocking {
+        val configs = FakeConfigs(server(fingerprint = OLD_KEY))
+        changes.record(SshHostKeyChange(SERVER_ID, pinnedFingerprint = OLD_KEY, observedFingerprint = NEW_KEY))
+        val viewModel = viewModel(configs)
+        idle()
+
+        configs.overwriteFingerprint(USER_KEY)
+        viewModel.acceptNewHostKey()
+        idle()
+
+        assertEquals(USER_KEY, configs.stored().fingerprint)
+        assertEquals(HostKeyAcceptResult.Failed, viewModel.uiState.value.hostKeyAcceptResult)
+        assertNull(viewModel.uiState.value.hostKeyChange)
+        assertNull(changes.observe(SERVER_ID).first())
+    }
+
     private fun viewModel(configs: FakeConfigs): EditConfigViewModel {
         val keys = NoKeys()
         return EditConfigViewModel(
@@ -273,11 +290,16 @@ class EditConfigViewModelHostKeyTest {
             return true
         }
 
-        override suspend fun replaceFingerprint(id: String, fingerprint: String): Boolean {
+        override suspend fun replaceFingerprint(id: String, expected: String, fingerprint: String): Boolean {
             duringReplace()
-            val config = configs[id] ?: return false
+            val config = configs[id]?.takeIf { it.fingerprint == expected } ?: return false
             configs[id] = config.copy(fingerprint = fingerprint)
             return true
+        }
+
+        /** A write that does not go through this editor, e.g. a restore or import. */
+        fun overwriteFingerprint(fingerprint: String?) {
+            configs[SERVER_ID] = stored().copy(fingerprint = fingerprint)
         }
 
         override fun observeAll(): Flow<List<SshConfig>> = flowOf(configs.values.toList())
