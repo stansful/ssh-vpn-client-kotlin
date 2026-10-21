@@ -491,6 +491,7 @@ class SshVpnService : android.net.VpnService() {
             var everConnected = false
             // Picks up the host key pinned on first use, so later attempts of this run check it too.
             var sessionConfig: SshConfig = config
+            val retryPolicy = SshRetryPolicy()
             val supervisor = ReconnectSupervisor(
                 initialBackoffMs = INITIAL_RECONNECT_DELAY_MS,
                 maxBackoffMs = MAX_RECONNECT_DELAY_MS,
@@ -528,6 +529,7 @@ class SshVpnService : android.net.VpnService() {
                                 attempt % NETWORK_DIAGNOSTICS_RETRY_INTERVAL == 0,
                             wakeHold = attemptWakeHold,
                             onAuthenticated = { hostKey ->
+                                retryPolicy.onAuthenticated()
                                 sessionConfig = trustHostKey(sessionConfig, hostKey, runId)
                             },
                         ).also { attemptFailed = false }
@@ -582,7 +584,8 @@ class SshVpnService : android.net.VpnService() {
                     if (!shouldKeepConnectionAlive(runId)) {
                         break
                     }
-                    if (error.isRecoverableBeforeFirstConnection() || everConnected) {
+                    val decision = retryPolicy.onFailure(classifySshFailure(error), everConnected)
+                    if (decision == SshRetryDecision.Retry) {
                         if (!mutateActiveConnectionIfCurrent(runId, commandId) {
                                 connectionRepository.setReconnecting(config.id)
                             }
@@ -595,13 +598,14 @@ class SshVpnService : android.net.VpnService() {
                         errorMessage = error.message ?: "Unknown connection error",
                         causeMessage = error.cause?.message,
                     )
-                    if (!everConnected && !error.isRecoverableBeforeFirstConnection()) {
+                    if (decision is SshRetryDecision.Stop) {
                         failConnectionAndStop(
                             runId = runId,
                             commandId = commandId,
                             startId = startId,
                             configId = config.id,
                             message = error.message ?: "Unknown connection error",
+                            diagnostic = decision.diagnostic,
                         )
                         return
                     }
@@ -1549,15 +1553,3 @@ private data class ActiveConnectionInterrupt(
     val message: String,
     val forceVpnRebuild: Boolean,
 )
-
-private fun VpnConnectionException.isRecoverableBeforeFirstConnection(): Boolean {
-    val value = message.orEmpty()
-    return value.contains("timeout", ignoreCase = true) ||
-        value.contains("Host unreachable", ignoreCase = true) ||
-        value.contains("usable non-VPN network", ignoreCase = true) ||
-        value.contains("Underlying network changed", ignoreCase = true) ||
-        value.contains("another service instance", ignoreCase = true) ||
-        value.contains("transport interrupted", ignoreCase = true) ||
-        value.contains("Unknown connection error", ignoreCase = true) ||
-        value.contains("TUN forwarding", ignoreCase = true)
-}
