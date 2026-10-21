@@ -488,7 +488,7 @@ SSH не умеет форвардить UDP: `direct-tcpip` - это тольк
 - входящий поток разбирается обратно на кадры и отдаётся в TUN как UDP-датаграммы от
   `reflector ip:port`, то есть с исходного UDP-порта, а не с `443`;
 - лимиты: `24` одновременных flow, uplink-очередь на flow `64 KiB` и `256` датаграмм, `16`
-  датаграмм за один проход control-воркера, connect timeout `2 s` на кандидата, idle-таймаут
+  датаграмм за один проход relay-воркера, connect timeout `2 s` на кандидата, idle-таймаут
   `45 s` с проверкой каждые `15 s`, park назначения на `5` минут, если не ответил ни один
   TCP-порт;
 - downlink пишется в TUN с ограниченным ожиданием `25 ms` и дропается вместо блокировки writer.
@@ -522,7 +522,7 @@ SSH не умеет форвардить UDP: `direct-tcpip` - это тольк
 
 Оптимизации forwarder:
 
-- Отдельные bounded executors для control tasks, DNS и remote reads; deadline/cleanup scheduler queues логически ограничены числом активных операций, а отменённые futures удаляются через `removeOnCancelPolicy`.
+- Отдельные bounded executors для upload-записи (writer на flow), открытия каналов, DNS, UDP relay и remote reads; deadline/cleanup scheduler queues логически ограничены числом активных операций, а отменённые futures удаляются через `removeOnCancelPolicy`.
 - Blocking TUN использует один bounded writer; переполнение переводит forwarding layer в degraded/rebuild вместо неограниченного роста памяти.
 - MSS вычисляется из TUN MTU (`8460` при MTU `8500`), TCP/IP packet строится без промежуточной копии payload.
 - Во всех профилях JSch local channel receive window, outer SSH socket request и dynamic input-buffer ceiling равны 4 MiB; upload queue — 512 KiB на flow, TUN write queue — 256 пакетов. Это сохраняет минимум `2 × BDP` для 100 Мбит/с при RTT 106 мс и не урезает активную передачу в Battery Saver.
