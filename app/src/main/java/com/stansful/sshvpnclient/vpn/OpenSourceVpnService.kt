@@ -51,6 +51,8 @@ class OpenSourceVpnService : android.net.VpnService() {
     private var lastStartId: Int = 0
     /** Main thread only: the newest Always-on start this service kept running through ([sessionStopStartId]). */
     private var keptAlwaysOnStartId: Int = 0
+    /** Main thread only: a session end whose stop a start still on its way refused. */
+    private val refusedSessionStop = RefusedSessionStop()
     private val connectionMonitorSignal = Channel<Unit>(Channel.CONFLATED)
     @Volatile
     private var userRequestedDisconnect = true
@@ -153,6 +155,13 @@ class OpenSourceVpnService : android.net.VpnService() {
      */
     private fun handleAlwaysOnStart(startId: Int) {
         val starter = appContainer.alwaysOnVpnStarter
+        // The session ended while this start was queued: its end waited for this start id.
+        if (refusedSessionStop.settle { stopSelfResult(startId) } == RefusedStopSettlement.STOPPED) {
+            appContainer.vpnConnectionRepository.appendDiagnostic(
+                alwaysOnEndedSessionDiagnostic(VpnSessionOwner.OPEN_SOURCE),
+            )
+            return
+        }
         if (!ownsAlwaysOnReceiverSession()) starter.enterForeground(::startVpnForeground)
         starter.start { releaseAlwaysOnStart(startId) }
     }
@@ -160,6 +169,8 @@ class OpenSourceVpnService : android.net.VpnService() {
     /** Main thread, like every stop of this service; a newer command makes stopSelfResult() refuse. */
     private fun releaseAlwaysOnStart(startId: Int) {
         if (serviceDestroyed) return
+        // The session ended while the start was handed on. STILL_REFUSED: a newer command decides.
+        if (refusedSessionStop.settle { stopSelfResult(startId) } != RefusedStopSettlement.NONE) return
         // A run whose state another mode took over is already winding down; stopping is safe then.
         if (mayStopAfterAlwaysOnStart(
                 state = appContainer.vpnConnectionRepository.currentState,
@@ -728,6 +739,17 @@ class OpenSourceVpnService : android.net.VpnService() {
             return@withContext false
         }
         if (!stopSelfResult(sessionStopStartId(startId, keptAlwaysOnStartId))) {
+            // A command of the app supersedes this end; Android's Always-on start settles it instead.
+            refusedSessionStop.record(
+                isCurrent = {
+                    isLifecycleCommandCurrent(runId, commandId, startId) &&
+                        (!requireActiveConnection || isActiveConnectionCommandCurrent(runId, commandId))
+                },
+                finish = {
+                    mutation()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                },
+            )
             return@withContext false
         }
         mutation()

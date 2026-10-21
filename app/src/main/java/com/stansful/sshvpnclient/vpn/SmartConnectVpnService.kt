@@ -84,6 +84,8 @@ class SmartConnectVpnService : android.net.VpnService() {
     private var lastStartId = 0
     /** Main thread only: the newest Always-on start this service kept running through ([sessionStopStartId]). */
     private var keptAlwaysOnStartId = 0
+    /** Main thread only: a session end whose stop a start still on its way refused. */
+    private val refusedSessionStop = RefusedSessionStop()
     @Volatile
     private var lastNotice: AutoNotice? = null
 
@@ -180,6 +182,13 @@ class SmartConnectVpnService : android.net.VpnService() {
      */
     private fun handleAlwaysOnStart(startId: Int) {
         val starter = appContainer.alwaysOnVpnStarter
+        // The Auto run ended while this start was queued: its end waited for this start id.
+        if (refusedSessionStop.settle { stopSelfResult(startId) } == RefusedStopSettlement.STOPPED) {
+            appContainer.vpnConnectionRepository.appendDiagnostic(
+                alwaysOnEndedSessionDiagnostic(VpnSessionOwner.SMART_CONNECT),
+            )
+            return
+        }
         if (!runsAlwaysOnReceiverSession()) {
             starter.enterForeground { startSmartForeground(AutoNotice.Starting, force = true) }
         }
@@ -189,6 +198,8 @@ class SmartConnectVpnService : android.net.VpnService() {
     /** Main thread, like every stop of this service; a newer command makes stopSelfResult() refuse. */
     private fun releaseAlwaysOnStart(startId: Int) {
         if (serviceDestroyed) return
+        // The Auto run ended while the start was handed on. STILL_REFUSED: a newer command decides.
+        if (refusedSessionStop.settle { stopSelfResult(startId) } != RefusedStopSettlement.NONE) return
         if (mayStopAfterAlwaysOnStart(
                 state = appContainer.vpnConnectionRepository.currentState,
                 receiver = VpnSessionOwner.SMART_CONNECT,
@@ -1073,26 +1084,46 @@ class SmartConnectVpnService : android.net.VpnService() {
         cleanupOwnedVpnRuntime()
         withContext(Dispatchers.Main.immediate) {
             if (!isLifecycleCommandCurrent(runId, commandId, startId)) return@withContext
-            if (!stopSelfResult(sessionStopStartId(startId, keptAlwaysOnStartId))) return@withContext
-            val repository = appContainer.vpnConnectionRepository
-            if (repository.currentState.sessionOwner == VpnSessionOwner.SMART_CONNECT ||
-                repository.currentState.sessionOwner == null
-            ) {
-                repository.setError(repository.currentState.activeConfigId, message)
+            stopForSessionEnd(runId, commandId, startId) {
+                val repository = appContainer.vpnConnectionRepository
+                if (repository.currentState.sessionOwner == VpnSessionOwner.SMART_CONNECT ||
+                    repository.currentState.sessionOwner == null
+                ) {
+                    repository.setError(repository.currentState.activeConfigId, message)
+                }
             }
-            stopForeground(STOP_FOREGROUND_REMOVE)
         }
     }
 
     private suspend fun finishStopIfCurrent(runId: Long, commandId: Long, startId: Int) {
         withContext(Dispatchers.Main.immediate) {
             if (!isLifecycleCommandCurrent(runId, commandId, startId)) return@withContext
-            if (!stopSelfResult(sessionStopStartId(startId, keptAlwaysOnStartId))) return@withContext
-            val repository = appContainer.vpnConnectionRepository
-            if (repository.currentState.sessionOwner == VpnSessionOwner.SMART_CONNECT) {
-                repository.setDisconnected()
+            stopForSessionEnd(runId, commandId, startId) {
+                val repository = appContainer.vpnConnectionRepository
+                if (repository.currentState.sessionOwner == VpnSessionOwner.SMART_CONNECT) {
+                    repository.setDisconnected()
+                }
             }
+        }
+    }
+
+    /**
+     * Main thread. Stops before [publish], so a newer start Android has queued but not delivered makes
+     * the stop refuse and leaves the end to that start: a command of the app supersedes it, Android's
+     * Always-on start settles it ([RefusedSessionStop]).
+     */
+    private fun stopForSessionEnd(runId: Long, commandId: Long, startId: Int, publish: () -> Unit) {
+        val finish = {
+            publish()
             stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+        if (stopSelfResult(sessionStopStartId(startId, keptAlwaysOnStartId))) {
+            finish()
+        } else {
+            refusedSessionStop.record(
+                isCurrent = { isLifecycleCommandCurrent(runId, commandId, startId) },
+                finish = finish,
+            )
         }
     }
 
