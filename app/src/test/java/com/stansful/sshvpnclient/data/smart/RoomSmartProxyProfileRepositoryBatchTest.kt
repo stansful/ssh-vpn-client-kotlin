@@ -11,6 +11,7 @@ import com.stansful.sshvpnclient.domain.model.ProxyTransport
 import com.stansful.sshvpnclient.domain.model.ProxyTunnelTestResult
 import com.stansful.sshvpnclient.domain.repository.SmartProxyBatchSupersededException
 import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyShareLinkParser
+import java.security.GeneralSecurityException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
@@ -396,6 +397,38 @@ class RoomSmartProxyProfileRepositoryBatchTest {
     }
 
     @Test
+    fun `catalog sync while the secret store can't be read fails and keeps every stored link`() = runBlocking {
+        val dao = RecordingSmartProxyProfileDao(emptyMap())
+        val secrets = RecordingSmartSecretStorage(emptyMap())
+        val repository = repository(dao, secrets)
+        val own = "vless://00000000-0000-4000-8000-000000000010@own.test:443?security=tls#Mine"
+        val synced = "vless://00000000-0000-4000-8000-000000000011@synced.test:443?security=tls#Synced"
+        repository.import(own, ProxyProfileSource.MANUAL, sourceUrl = null)
+        repository.import(synced, ProxyProfileSource.REMOTE, "https://example.test/smart")
+        val before = dao.remainingEntities().toSet()
+        val savedBefore = secrets.savedSecrets.toMap()
+        // The keyset fails to load for the readability check only; the save right after it would work.
+        secrets.keysetLoadFailures = 1
+
+        val failure = runCatching {
+            repository.import(
+                listOf(own.replace("#Mine", "#Catalog"), synced).joinToString("\n"),
+                ProxyProfileSource.REMOTE,
+                "https://example.test/smart",
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is GeneralSecurityException)
+        assertEquals(before, dao.remainingEntities().toSet())
+        assertEquals(savedBefore, secrets.savedSecrets)
+        assertTrue(secrets.deletedSecretIds.isEmpty())
+        assertEquals(
+            setOf(own, synced),
+            repository.getByIds(dao.remainingIds().toList()).map { profile -> profile.rawUri }.toSet(),
+        )
+    }
+
+    @Test
     fun `remote import expires rows left over from a previous source URL`() = runBlocking {
         val leftover = smartProfileEntity(id = "leftover")
         val dao = RecordingSmartProxyProfileDao(mapOf(leftover.id to leftover))
@@ -600,15 +633,24 @@ private class RecordingSmartSecretStorage(
     val savedSecrets = linkedMapOf<String, String>()
     val deletedSecretIds = hashSetOf<String>()
 
+    /**
+     * How many of the next store accesses find the keyset failing to load, as Tink's lazy keyset
+     * does for a moment while the Keystore hiccups: a read reports such a failure as missing values,
+     * a write and [checkAvailable] throw it. The access after them loads it.
+     */
+    var keysetLoadFailures = 0
+
     override suspend fun saveSecret(id: String, value: String) {
+        loadKeyset()
         secrets[id] = value
         savedSecrets[id] = value
     }
 
-    override suspend fun getSecret(id: String): String? = secrets[id]
+    override suspend fun getSecret(id: String): String? = if (keysetLoads()) secrets[id] else null
 
     override suspend fun getSecrets(ids: Collection<String>): Map<String, String> {
         getSecretsCalls += 1
+        if (!keysetLoads()) return emptyMap()
         return ids.mapNotNull { id -> secrets[id]?.let { value -> id to value } }.toMap()
     }
 
@@ -617,9 +659,22 @@ private class RecordingSmartSecretStorage(
         deletedSecretIds += id
     }
 
+    override suspend fun checkAvailable() {
+        loadKeyset()
+    }
+
     /** What the store looks like after it started over: every saved value is gone. */
     fun startOver() {
         secrets.clear()
+    }
+
+    private fun keysetLoads(): Boolean = runCatching(::loadKeyset).isSuccess
+
+    private fun loadKeyset() {
+        if (keysetLoadFailures > 0) {
+            keysetLoadFailures -= 1
+            throw GeneralSecurityException("Keystore operation failed")
+        }
     }
 }
 

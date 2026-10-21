@@ -125,6 +125,7 @@ class RoomSmartProxyProfileRepository(
                 .toSet()
             // A row can outlive its link: the secret store starts over when its Keystore key is
             // gone. Such a row takes the link from this sync, or it would stay unusable for good.
+            // A store that can't be read right now fails the sync here, before anything changes.
             val readableSecretIds = secretStorage.readableSecretIds(
                 uniqueProfiles.mapNotNull { parsed -> existingByFingerprint[parsed.fingerprint]?.secretId },
             )
