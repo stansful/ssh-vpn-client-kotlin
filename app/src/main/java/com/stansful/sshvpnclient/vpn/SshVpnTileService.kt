@@ -4,24 +4,17 @@ import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Intent
 import android.graphics.drawable.Icon
-import android.net.VpnService
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import com.stansful.sshvpnclient.MainActivity
 import com.stansful.sshvpnclient.R
 import com.stansful.sshvpnclient.SshVpnApplication
-import com.stansful.sshvpnclient.domain.model.AppSettings
-import com.stansful.sshvpnclient.domain.model.AuthType
 import com.stansful.sshvpnclient.domain.model.GlobalTab
-import com.stansful.sshvpnclient.domain.model.OpenSourcePolicy
-import com.stansful.sshvpnclient.domain.model.SshConfig
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
-import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.ui.shell.Destinations
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,7 +23,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class SshVpnTileService : TileService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -94,55 +86,22 @@ class SshVpnTileService : TileService() {
         }
     }
 
+    /** The preconditions, the decision and the start itself are shared with Always-on VPN. */
     private suspend fun connectOrOpenApp() {
+        val starter = appContainer.lastVpnModeStarter
         val target = quickTileConnectTarget(appContainer.lastVpnSessionStore.lastOwner.value)
-        val settings = appContainer.appSettingsRepository.settings.value
-        val selectedAppsReady = settings.vpnMode != VpnMode.SELECTED_APPS ||
-            settings.selectedAppPackages.isNotEmpty()
-        val vpnPermissionGranted = VpnService.prepare(this) == null
-        val failureConfigId: String?
-        val preconditions = when (target) {
-            VpnSessionOwner.SHADOW_SSH -> {
-                val config = appContainer.sshConfigRepository.getSelectedConfig()
-                failureConfigId = config?.id
-                QuickTilePreconditions.ShadowSsh(
-                    configSelected = config != null,
-                    privateKeyReady = config != null && hasUsablePrivateKey(config),
-                    selectedAppsReady = selectedAppsReady,
-                    vpnPermissionGranted = vpnPermissionGranted,
-                )
+        val check = starter.check(target)
+        when (val plan = resolveQuickTileConnectPlan(check.preconditions)) {
+            is QuickTileConnectPlan.Connect -> {
+                if (starter.connect(plan.owner, check.failureConfigId) != null) {
+                    openMainActivity(plan.owner.globalTab())
+                }
             }
-
-            VpnSessionOwner.OPEN_SOURCE -> {
-                val profile = appContainer.proxyProfileRepository.getSelected()
-                failureConfigId = profile?.id
-                QuickTilePreconditions.OpenSource(
-                    consentAccepted = settings.openSourceConsentVersion >= OpenSourcePolicy.CONSENT_VERSION,
-                    routeSelected = profile != null,
-                    xrayCoreAvailable = isXrayCoreAvailable(),
-                    selectedAppsReady = selectedAppsReady,
-                    vpnPermissionGranted = vpnPermissionGranted,
-                )
-            }
-
-            VpnSessionOwner.SMART_CONNECT -> {
-                failureConfigId = null
-                QuickTilePreconditions.SmartConnect(
-                    consentAccepted = settings.smartConnectConsentAccepted(),
-                    xrayCoreAvailable = isXrayCoreAvailable(),
-                    selectedAppsReady = selectedAppsReady,
-                    vpnPermissionGranted = vpnPermissionGranted,
-                )
-            }
-        }
-
-        when (val plan = resolveQuickTileConnectPlan(preconditions)) {
-            is QuickTileConnectPlan.Connect -> connect(plan.owner, failureConfigId)
             is QuickTileConnectPlan.OpenApp -> {
                 plan.reason.messageRes()?.let { messageRes ->
-                    publishStartFailure(
+                    starter.publishStartFailure(
                         target,
-                        failureConfigId,
+                        check.failureConfigId,
                         getString(messageRes),
                         connectAttempted = false,
                     )
@@ -150,52 +109,6 @@ class SshVpnTileService : TileService() {
                 openMainActivity(plan.tab)
             }
         }
-    }
-
-    private suspend fun connect(owner: VpnSessionOwner, failureConfigId: String?) {
-        runCatching {
-            when (owner) {
-                VpnSessionOwner.SHADOW_SSH -> appContainer.connectVpnUseCase()
-                VpnSessionOwner.OPEN_SOURCE -> appContainer.connectProxyVpnUseCase()
-                VpnSessionOwner.SMART_CONNECT -> appContainer.connectSmartVpnUseCase()
-            }
-        }.onFailure { error ->
-            if (error is CancellationException) throw error
-            publishStartFailure(
-                owner,
-                failureConfigId,
-                error.message ?: getString(R.string.qs_tile_unknown_error),
-                connectAttempted = true,
-            )
-            openMainActivity(owner.globalTab())
-        }
-    }
-
-    /** ConnectVpnUseCase rejects a missing key too, but returns normally, so the tile would not open the app. */
-    private suspend fun hasUsablePrivateKey(config: SshConfig): Boolean {
-        if (config.authType != AuthType.PRIVATE_KEY) return true
-        val keyId = config.privateKeyId
-        return !keyId.isNullOrBlank() && appContainer.sshPrivateKeyRepository.getById(keyId) != null
-    }
-
-    // Off Main: the first check loads the installed core through a class loader.
-    private suspend fun isXrayCoreAvailable(): Boolean = withContext(Dispatchers.IO) {
-        appContainer.xrayCoreBridge.isAvailable
-    }
-
-    private fun publishStartFailure(
-        target: VpnSessionOwner,
-        configId: String?,
-        message: String,
-        connectAttempted: Boolean,
-    ) {
-        val repository = appContainer.vpnConnectionRepository
-        if (!canPublishQuickTileStartFailure(repository.currentState, target, connectAttempted)) return
-        if (target == VpnSessionOwner.SMART_CONNECT) {
-            // The Smart tab shows its workflow message; a bare VPN error without an owner is hidden there.
-            appContainer.smartConnectStateStore.fail(message, keepDesiredActive = false)
-        }
-        repository.setError(configId, message)
     }
 
     private fun disconnect() {
@@ -261,13 +174,6 @@ class SshVpnTileService : TileService() {
             @Suppress("DEPRECATION")
             startActivityAndCollapse(intent)
         }
-    }
-
-    // Mirrors the shell's ConsentGate (Auto rule): consent the Smart tab would not ask for must not block
-    // the tile, or every click would open the app and nothing there would unblock it.
-    private fun AppSettings.smartConnectConsentAccepted(): Boolean {
-        return !showSmartConnectWarningOnEnter ||
-            smartConnectConsentVersion >= OpenSourcePolicy.CONSENT_VERSION
     }
 
     private fun QuickTileOpenAppReason.messageRes(): Int? {
