@@ -22,6 +22,7 @@ import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.repository.ProxySourceConnectionFactory
 import com.stansful.sshvpnclient.ui.system.AutoNotice
 import com.stansful.sshvpnclient.ui.system.NotificationAction
+import com.stansful.sshvpnclient.ui.system.alwaysOnStartNotification
 import com.stansful.sshvpnclient.ui.system.autoNotificationCopy
 import com.stansful.sshvpnclient.ui.system.connectionNotification
 import com.stansful.sshvpnclient.ui.system.ensureConnectionChannel
@@ -189,9 +190,7 @@ class SmartConnectVpnService : android.net.VpnService() {
             )
             return
         }
-        if (!runsAlwaysOnReceiverSession()) {
-            starter.enterForeground { startSmartForeground(AutoNotice.Starting, force = true) }
-        }
+        if (!runsAlwaysOnReceiverSession()) starter.enterForeground(::startAlwaysOnForeground)
         starter.start { releaseAlwaysOnStart(startId) }
     }
 
@@ -1324,6 +1323,16 @@ class SmartConnectVpnService : android.net.VpnService() {
         )
         startForeground(NOTIFICATION_ID, notification)
         lastNotice = notice
+    }
+
+    /**
+     * Meets the deadline of Android's own start (Always-on). It may bring back another mode, so the
+     * notice is neutral; an Auto start it leads to posts [AutoNotice.Starting] over it.
+     */
+    private fun startAlwaysOnForeground() {
+        ensureConnectionChannel(CHANNEL_ID, R.string.vpn_notification_channel_auto)
+        startForeground(NOTIFICATION_ID, alwaysOnStartNotification(CHANNEL_ID))
+        lastNotice = null
     }
 
     private fun AppSettings.hasValidSmartRouting(): Boolean {

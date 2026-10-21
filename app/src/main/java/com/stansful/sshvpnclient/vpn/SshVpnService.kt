@@ -24,6 +24,7 @@ import com.stansful.sshvpnclient.domain.model.VpnMode
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.ui.system.NotificationAction
+import com.stansful.sshvpnclient.ui.system.alwaysOnStartNotification
 import com.stansful.sshvpnclient.ui.system.connectionNotification
 import com.stansful.sshvpnclient.ui.system.ensureConnectionChannel
 import com.stansful.sshvpnclient.ui.system.serverNotificationCopy
@@ -211,7 +212,7 @@ class SshVpnService : android.net.VpnService() {
             )
             return
         }
-        if (!ownsAlwaysOnReceiverSession()) starter.enterForeground(::startVpnForeground)
+        if (!ownsAlwaysOnReceiverSession()) starter.enterForeground(::startAlwaysOnForeground)
         starter.start { releaseAlwaysOnStart(startId) }
     }
 
@@ -1360,6 +1361,15 @@ class SshVpnService : android.net.VpnService() {
     /** Meets the foreground deadline of a connect command before the server is known. */
     private fun startVpnForeground() {
         startForeground(NOTIFICATION_ID, sessionNotification(status = null, serverName = null))
+    }
+
+    /**
+     * Meets the deadline of Android's own start (Always-on). It may bring back another mode, so the
+     * notice is neutral; a Server session it starts replaces it with its own ([observeSessionForNotification]).
+     */
+    private fun startAlwaysOnForeground() {
+        ensureConnectionChannel(CHANNEL_ID, R.string.vpn_notification_channel)
+        startForeground(NOTIFICATION_ID, alwaysOnStartNotification(CHANNEL_ID))
     }
 
     /**

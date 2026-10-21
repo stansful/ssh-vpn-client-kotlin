@@ -21,7 +21,7 @@ internal data class NotificationCopy(
     val connected: Boolean,
 )
 
-/** The notification's single action: "Disconnect" (Server, Routes) or "Stop" (Auto). */
+/** The notification's single action: "Disconnect" (Server, Routes) or "Stop" (Auto); none for Always-on. */
 internal class NotificationAction(
     @param:StringRes val label: Int,
     val serviceIntent: Intent,
@@ -59,14 +59,14 @@ internal fun Context.ensureConnectionChannel(channelId: String, @StringRes name:
 
 /**
  * Foreground notification of a VPN service (System.dc.html, column A): "shadow · [mode]" header with
- * the brand shield, a state headline, one detail line and one action. A tap opens the app on top of
- * its current screen.
+ * the brand shield, a state headline, one detail line and one action (none while Android's Always-on
+ * start is handed on). A tap opens the app on top of its current screen.
  */
 internal fun Context.connectionNotification(
     channelId: String,
     @StringRes mode: Int,
     copy: NotificationCopy,
-    action: NotificationAction,
+    action: NotificationAction?,
 ): Notification {
     val openApp = PendingIntent.getActivity(
         this,
@@ -75,13 +75,7 @@ internal fun Context.connectionNotification(
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
-    val actionIntent = PendingIntent.getService(
-        this,
-        action.requestCode,
-        action.serviceIntent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-    )
-    return NotificationCompat.Builder(this, channelId)
+    val builder = NotificationCompat.Builder(this, channelId)
         .setSmallIcon(R.drawable.ic_shadow_shield)
         // Android adjusts the accent for contrast on light and dark shades.
         .setColor((if (copy.connected) NightColors.mint else NightColors.amber).toArgb())
@@ -89,11 +83,35 @@ internal fun Context.connectionNotification(
         .setContentTitle(copy.title)
         .setContentText(copy.text)
         .setContentIntent(openApp)
-        .addAction(0, getString(action.label), actionIntent)
         .setOngoing(true)
         .setOnlyAlertOnce(true)
-        .build()
+    if (action != null) {
+        val actionIntent = PendingIntent.getService(
+            this,
+            action.requestCode,
+            action.serviceIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        builder.addAction(0, getString(action.label), actionIntent)
+    }
+    return builder.build()
 }
+
+/**
+ * Android's own start of the VPN (Always-on) until the mode used last puts up its own notice. Android
+ * picks the receiving service, which need not be the one running that mode, so the notice names no
+ * mode and has no Disconnect or Stop aimed at the receiver.
+ */
+internal fun Context.alwaysOnStartNotification(channelId: String): Notification = connectionNotification(
+    channelId = channelId,
+    mode = R.string.notification_always_on_mode,
+    copy = NotificationCopy(
+        title = getString(R.string.notification_always_on_starting),
+        text = getString(R.string.notification_always_on_text),
+        connected = false,
+    ),
+    action = null,
+)
 
 /** Server mode: "Connected to Home VPS" etc.; a missing [serverName] reads "your server". */
 internal fun Context.serverNotificationCopy(
