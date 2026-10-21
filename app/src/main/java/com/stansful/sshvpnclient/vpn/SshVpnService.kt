@@ -479,7 +479,12 @@ class SshVpnService : android.net.VpnService() {
                     connectionRepository.setReconnecting(config.id)
                     connectionRepository.appendDiagnostic("Applying updated VPN settings")
                 } else {
-                    connectionRepository.setConnecting(config.id)
+                    // ConnectVpnUseCase cleared the log for this start already.
+                    connectionRepository.publishAcceptedConnect(
+                        configId = config.id,
+                        transport = VpnTransportType.SSH,
+                        owner = VpnSessionOwner.SHADOW_SSH,
+                    )
                 }
                 connectionRepository.appendDiagnostic("Starting VPN connection")
                 connectionRepository.appendDiagnostic(

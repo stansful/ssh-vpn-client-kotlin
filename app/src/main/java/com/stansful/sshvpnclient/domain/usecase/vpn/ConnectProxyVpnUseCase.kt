@@ -62,6 +62,7 @@ class ConnectProxyVpnUseCase(
             return
         }
         lastVpnSessionStore.record(VpnSessionOwner.OPEN_SOURCE)
+        // The one log clear of this start: OpenSourceVpnService keeps the log when it publishes the start.
         vpnConnectionRepository.setConnecting(
             profile.id,
             VpnTransportType.XRAY,

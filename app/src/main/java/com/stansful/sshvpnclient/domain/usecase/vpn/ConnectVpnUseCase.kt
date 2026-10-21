@@ -138,6 +138,7 @@ class ConnectVpnUseCase(
         if (preserveDiagnostics) {
             vpnConnectionRepository.setReconnecting(config.id)
         } else {
+            // The one log clear of this start: SshVpnService keeps the log when it publishes the start.
             vpnConnectionRepository.setConnecting(config.id)
         }
         try {

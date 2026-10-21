@@ -345,10 +345,11 @@ class OpenSourceVpnService : android.net.VpnService() {
         }
 
         val publishedStart = mutateActiveConnectionIfCurrent(runId, commandId) {
-            repository.setConnecting(
-                profile.id,
-                VpnTransportType.XRAY,
-                VpnSessionOwner.OPEN_SOURCE,
+            // ConnectProxyVpnUseCase cleared the log for this start already.
+            repository.publishAcceptedConnect(
+                configId = profile.id,
+                transport = VpnTransportType.XRAY,
+                owner = VpnSessionOwner.OPEN_SOURCE,
             )
             repository.appendDiagnostic("Starting public route VPN connection")
             repository.appendDiagnostic(
