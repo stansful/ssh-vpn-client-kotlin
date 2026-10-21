@@ -149,7 +149,10 @@ class MainViewModel(
     observeVpnConnectionStateUseCase: ObserveVpnConnectionStateUseCase,
     private val appUpdateCoordinator: AppUpdateCoordinator,
     private val sshStopRequests: SshStopRequests,
-    /** Runs restarts: one that has stopped the session must reconnect even if the Activity finishes. */
+    /**
+     * Runs restarts, and a Connect that takes one over: once the session is stopped, the reconnect
+     * must happen even if the Activity finishes.
+     */
     private val applicationScope: CoroutineScope,
 ) : ViewModel() {
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
@@ -262,9 +265,19 @@ class MainViewModel(
         // The newest request wins; one that already started the service has completed anyway.
         connectJob?.cancel()
         connectStoppedSession = stoppedSession
-        connectJob = viewModelScope.launch {
+        // Taking over a restart that stopped its session also takes over its promise to reconnect
+        // when the Activity finishes meanwhile, and its handling of a stop from elsewhere: Disconnect
+        // here cancels the job, any other stop (the next Activity, the notification, the quick tile)
+        // is seen through [SshStopRequests].
+        val scope = if (stoppedSession != null) applicationScope else viewModelScope
+        val stopRequestsAtRequest = sshStopRequests.current
+        connectJob = scope.launch(Dispatchers.Main.immediate) {
             try {
-                reportUnstartedConnect("Couldn’t connect", connectVpnUseCase(stoppedSession = stoppedSession))
+                val result = connectVpnUseCase(
+                    stoppedSession = stoppedSession,
+                    isStillWanted = { sshStopRequests.current == stopRequestsAtRequest },
+                )
+                reportUnstartedConnect("Couldn’t connect", result)
             } catch (cancellation: CancellationException) {
                 // The repository outlives this ViewModel; a cancelled scope must not publish
                 // a connection error into app-wide VPN state.
@@ -496,7 +509,8 @@ class MainViewModel(
     }
 
     override fun onCleared() {
-        // A restart still in its debounce has stopped nothing yet; one past it finishes its reconnect.
+        // A restart still in its debounce has stopped nothing yet; one past it finishes its reconnect,
+        // and so does a Connect that took such a restart over (both run in applicationScope).
         if (restartStoppedSession == null) sessionRestartJob?.cancel()
         val session = invalidateTerminalGeneration()
         runCatching { session?.close() }
