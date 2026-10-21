@@ -108,11 +108,11 @@ internal class RefusedSessionStop {
 
 /** Android's start arrived just after the receiver's own session ended; it settled that end instead. */
 internal fun alwaysOnEndedSessionDiagnostic(receiver: VpnSessionOwner): String {
-    return "Always-on VPN: Android's start ignored, ${receiver.alwaysOnModeLabel()} had just ended"
+    return "Always-on VPN: Android's start ignored, ${receiver.diagnosticModeLabel()} had just ended"
 }
 
 internal fun alwaysOnIgnoredDiagnostic(decision: AlwaysOnStartDecision.Ignore): String {
-    val session = decision.owner?.alwaysOnModeLabel() ?: "a session"
+    val session = decision.owner?.diagnosticModeLabel() ?: "a session"
     return "Always-on VPN: Android's start ignored, $session is already ${decision.status.alwaysOnLabel()}"
 }
 
@@ -120,17 +120,17 @@ internal const val ALWAYS_ON_NO_RECORDED_MODE_DIAGNOSTIC =
     "Always-on VPN: no mode to restore yet; connect once from the app"
 
 internal fun alwaysOnStartedDiagnostic(owner: VpnSessionOwner): String {
-    return "Always-on VPN: ${owner.alwaysOnModeLabel()} started by Android"
+    return "Always-on VPN: ${owner.diagnosticModeLabel()} started by Android"
 }
 
 /** The tile would open the app for [reason]; with nobody looking, the log says what to fix there. */
 internal fun alwaysOnSkippedDiagnostic(owner: VpnSessionOwner, reason: QuickTileOpenAppReason): String {
-    return "Always-on VPN: ${owner.alwaysOnModeLabel()} not started, ${reason.alwaysOnText()}; " +
+    return "Always-on VPN: ${owner.diagnosticModeLabel()} not started, ${reason.alwaysOnText()}; " +
         "open the app to fix it"
 }
 
 internal fun alwaysOnFailedDiagnostic(owner: VpnSessionOwner, message: String): String {
-    return "Always-on VPN: ${owner.alwaysOnModeLabel()} failed to start: $message"
+    return "Always-on VPN: ${owner.diagnosticModeLabel()} failed to start: $message"
 }
 
 /**
@@ -154,14 +154,14 @@ internal fun alwaysOnConnectDiagnostic(
     }
     val other = stateAfter.sessionOwner?.takeIf { it != owner }
     return if (other != null) {
-        "Always-on VPN: ${owner.alwaysOnModeLabel()} not started, ${other.alwaysOnModeLabel()} took over"
+        "Always-on VPN: ${owner.diagnosticModeLabel()} not started, ${other.diagnosticModeLabel()} took over"
     } else {
-        "Always-on VPN: ${owner.alwaysOnModeLabel()} not started"
+        "Always-on VPN: ${owner.diagnosticModeLabel()} not started"
     }
 }
 
-/** The mode names the app shows (R.string.mode_server, mode_routes, mode_auto). */
-private fun VpnSessionOwner.alwaysOnModeLabel(): String = when (this) {
+/** The mode names the app shows (R.string.mode_server, mode_routes, mode_auto), for log lines. */
+internal fun VpnSessionOwner.diagnosticModeLabel(): String = when (this) {
     VpnSessionOwner.SHADOW_SSH -> "Server"
     VpnSessionOwner.OPEN_SOURCE -> "Routes"
     VpnSessionOwner.SMART_CONNECT -> "Auto"

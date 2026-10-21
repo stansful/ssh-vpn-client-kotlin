@@ -5,6 +5,7 @@ import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.model.VpnTransportType
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
+import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnResult
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -114,6 +115,23 @@ class AlwaysOnVpnStarterTest {
         starter.start { finished += 1 }
 
         assertEquals(listOf("Always-on VPN: Server failed to start: boom"), repository.diagnostics)
+        assertEquals(1, finished)
+    }
+
+    @Test
+    fun `a server start that another session kept from starting is logged with its reason`() {
+        modeStarter.onConnect = {
+            // ConnectVpnUseCase: Routes took the state meanwhile and did not let go in time.
+            repository.currentState = live(VpnSessionOwner.OPEN_SOURCE, VpnConnectionStatus.CONNECTED)
+            unpublishedServerStartFailure(ConnectVpnResult.PreviousSessionActive)
+        }
+
+        starter.start { finished += 1 }
+
+        assertEquals(
+            listOf("Always-on VPN: Server failed to start: The previous connection is still stopping"),
+            repository.diagnostics,
+        )
         assertEquals(1, finished)
     }
 

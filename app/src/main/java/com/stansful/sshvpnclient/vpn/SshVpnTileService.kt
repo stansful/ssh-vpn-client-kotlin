@@ -93,7 +93,11 @@ class SshVpnTileService : TileService() {
         val check = starter.check(target)
         when (val plan = resolveQuickTileConnectPlan(check.preconditions)) {
             is QuickTileConnectPlan.Connect -> {
-                if (starter.connect(plan.owner, check.failureConfigId) != null) {
+                starter.connect(plan.owner, check.failureConfigId)?.let { failure ->
+                    // The error state may not show it (another session owns the state): the log does.
+                    appContainer.vpnConnectionRepository.appendDiagnostic(
+                        quickTileStartFailureDiagnostic(plan.owner, failure),
+                    )
                     openMainActivity(plan.owner.globalTab())
                 }
             }

@@ -6,6 +6,7 @@ import com.stansful.sshvpnclient.domain.model.GlobalTab
 import com.stansful.sshvpnclient.domain.model.VpnConnectionState
 import com.stansful.sshvpnclient.domain.model.VpnConnectionStatus
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
+import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnResult
 
 /**
  * What the quick settings tile found out about the mode it is about to start. Android lookups
@@ -109,9 +110,13 @@ internal fun resolveQuickTileConnectPlan(preconditions: QuickTilePreconditions):
 }
 
 /**
- * A failed precondition must not overwrite a start that raced in from the app meanwhile. A use case
- * that threw after its commit point, though, left CONNECTING for [target] with no service behind
- * it; that state belongs to this tap and has to become the error, or the tile stays "Connecting".
+ * A failed precondition must not overwrite a start that raced in from the app meanwhile. A Routes or
+ * Auto use case that threw after its commit point, though, left CONNECTING for [target] with no
+ * service behind it; that state belongs to this tap and has to become the error, or the tile stays
+ * "Connecting". ConnectVpnUseCase releases such a commit itself, so a Server CONNECTING is never this
+ * tap's: its use case threw before it committed (reading the server or its key), and the session was
+ * started meanwhile by the app or Always-on VPN. An error would take the state from under that live
+ * SshVpnService.
  */
 internal fun canPublishQuickTileStartFailure(
     state: VpnConnectionState,
@@ -120,9 +125,32 @@ internal fun canPublishQuickTileStartFailure(
 ): Boolean {
     if (canPublishVpnStartFailure(state)) return true
     return connectAttempted &&
+        target != VpnSessionOwner.SHADOW_SSH &&
         state.sessionOwner == target &&
         state.status == VpnConnectionStatus.CONNECTING
 }
+
+/**
+ * Why a Server start of the tile or Always-on VPN started nothing when the connection state does not
+ * say so: the session that owned the VPN did not let go in time, or a precondition failed while another
+ * session owned the state (ConnectVpnUseCase leaves a live owner's state alone). Null when the state
+ * tells: the start went ahead, a starting or running Server session was left alone, or the use case
+ * published its error.
+ */
+internal fun unpublishedServerStartFailure(result: ConnectVpnResult): String? = when (result) {
+    ConnectVpnResult.PreviousSessionActive -> SERVER_PREVIOUS_SESSION_ACTIVE
+    is ConnectVpnResult.Rejected -> result.message.takeUnless { result.published }
+    ConnectVpnResult.Started,
+    ConnectVpnResult.Skipped,
+    -> null
+}
+
+/** The tile's start of [owner] failed with [message]; the app opens on its tab, the log keeps why. */
+internal fun quickTileStartFailureDiagnostic(owner: VpnSessionOwner, message: String): String {
+    return "Quick settings tile: ${owner.diagnosticModeLabel()} failed to start: $message"
+}
+
+internal const val SERVER_PREVIOUS_SESSION_ACTIVE = "The previous connection is still stopping"
 
 /**
  * The tile's icon (System.dc.html): the shield with a check while connected, with an alert for "Check
