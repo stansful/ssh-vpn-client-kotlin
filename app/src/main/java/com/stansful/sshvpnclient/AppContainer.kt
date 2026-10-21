@@ -57,6 +57,7 @@ import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUse
 import com.stansful.sshvpnclient.vpn.AlwaysOnVpnStarter
 import com.stansful.sshvpnclient.vpn.LastVpnModeStarter
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
+import com.stansful.sshvpnclient.vpn.SshStopRequests
 import com.stansful.sshvpnclient.vpn.SmartConnectCatalogManager
 import com.stansful.sshvpnclient.vpn.Tun2SocksManager
 import com.stansful.sshvpnclient.vpn.VpnTunnelManager
@@ -188,6 +189,7 @@ class AppContainer(
 
     val sshConnectionManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { SshConnectionManager() }
     val vpnRuntimeLeaseRegistry by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { VpnRuntimeLeaseRegistry() }
+    val sshStopRequests = SshStopRequests()
     val vpnTunnelManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { VpnTunnelManager() }
     val tun2SocksManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { Tun2SocksManager() }
     val xrayConfigBuilder by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {

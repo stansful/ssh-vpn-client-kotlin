@@ -37,8 +37,8 @@ sealed interface ConnectVpnResult {
 
     /**
      * Nothing to start: a Server session is already starting or running and nobody asked it to stop
-     * (a second Connect tap, the quick tile), or another session took the VPN once the stopped
-     * Server session let go.
+     * (a second Connect tap, the quick tile), or, after a stopped Server session let go, another
+     * session took the VPN or the caller no longer wants the start.
      */
     data object Skipped : ConnectVpnResult
 
@@ -62,16 +62,17 @@ class ConnectVpnUseCase(
      *
      * [afterSshStop]: the caller has just asked SshVpnService to stop the running Server session (a
      * restart through another server or after an app-routing change), so this first waits for that
-     * session to let go. Without it a running Server session is left alone
-     * ([ConnectVpnResult.Skipped]).
+     * session to let go; [isStillWanted] is asked once it has (false: the user stopped the VPN
+     * meanwhile). Without it a running Server session is left alone ([ConnectVpnResult.Skipped]).
      */
     suspend operator fun invoke(
         preserveDiagnostics: Boolean = false,
         afterSshStop: Boolean = false,
+        isStillWanted: () -> Boolean = { true },
     ): ConnectVpnResult {
         if (afterSshStop) {
             if (!awaitStoppedSshSession()) return ConnectVpnResult.PreviousSessionActive
-            if (isTakenOver()) return ConnectVpnResult.Skipped
+            if (isTakenOver() || !isStillWanted()) return ConnectVpnResult.Skipped
         }
 
         // Checked after that wait, so a failure is published into the state the stopped session left.
@@ -91,7 +92,7 @@ class ConnectVpnUseCase(
         }
 
         // Again after the reads above: the switch below would stop a session started meanwhile.
-        if (afterSshStop && isTakenOver()) return ConnectVpnResult.Skipped
+        if (afterSshStop && (isTakenOver() || !isStillWanted())) return ConnectVpnResult.Skipped
         val stateBeforeSwitch = vpnConnectionRepository.currentState
         if (stateBeforeSwitch.activeTransport == VpnTransportType.XRAY) {
             val disconnectIntent = if (

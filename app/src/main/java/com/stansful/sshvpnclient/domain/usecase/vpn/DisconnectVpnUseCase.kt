@@ -12,7 +12,11 @@ class DisconnectVpnUseCase(
     private val context: Context,
     private val vpnConnectionRepository: VpnConnectionRepository,
 ) {
-    operator fun invoke() {
+    /**
+     * Stops whichever mode owns the VPN. [forRestart]: a Server-mode restart's own stop of its
+     * session, which SshVpnService does not count as the user's (see SshStopRequests).
+     */
+    operator fun invoke(forRestart: Boolean = false) {
         val appContext = context.applicationContext
         when (vpnConnectionRepository.currentState.sessionOwner) {
             VpnSessionOwner.SMART_CONNECT ->
@@ -20,11 +24,11 @@ class DisconnectVpnUseCase(
             VpnSessionOwner.OPEN_SOURCE ->
                 appContext.startService(OpenSourceVpnService.disconnectIntent(appContext))
             VpnSessionOwner.SHADOW_SSH ->
-                appContext.startService(SshVpnService.disconnectIntent(appContext))
+                appContext.startService(SshVpnService.disconnectIntent(appContext, forRestart))
             null -> if (vpnConnectionRepository.currentState.activeTransport == VpnTransportType.XRAY) {
                 appContext.startService(OpenSourceVpnService.disconnectIntent(appContext))
             } else {
-                appContext.startService(SshVpnService.disconnectIntent(appContext))
+                appContext.startService(SshVpnService.disconnectIntent(appContext, forRestart))
             }
         }
     }

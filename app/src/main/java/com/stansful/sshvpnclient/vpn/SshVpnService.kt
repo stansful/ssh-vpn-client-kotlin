@@ -192,7 +192,12 @@ class SshVpnService : android.net.VpnService() {
                     lease = lease,
                 )
             }
-            ACTION_DISCONNECT -> disconnect(startId)
+            ACTION_DISCONNECT -> {
+                // Any stop but a restart's own: a restart still waiting for this session must not
+                // reconnect against it.
+                if (!isRestartStop(intent)) appContainer.sshStopRequests.record()
+                disconnect(startId)
+            }
             android.net.VpnService.SERVICE_INTERFACE -> handleAlwaysOnStart(startId)
         }
         return START_NOT_STICKY
@@ -289,6 +294,7 @@ class SshVpnService : android.net.VpnService() {
 
     override fun onRevoke() {
         userRequestedDisconnect = true
+        appContainer.sshStopRequests.record()
         connectionJob?.cancel()
         appContainer.vpnConnectionRepository.appendDiagnostic("VPN permission revoked by Android")
         disconnect(lastStartId)
@@ -1562,6 +1568,7 @@ class SshVpnService : android.net.VpnService() {
         private const val ACTION_DISCONNECT = "com.stansful.sshvpnclient.action.DISCONNECT"
         private const val EXTRA_PRESERVE_DIAGNOSTICS =
             "com.stansful.sshvpnclient.extra.PRESERVE_DIAGNOSTICS"
+        private const val EXTRA_RESTART_STOP = "com.stansful.sshvpnclient.extra.RESTART_STOP"
         private const val CHANNEL_ID = "ssh_vpn_connection"
         private const val NOTIFICATION_ID = 3001
         private val NOTIFIED_STATUSES = setOf(
@@ -1595,8 +1602,19 @@ class SshVpnService : android.net.VpnService() {
                 .putExtra(EXTRA_PRESERVE_DIAGNOSTICS, preserveDiagnostics)
         }
 
-        fun disconnectIntent(context: Context): Intent {
-            return Intent(context, SshVpnService::class.java).setAction(ACTION_DISCONNECT)
+        /**
+         * [forRestart]: a Server-mode restart's own stop, which is not counted in [SshStopRequests]
+         * (every other stop is, so that a waiting restart drops its reconnect).
+         */
+        fun disconnectIntent(context: Context, forRestart: Boolean = false): Intent {
+            return Intent(context, SshVpnService::class.java)
+                .setAction(ACTION_DISCONNECT)
+                .putExtra(EXTRA_RESTART_STOP, forRestart)
+        }
+
+        /** Whether a disconnect [intent] is a Server-mode restart's own stop (see [disconnectIntent]). */
+        internal fun isRestartStop(intent: Intent): Boolean {
+            return intent.getBooleanExtra(EXTRA_RESTART_STOP, false)
         }
     }
 }
