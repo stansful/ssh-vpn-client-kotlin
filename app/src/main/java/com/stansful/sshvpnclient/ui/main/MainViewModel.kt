@@ -23,6 +23,7 @@ import com.stansful.sshvpnclient.domain.usecase.vpn.ConnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.DisconnectVpnUseCase
 import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUseCase
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
+import com.stansful.sshvpnclient.vpn.SshStopRequests
 import com.stansful.sshvpnclient.vpn.canPublishVpnStartFailure
 import com.stansful.sshvpnclient.vpn.SshTerminalSession
 import java.util.ArrayDeque
@@ -146,6 +147,7 @@ class MainViewModel(
     private val sshConnectionManager: SshConnectionManager,
     observeVpnConnectionStateUseCase: ObserveVpnConnectionStateUseCase,
     private val appUpdateCoordinator: AppUpdateCoordinator,
+    private val sshStopRequests: SshStopRequests,
 ) : ViewModel() {
     private val showNoSelectedAppsDialog = MutableStateFlow(false)
     private val tunnelCheck = MutableStateFlow(TunnelCheckState())
@@ -495,8 +497,9 @@ class MainViewModel(
      * short pause, reconnect through the server selected at that moment. The reconnect waits for the
      * stopped session to let go (see [ConnectVpnUseCase]). A restart that already began finishes
      * first; a pending one is replaced by the newest request; [disconnect] and [connect] cancel
-     * either. Intent is re-checked after each pause: the debounce drops a restart whose session has
-     * ended meanwhile, the reconnect pause one whose VPN another mode has taken over.
+     * either. Intent is re-checked after each pause and once the old session has let go: a restart
+     * is dropped when its session has ended, another mode has taken the VPN over, or the user has
+     * stopped the session since the request (the notification, the quick tile; [SshStopRequests]).
      */
     private fun restartSession(settings: AppSettings) {
         if (settings.requiresSelectedAppsButHasNone()) {
@@ -509,10 +512,14 @@ class MainViewModel(
         }
         if (!vpnState.value.canDisconnect()) return
 
+        // While the old session tears down its state still shows it running: only this count tells
+        // the restart's own stop from one the user made.
+        val stopRequestsAtRequest = sshStopRequests.current
+        val isStillWanted = { sshStopRequests.current == stopRequestsAtRequest }
         sessionRestartJob = viewModelScope.launch {
             delay(SETTINGS_CHANGE_DEBOUNCE_MS)
             // The session may have ended meanwhile (notification Stop, quick tile, another mode).
-            if (!vpnConnectionRepository.currentState.canDisconnect()) return@launch
+            if (!isStillWanted() || !vpnConnectionRepository.currentState.canDisconnect()) return@launch
             val latestSettings = appSettingsRepository.settings.value
             if (latestSettings.requiresSelectedAppsButHasNone()) {
                 showNoSelectedAppsDialog.value = true
@@ -521,10 +528,12 @@ class MainViewModel(
             val restartJob = coroutineContext.job
             sessionRestartStarted = true
             try {
-                disconnectVpnUseCase()
+                disconnectVpnUseCase(forRestart = true)
                 delay(SETTINGS_RECONNECT_DELAY_MS)
-                if (!canContinueServerRestart(vpnConnectionRepository.currentState)) return@launch
-                reconnectAfterRestart()
+                if (!isStillWanted() || !canContinueServerRestart(vpnConnectionRepository.currentState)) {
+                    return@launch
+                }
+                reconnectAfterRestart(isStillWanted)
             } finally {
                 // A cancelled restart must not clear the flag of the restart that replaced it.
                 if (sessionRestartJob === restartJob) sessionRestartStarted = false
@@ -532,9 +541,9 @@ class MainViewModel(
         }
     }
 
-    private suspend fun reconnectAfterRestart() {
+    private suspend fun reconnectAfterRestart(isStillWanted: () -> Boolean) {
         val result = try {
-            connectVpnUseCase(preserveDiagnostics = true, afterSshStop = true)
+            connectVpnUseCase(preserveDiagnostics = true, afterSshStop = true, isStillWanted = isStillWanted)
         } catch (cancellation: CancellationException) {
             // Disconnect (or a cleared ViewModel) cancelled the restart: publish nothing.
             throw cancellation

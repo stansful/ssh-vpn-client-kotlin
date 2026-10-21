@@ -39,6 +39,7 @@ import com.stansful.sshvpnclient.domain.usecase.vpn.ObserveVpnConnectionStateUse
 import com.stansful.sshvpnclient.vpn.OpenSourceVpnService
 import com.stansful.sshvpnclient.vpn.SmartConnectVpnService
 import com.stansful.sshvpnclient.vpn.SshConnectionManager
+import com.stansful.sshvpnclient.vpn.SshStopRequests
 import com.stansful.sshvpnclient.vpn.SshVpnService
 import java.time.Duration
 import kotlinx.coroutines.CompletableDeferred
@@ -48,6 +49,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -71,6 +73,9 @@ class MainViewModelSessionTest {
     private lateinit var configs: FakeSshConfigRepository
     private val store = ViewModelStore()
     private val startedServices = mutableListOf<Intent>()
+
+    /** What SshVpnService records for every stop but a restart's own (notification, tile, Home). */
+    private val stopRequests = SshStopRequests()
 
     @Before
     fun setUp() {
@@ -173,6 +178,54 @@ class MainViewModelSessionTest {
         assertTrue(xrayServiceCommands().isEmpty())
         assertTrue(vpn.errors.isEmpty())
         assertNull(viewModel.notice.value)
+    }
+
+    @Test
+    fun `a stop from the notification while the restart waits for the old session drops the reconnect`() {
+        val viewModel = createViewModel()
+
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(DEBOUNCE_AND_PAUSE_MS + 1_000L)
+        // The old session is still tearing down and its state still shows it connected.
+        assertEquals(SSH_SESSION_ON_A, vpn.currentState)
+        stopRequests.record()
+        vpn.setDisconnected()
+        idleFor(15_000L)
+
+        assertEquals(VpnConnectionStatus.DISCONNECTED, vpn.currentState.status)
+        assertTrue(sshConnectStarts().isEmpty())
+        assertTrue(vpn.transitions.none { it.startsWith("reconnecting") || it.startsWith("connecting") })
+        assertTrue(vpn.errors.isEmpty())
+        assertNull(viewModel.notice.value)
+    }
+
+    @Test
+    fun `a stop from the quick tile before the restart's own stop drops the restart`() {
+        val viewModel = createViewModel()
+
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(100L)
+        stopRequests.record()
+        idleFor(15_000L)
+
+        assertTrue(sshConnectStarts().isEmpty())
+        assertTrue(vpn.transitions.isEmpty())
+        assertNull(viewModel.notice.value)
+    }
+
+    @Test
+    fun `only the restart's own stop is marked as such for the service`() {
+        val viewModel = createViewModel()
+
+        viewModel.reconnectThroughSelectedServer()
+        idleFor(MainViewModel.SETTINGS_CHANGE_DEBOUNCE_MS)
+        assertTrue(SshVpnService.isRestartStop(sshIntents(SSH_ACTION_DISCONNECT).single()))
+
+        viewModel.disconnect()
+        idleFor(0L)
+        val stops = sshIntents(SSH_ACTION_DISCONNECT)
+        assertEquals(2, stops.size)
+        assertFalse(SshVpnService.isRestartStop(stops.last()))
     }
 
     @Test
@@ -468,6 +521,7 @@ class MainViewModelSessionTest {
                 sshConnectionManager = SshConnectionManager(),
                 observeVpnConnectionStateUseCase = ObserveVpnConnectionStateUseCase(vpn),
                 appUpdateCoordinator = NoUpdates,
+                sshStopRequests = stopRequests,
             ) as T
         }
         val viewModel = ViewModelProvider(store, factory)[MainViewModel::class.java]

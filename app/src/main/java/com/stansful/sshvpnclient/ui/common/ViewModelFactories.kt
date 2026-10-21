@@ -56,6 +56,7 @@ class AppViewModelFactory(
                 sshConnectionManager = container.sshConnectionManager,
                 observeVpnConnectionStateUseCase = container.observeVpnConnectionStateUseCase,
                 appUpdateCoordinator = container.appUpdateCoordinator,
+                sshStopRequests = container.sshStopRequests,
             )
 
             modelClass.isAssignableFrom(AppPickerViewModel::class.java) -> AppPickerViewModel(
