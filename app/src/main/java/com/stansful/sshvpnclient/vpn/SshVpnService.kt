@@ -490,8 +490,9 @@ class SshVpnService : android.net.VpnService() {
 
             var attempt = 1
             var everConnected = false
-            // Picks up the host key pinned on first use, so later attempts of this run check it too.
-            var sessionConfig: SshConfig = config
+            // The fingerprint each attempt checks: the key pinned on first use, or what is saved for
+            // the server when a reconnect starts.
+            val runHostKey = SshRunHostKey(config.fingerprint)
             val retryPolicy = SshRetryPolicy()
             val supervisor = ReconnectSupervisor(
                 initialBackoffMs = INITIAL_RECONNECT_DELAY_MS,
@@ -508,6 +509,7 @@ class SshVpnService : android.net.VpnService() {
                         connectionRepository.appendDiagnostic("Reconnect attempt $attempt starting")
                     }
                     if (!publishedReconnect) break
+                    followSavedHostKey(runHostKey, config.id, runId)
                 }
 
                 var activeConnectionInterrupted = false
@@ -519,7 +521,7 @@ class SshVpnService : android.net.VpnService() {
                     var attemptFailed = true
                     val connection = try {
                         connectSingleAttempt(
-                            config = sessionConfig,
+                            config = config.copy(fingerprint = runHostKey.fingerprint),
                             privateKey = privateKey,
                             appSettings = appSettings,
                             runId = runId,
@@ -531,7 +533,7 @@ class SshVpnService : android.net.VpnService() {
                             wakeHold = attemptWakeHold,
                             onAuthenticated = { hostKey ->
                                 retryPolicy.onAuthenticated()
-                                sessionConfig = trustHostKey(sessionConfig, hostKey, runId)
+                                trustHostKey(config, hostKey, runHostKey, runId)
                             },
                         ).also { attemptFailed = false }
                     } finally {
@@ -760,7 +762,13 @@ class SshVpnService : android.net.VpnService() {
         val sshSession = established.session
         ensureConnectionStillWanted(runId, commandId)
         // Signed in: whatever happens to the VPN setup below, the key is known good from here on.
-        onAuthenticated(established.hostKey)
+        try {
+            onAuthenticated(established.hostKey)
+        } catch (error: SshHostKeyChangedException) {
+            // A different key was pinned while signing in: this session never carries traffic.
+            appContainer.sshConnectionManager.disconnectIfCurrent(sshSession)
+            throw error
+        }
         ensureConnectionStillWanted(runId, commandId)
         if (underlyingNetworkMonitor.currentNetwork() != selectedNetwork) {
             appContainer.sshConnectionManager.disconnectIfCurrent(sshSession)
@@ -833,26 +841,35 @@ class SshVpnService : android.net.VpnService() {
     }
 
     /**
-     * Runs once a session has signed in. A key trusted on first use is pinned to the server now; a
-     * fingerprint saved in the meantime is never overwritten, and later attempts of this run check
-     * whatever ends up pinned (the observed key if saving failed). Returns the config to connect with.
+     * Runs once a session has signed in. A key trusted on first use is pinned to the server now, and later
+     * attempts of this run check whatever ends up saved. A fingerprint saved in the meantime is never
+     * overwritten; if it names another key, this fails with [SshHostKeyChangedException] before the
+     * session carries any traffic.
      */
-    private suspend fun trustHostKey(config: SshConfig, hostKey: SshHostKeyTrust, runId: Long): SshConfig {
-        // The key matched or is about to be pinned: an earlier "host key changed" no longer applies.
+    private suspend fun trustHostKey(
+        config: SshConfig,
+        hostKey: SshHostKeyTrust,
+        runHostKey: SshRunHostKey,
+        runId: Long,
+    ) {
+        if (hostKey is SshHostKeyTrust.FirstUse) pinFirstUseHostKey(config, hostKey, runHostKey, runId)
+        // The key matched or is pinned now: an earlier "host key changed" no longer applies.
         appContainer.sshHostKeyChangeRepository.clear(config.id)
-        if (hostKey !is SshHostKeyTrust.FirstUse) return config
+    }
+
+    private suspend fun pinFirstUseHostKey(
+        config: SshConfig,
+        hostKey: SshHostKeyTrust.FirstUse,
+        runHostKey: SshRunHostKey,
+        runId: Long,
+    ) {
         val repository = appContainer.sshConfigRepository
         val fingerprint = hostKey.fingerprint
+        var pinned = false
         val saved = try {
-            if (repository.pinFingerprintIfAbsent(config.id, fingerprint)) {
-                appendConnectionDiagnostic(runId, "SSH host key pinned on first use: $fingerprint")
-                fingerprint
-            } else {
-                // Pinned meanwhile (the editor, another run) or the server was deleted: keep what is saved.
-                repository.getById(config.id)?.fingerprint?.takeIf(String::isNotBlank)?.also {
-                    appendConnectionDiagnostic(runId, "SSH host key not pinned: this server already has a fingerprint")
-                }
-            }
+            pinned = repository.pinFingerprintIfAbsent(config.id, fingerprint)
+            // Not pinned: saved meanwhile (the editor, another run) or the server was deleted.
+            if (pinned) fingerprint else repository.getById(config.id)?.fingerprint
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -863,7 +880,59 @@ class SshVpnService : android.net.VpnService() {
             )
             null
         }
-        return config.copy(fingerprint = saved ?: fingerprint)
+        if (!runHostKey.afterFirstUse(hostKey, saved)) {
+            val pinnedMeanwhile = saved.orEmpty().trim()
+            // Same lines as the check during key exchange, so Activity shows the mismatch and the key.
+            appendConnectionDiagnostic(runId, "Server host key fingerprint: $fingerprint")
+            appendConnectionDiagnostic(
+                runId,
+                "Fingerprint mismatch: a different fingerprint was saved for this server while signing in; " +
+                    "stopping before the VPN carries traffic",
+            )
+            throw SshHostKeyChangedException(
+                serverName = config.name.ifBlank { config.host },
+                pinnedFingerprint = pinnedMeanwhile,
+                observedFingerprint = fingerprint,
+            )
+        }
+        when {
+            pinned -> appendConnectionDiagnostic(runId, "SSH host key pinned on first use: $fingerprint")
+            !saved.isNullOrBlank() ->
+                appendConnectionDiagnostic(runId, "SSH host key not pinned: this server already has a fingerprint")
+        }
+    }
+
+    /**
+     * Before a reconnect: the attempt checks the fingerprint saved for the server now, so one cleared or
+     * replaced in the editor while the run is up applies from here on. Keeps the current one when the
+     * server is gone or cannot be read.
+     */
+    private suspend fun followSavedHostKey(runHostKey: SshRunHostKey, configId: String, runId: Long) {
+        val saved = try {
+            appContainer.sshConfigRepository.getById(configId) ?: return
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            appendConnectionDiagnostic(
+                runId,
+                "Could not read the saved SSH host key: ${error.message ?: error::class.java.simpleName}; " +
+                    "checking the one this run used",
+            )
+            return
+        }
+        val before = runHostKey.fingerprint
+        runHostKey.onSavedFingerprintRead(saved.fingerprint)
+        when (runHostKey.fingerprint) {
+            before -> Unit
+            null -> appendConnectionDiagnostic(
+                runId,
+                "SSH host key fingerprint was cleared for this server; the next sign-in pins the server's key again",
+            )
+            else -> appendConnectionDiagnostic(
+                runId,
+                "SSH host key fingerprint changed in the server settings; checking the saved one",
+            )
+        }
     }
 
     /** Keeps the key a server presented instead of its pinned one, for "Accept new key" in the editor. */

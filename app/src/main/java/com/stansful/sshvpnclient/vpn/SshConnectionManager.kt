@@ -850,8 +850,24 @@ sealed interface SshHostKeyTrust {
     /** The key matched the fingerprint saved for the server. */
     data class Pinned(override val fingerprint: String) : SshHostKeyTrust
 
-    /** No fingerprint was saved: the key was trusted for this session only and should be pinned now. */
-    data class FirstUse(override val fingerprint: String) : SshHostKeyTrust
+    /**
+     * No fingerprint was saved: the key was trusted for this session only and should be pinned now.
+     * Equal by [fingerprint].
+     */
+    class FirstUse internal constructor(key: ByteArray) : SshHostKeyTrust {
+        private val key = key.copyOf()
+
+        override val fingerprint: String = openSshSha256Fingerprint(key)
+
+        /** Whether [savedFingerprint], in any form the fingerprint field takes (SHA256, MD5), is this key. */
+        fun matches(savedFingerprint: String): Boolean = matchesSshHostKeyFingerprint(savedFingerprint, key)
+
+        override fun equals(other: Any?): Boolean = other is FirstUse && other.fingerprint == fingerprint
+
+        override fun hashCode(): Int = fingerprint.hashCode()
+
+        override fun toString(): String = "FirstUse($fingerprint)"
+    }
 }
 
 /**
@@ -910,7 +926,7 @@ internal class FingerprintHostKeyRepository(
                 "WARNING: SSH host identity is not verified because no fingerprint is configured; " +
                     "trusting this key on first use, it is pinned once sign-in succeeds",
             )
-            verdict = HostKeyVerdict.Accepted(SshHostKeyTrust.FirstUse(actualFingerprint))
+            verdict = HostKeyVerdict.Accepted(SshHostKeyTrust.FirstUse(key))
             return HostKeyRepository.OK
         }
 

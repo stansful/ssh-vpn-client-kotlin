@@ -74,10 +74,9 @@ class SshConnectionManagerTest {
         val repository = FingerprintHostKeyRepository(expectedFingerprint = null, log = messages::add)
 
         assertEquals(HostKeyRepository.OK, repository.check("example.com", hostKey))
-        assertEquals(
-            HostKeyVerdict.Accepted(SshHostKeyTrust.FirstUse(openSshSha256(hostKey))),
-            repository.verdict,
-        )
+        val trust = (repository.verdict as HostKeyVerdict.Accepted).trust
+        assertTrue(trust is SshHostKeyTrust.FirstUse)
+        assertEquals(openSshSha256(hostKey), trust.fingerprint)
         assertTrue(messages.any { it.contains("host identity is not verified") })
         assertTrue(messages.contains("Server host key fingerprint: ${openSshSha256(hostKey)}"))
     }
