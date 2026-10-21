@@ -1,9 +1,9 @@
 package com.stansful.sshvpnclient.vpn
 
-import com.stansful.sshvpnclient.data.local.LastVpnSessionStore
 import com.stansful.sshvpnclient.domain.model.VpnSessionOwner
 import com.stansful.sshvpnclient.domain.repository.VpnConnectionRepository
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,12 +22,16 @@ import kotlinx.coroutines.launch
  *
  * It runs in the application scope, not the receiving service's: ConnectVpnUseCase stops the Routes and
  * Auto services, which may be the one that received the start.
+ *
+ * [lastOwner] reads LastVpnSessionStore; [mainDispatcher] is the main thread the services call from
+ * (replaced in JVM tests).
  */
 internal class AlwaysOnVpnStarter(
     private val applicationScope: CoroutineScope,
     private val vpnConnectionRepository: VpnConnectionRepository,
-    private val lastVpnSessionStore: LastVpnSessionStore,
-    private val lastVpnModeStarter: LastVpnModeStarter,
+    private val lastOwner: () -> VpnSessionOwner?,
+    private val modeStarter: VpnModeStarter,
+    private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
 ) {
     /** Main thread only. */
     private var inFlight: Job? = null
@@ -52,7 +56,7 @@ internal class AlwaysOnVpnStarter(
      */
     fun start(onFinished: () -> Unit) {
         val previous = inFlight
-        inFlight = applicationScope.launch(Dispatchers.Main.immediate) {
+        inFlight = applicationScope.launch(mainDispatcher) {
             try {
                 if (previous?.isActive == true) {
                     // Android may deliver its start twice (AOSP says so for a VPN that is still setting
@@ -69,20 +73,15 @@ internal class AlwaysOnVpnStarter(
 
     private suspend fun startLastMode() {
         try {
-            val owner = startTarget(lastVpnSessionStore.lastOwner.value) ?: return
-            val check = lastVpnModeStarter.check(owner)
+            val owner = startTarget(lastOwner()) ?: return
+            val check = modeStarter.check(owner)
             // The lookups suspended: the app or the tile may have started a session meanwhile.
             if (startTarget(owner) == null) return
             when (val plan = resolveQuickTileConnectPlan(check.preconditions)) {
                 is QuickTileConnectPlan.Connect -> {
-                    val failure = lastVpnModeStarter.connect(plan.owner, check.failureConfigId)
-                    log(
-                        if (failure == null) {
-                            alwaysOnStartedDiagnostic(plan.owner)
-                        } else {
-                            alwaysOnFailedDiagnostic(plan.owner, failure)
-                        },
-                    )
+                    val failure = modeStarter.connect(plan.owner, check.failureConfigId)
+                    // A use case that gave up returns normally too: the state it left says what happened.
+                    log(alwaysOnConnectDiagnostic(plan.owner, failure, vpnConnectionRepository.currentState))
                 }
                 is QuickTileConnectPlan.OpenApp -> log(alwaysOnSkippedDiagnostic(owner, plan.reason))
             }

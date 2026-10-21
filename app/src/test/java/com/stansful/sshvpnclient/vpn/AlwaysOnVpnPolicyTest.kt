@@ -222,6 +222,72 @@ class AlwaysOnVpnPolicyTest {
     }
 
     @Test
+    fun `a start is logged only when the mode's session is up`() {
+        listOf(
+            VpnConnectionStatus.CONNECTING,
+            VpnConnectionStatus.CONNECTED,
+            VpnConnectionStatus.RECONNECTING,
+        ).forEach { status ->
+            assertEquals(
+                "$status",
+                "Always-on VPN: Auto started by Android",
+                alwaysOnConnectDiagnostic(
+                    VpnSessionOwner.SMART_CONNECT,
+                    failure = null,
+                    stateAfter = liveState(VpnSessionOwner.SMART_CONNECT, status),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `a use case that returned without starting is not logged as a start`() {
+        assertEquals(
+            "Always-on VPN: Server not started, Routes took over",
+            alwaysOnConnectDiagnostic(
+                VpnSessionOwner.SHADOW_SSH,
+                failure = null,
+                stateAfter = liveState(VpnSessionOwner.OPEN_SOURCE, VpnConnectionStatus.CONNECTING),
+            ),
+        )
+        assertEquals(
+            "Always-on VPN: Server not started",
+            alwaysOnConnectDiagnostic(VpnSessionOwner.SHADOW_SSH, failure = null, stateAfter = VpnConnectionState()),
+        )
+        assertEquals(
+            "Always-on VPN: Server not started",
+            alwaysOnConnectDiagnostic(
+                VpnSessionOwner.SHADOW_SSH,
+                failure = null,
+                stateAfter = liveState(VpnSessionOwner.SHADOW_SSH, VpnConnectionStatus.DISCONNECTING),
+            ),
+        )
+    }
+
+    @Test
+    fun `the error a use case published or threw is the logged failure`() {
+        val published = VpnConnectionState(
+            status = VpnConnectionStatus.ERROR,
+            activeConfigId = "route",
+            errorMessage = "No public route selected",
+        )
+
+        assertEquals(
+            "Always-on VPN: Routes failed to start: No public route selected",
+            alwaysOnConnectDiagnostic(VpnSessionOwner.OPEN_SOURCE, failure = null, stateAfter = published),
+        )
+        // The use case threw: its message wins over whatever state it left.
+        assertEquals(
+            "Always-on VPN: Routes failed to start: boom",
+            alwaysOnConnectDiagnostic(
+                VpnSessionOwner.OPEN_SOURCE,
+                failure = "boom",
+                stateAfter = liveState(VpnSessionOwner.OPEN_SOURCE, VpnConnectionStatus.CONNECTING),
+            ),
+        )
+    }
+
+    @Test
     fun `skipped start names the mode and what to fix for every reason`() {
         val texts = QuickTileOpenAppReason.entries.map { reason ->
             alwaysOnSkippedDiagnostic(VpnSessionOwner.OPEN_SOURCE, reason)
