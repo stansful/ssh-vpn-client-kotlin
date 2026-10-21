@@ -55,13 +55,28 @@ class SshConfigDaoFingerprintTest {
     }
 
     @Test
-    fun `update fingerprint replaces a saved one`() = runBlocking {
+    fun `replace fingerprint replaces the saved one while it is still the expected pin`() = runBlocking {
         dao.upsert(configEntity(id = "user", fingerprint = USER_KEY))
+        dao.upsert(configEntity(id = "padded", fingerprint = " $USER_KEY "))
 
-        assertEquals(1, dao.updateFingerprint("user", OTHER_KEY))
-        assertEquals(0, dao.updateFingerprint("missing", OTHER_KEY))
+        assertEquals(1, dao.replaceFingerprint("user", expected = USER_KEY, fingerprint = OTHER_KEY))
+        assertEquals(1, dao.replaceFingerprint("padded", expected = USER_KEY, fingerprint = OTHER_KEY))
+        assertEquals(0, dao.replaceFingerprint("missing", expected = USER_KEY, fingerprint = OTHER_KEY))
 
         assertEquals(OTHER_KEY, dao.getById("user")?.fingerprint)
+        assertEquals(OTHER_KEY, dao.getById("padded")?.fingerprint)
+    }
+
+    @Test
+    fun `replace fingerprint leaves a pin changed since the warning alone`() = runBlocking {
+        dao.upsert(configEntity(id = "changed", fingerprint = FIRST_KEY))
+        dao.upsert(configEntity(id = "cleared", fingerprint = null))
+
+        assertEquals(0, dao.replaceFingerprint("changed", expected = USER_KEY, fingerprint = OTHER_KEY))
+        assertEquals(0, dao.replaceFingerprint("cleared", expected = USER_KEY, fingerprint = OTHER_KEY))
+
+        assertEquals(FIRST_KEY, dao.getById("changed")?.fingerprint)
+        assertNull(dao.getById("cleared")?.fingerprint)
     }
 
     @Test

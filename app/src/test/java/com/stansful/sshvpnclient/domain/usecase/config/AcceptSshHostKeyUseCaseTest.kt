@@ -31,6 +31,18 @@ class AcceptSshHostKeyUseCaseTest {
     }
 
     @Test
+    fun `accepting over a fingerprint changed since the warning saves nothing and drops the stale warning`() =
+        runBlocking {
+            val configs = RecordingConfigs(existing = setOf("vps"), saved = mapOf("vps" to OTHER_KEY))
+            changes.record(change)
+
+            assertFalse(AcceptSshHostKeyUseCase(configs, changes)(change))
+
+            assertEquals(emptyList<Pair<String, String>>(), configs.replaced)
+            assertNull(changes.observe("vps").first())
+        }
+
+    @Test
     fun `accepting for a deleted server reports it and still drops the stale warning`() = runBlocking {
         val configs = RecordingConfigs(existing = emptySet())
         changes.record(change)
@@ -41,11 +53,14 @@ class AcceptSshHostKeyUseCaseTest {
     }
 
     /** Only the host key calls matter here. */
-    private class RecordingConfigs(private val existing: Set<String>) : SshConfigRepository {
+    private class RecordingConfigs(
+        private val existing: Set<String>,
+        private val saved: Map<String, String> = existing.associateWith { OLD_KEY },
+    ) : SshConfigRepository {
         val replaced = mutableListOf<Pair<String, String>>()
 
-        override suspend fun replaceFingerprint(id: String, fingerprint: String): Boolean {
-            if (id !in existing) return false
+        override suspend fun replaceFingerprint(id: String, expected: String, fingerprint: String): Boolean {
+            if (id !in existing || saved[id] != expected) return false
             replaced += id to fingerprint
             return true
         }
@@ -68,5 +83,6 @@ class AcceptSshHostKeyUseCaseTest {
     private companion object {
         const val OLD_KEY = "SHA256:atzfmdcrqQzoXZfKHLarePDyMw/G5NYfJ3h1eHUVS9g"
         const val NEW_KEY = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+        const val OTHER_KEY = "SHA256:LCa0a2j/xo/5m0U8HTBBNBNCLXBkg7+g+YpeiGJm564"
     }
 }

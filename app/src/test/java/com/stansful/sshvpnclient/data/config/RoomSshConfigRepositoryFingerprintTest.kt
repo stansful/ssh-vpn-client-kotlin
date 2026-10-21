@@ -70,11 +70,22 @@ class RoomSshConfigRepositoryFingerprintTest {
         val dao = FakeSshConfigDao(configEntity(id = "vps", fingerprint = USER_KEY))
         val repository = repository(dao)
 
-        assertTrue(repository.replaceFingerprint("vps", FIRST_KEY))
-        assertFalse(repository.replaceFingerprint("vps", ""))
-        assertFalse(repository.replaceFingerprint("deleted", FIRST_KEY))
+        assertFalse(repository.replaceFingerprint("vps", expected = USER_KEY, fingerprint = ""))
+        assertFalse(repository.replaceFingerprint("vps", expected = " ", fingerprint = FIRST_KEY))
+        assertFalse(repository.replaceFingerprint("deleted", expected = USER_KEY, fingerprint = FIRST_KEY))
+        assertTrue(repository.replaceFingerprint("vps", expected = " $USER_KEY ", fingerprint = " $FIRST_KEY "))
 
         assertEquals(FIRST_KEY, dao.entity("vps")?.fingerprint)
+        assertEquals(listOf(Triple("deleted", USER_KEY, FIRST_KEY), Triple("vps", USER_KEY, FIRST_KEY)), dao.replaceCalls)
+    }
+
+    @Test
+    fun `accepting never overwrites a fingerprint changed since the warning`() = runBlocking {
+        val dao = FakeSshConfigDao(configEntity(id = "vps", fingerprint = OTHER_KEY))
+
+        assertFalse(repository(dao).replaceFingerprint("vps", expected = USER_KEY, fingerprint = FIRST_KEY))
+
+        assertEquals(OTHER_KEY, dao.entity("vps")?.fingerprint)
     }
 
     @Test
@@ -126,13 +137,15 @@ class RoomSshConfigRepositoryFingerprintTest {
     private companion object {
         const val FIRST_KEY = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
         const val USER_KEY = "SHA256:atzfmdcrqQzoXZfKHLarePDyMw/G5NYfJ3h1eHUVS9g"
+        const val OTHER_KEY = "SHA256:LCa0a2j/xo/5m0U8HTBBNBNCLXBkg7+g+YpeiGJm564"
     }
 }
 
-/** Mirrors the SQL of [SshConfigDao.pinFingerprintIfAbsent] and [SshConfigDao.updateFingerprint]. */
+/** Mirrors the SQL of [SshConfigDao.pinFingerprintIfAbsent] and [SshConfigDao.replaceFingerprint]. */
 private class FakeSshConfigDao(vararg initial: SshConfigEntity) : SshConfigDao() {
     private val entities = initial.associateBy(SshConfigEntity::id).toMutableMap()
     val pinCalls = mutableListOf<Pair<String, String>>()
+    val replaceCalls = mutableListOf<Triple<String, String, String>>()
 
     /** Runs inside [upsertKeepingFingerprint] before its read: a write landing between the two steps. */
     var beforeKeepingUpsert: suspend () -> Unit = {}
@@ -152,8 +165,10 @@ private class FakeSshConfigDao(vararg initial: SshConfigEntity) : SshConfigDao()
         return 1
     }
 
-    override suspend fun updateFingerprint(id: String, fingerprint: String): Int {
+    override suspend fun replaceFingerprint(id: String, expected: String, fingerprint: String): Int {
+        replaceCalls += Triple(id, expected, fingerprint)
         val entity = entities[id] ?: return 0
+        if (entity.fingerprint?.trim() != expected) return 0
         entities[id] = entity.copy(fingerprint = fingerprint)
         return 1
     }
