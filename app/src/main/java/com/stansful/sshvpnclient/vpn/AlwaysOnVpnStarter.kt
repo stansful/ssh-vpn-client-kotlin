@@ -33,6 +33,20 @@ internal class AlwaysOnVpnStarter(
     private var inFlight: Job? = null
 
     /**
+     * Runs the receiving service's startForeground(). Android allowlists the app for a moment when it
+     * starts it, so this normally succeeds; on a build that refuses a foreground start from the
+     * background, the start goes on without the notice (the mode's own start then fails and is logged)
+     * instead of crashing the app at every unlock.
+     */
+    fun enterForeground(startForeground: () -> Unit) {
+        try {
+            startForeground()
+        } catch (error: Exception) {
+            log("Always-on VPN: could not show the notification: ${error.message ?: error::class.java.simpleName}")
+        }
+    }
+
+    /**
      * Called on the main thread by the service Android started. [onFinished] runs on the main thread once
      * the mode was started or the start was dropped; the service decides there whether to stop again.
      */
