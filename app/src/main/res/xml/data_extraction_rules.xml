@@ -1,9 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 12+: nothing the app stores leaves the device, neither to a cloud backup nor to a new
+    phone during device-to-device transfer (allowBackup="false" does not stop the latter).
+
+    Secrets are encrypted with a key that lives in the Android Keystore, and Keystore keys are never
+    copied. A transferred keyset, ciphertexts, database or migration marker would arrive without
+    that key: every saved password and key would be unreadable on the new phone, and rows pointing
+    at them would be dropped. Starting empty is the honest outcome, so every domain is excluded.
+-->
 <data-extraction-rules>
     <cloud-backup>
-        <exclude domain="sharedpref" path="ssh_vpn_secrets.xml" />
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="device_root" path="." />
+        <exclude domain="device_file" path="." />
+        <exclude domain="device_database" path="." />
+        <exclude domain="device_sharedpref" path="." />
     </cloud-backup>
     <device-transfer>
-        <exclude domain="sharedpref" path="ssh_vpn_secrets.xml" />
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="device_root" path="." />
+        <exclude domain="device_file" path="." />
+        <exclude domain="device_database" path="." />
+        <exclude domain="device_sharedpref" path="." />
     </device-transfer>
 </data-extraction-rules>
