@@ -42,4 +42,6 @@ interface AppSettingsRepository {
     fun setSmartConnectConsentVersion(version: Int)
 
     fun setShowSmartConnectWarningOnEnter(show: Boolean)
+
+    fun setNotificationPermissionRequested(requested: Boolean)
 }

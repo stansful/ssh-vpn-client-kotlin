@@ -32,7 +32,10 @@ class VpnPermissionRequester internal constructor(
 /**
  * VPN permission flow: `VpnService.prepare` → (pre-prompt sheet → system dialog) → result.
  *
- * - [onGranted]: permission held or just granted — start the connection.
+ * - [onGranted]: permission held or just granted — start the connection. Right after it, on
+ *   Android 13+, the notification permission is asked once per install (see
+ *   [shouldRequestNotificationPermission]) so the session notification with its Disconnect / Stop
+ *   action shows in the shade; the connection never waits for that dialog.
  * - [onDenied]: the system dialog was declined (or could not be shown) — callers show the recovery
  *   banner "VPN permission was denied. Tap Connect to ask again."
  * - [onCancelled]: "Not now" / Back / tap outside on the pre-prompt — nothing connects, no banner.
@@ -49,11 +52,17 @@ fun rememberVpnPermissionRequester(
     val currentOnDenied by rememberUpdatedState(onDenied)
     val currentOnCancelled by rememberUpdatedState(onCancelled)
     var showPrompt by rememberSaveable { mutableStateOf(false) }
+    val notificationPermission = rememberNotificationPermissionPrompt()
+    // The VPN starts first; the notification dialog only follows it.
+    val grant = {
+        currentOnGranted()
+        notificationPermission.requestOnce()
+    }
 
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) currentOnGranted() else currentOnDenied()
+        if (result.resultCode == Activity.RESULT_OK) grant() else currentOnDenied()
     }
 
     if (showPrompt) {
@@ -62,7 +71,7 @@ fun rememberVpnPermissionRequester(
                 showPrompt = false
                 val intent = vpnPermissionIntent(context)
                 if (intent == null) {
-                    currentOnGranted()
+                    grant()
                 } else {
                     try {
                         launcher.launch(intent)
@@ -81,7 +90,7 @@ fun rememberVpnPermissionRequester(
     return remember(context) {
         VpnPermissionRequester(
             onRequest = {
-                if (vpnPermissionIntent(context) == null) currentOnGranted() else showPrompt = true
+                if (vpnPermissionIntent(context) == null) grant() else showPrompt = true
             },
         )
     }
