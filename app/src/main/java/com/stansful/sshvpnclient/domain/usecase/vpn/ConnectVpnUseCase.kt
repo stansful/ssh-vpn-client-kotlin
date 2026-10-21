@@ -19,6 +19,7 @@ import com.stansful.sshvpnclient.vpn.OpenSourceVpnService
 import com.stansful.sshvpnclient.vpn.SmartConnectVpnService
 import com.stansful.sshvpnclient.vpn.canProceedAfterVpnOwnerStop
 import com.stansful.sshvpnclient.vpn.canPublishVpnStartFailure
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -37,8 +38,9 @@ sealed interface ConnectVpnResult {
 
     /**
      * Nothing to start: a Server session is already starting or running and nobody asked it to stop
-     * (a second Connect tap, the quick tile), or, after a stopped Server session let go, another
-     * session took the VPN or the caller no longer wants the start.
+     * (a second Connect tap, the quick tile), or, after a stopped Server session let go, another mode
+     * or a newer Server session (the quick tile, Always-on VPN) took the VPN, or the caller no longer
+     * wants the start.
      */
     data object Skipped : ConnectVpnResult
 
@@ -57,22 +59,36 @@ class ConnectVpnUseCase(
     private val appSettingsRepository: AppSettingsRepository,
     private val lastVpnSessionStore: LastVpnSessionStore,
 ) {
+    private val publishedSessions = AtomicLong()
+
+    /**
+     * The newest Server session this use case published, counted up on every start (the app, the quick
+     * tile and Always-on VPN all start through one instance). Only this use case publishes a Server
+     * session (SshVpnService accepts a connect command only for that state), so whenever Server mode
+     * owns the VPN, it is this session. A caller about to stop it notes this and passes it on as
+     * `stoppedSession`.
+     */
+    val latestSession: Long
+        get() = publishedSessions.get()
+
     /**
      * Starts a Server-mode session through the selected server.
      *
-     * [afterSshStop]: the caller has just asked SshVpnService to stop the running Server session (a
-     * restart through another server or after an app-routing change), so this first waits for that
-     * session to let go; [isStillWanted] is asked once it has (false: the user stopped the VPN
-     * meanwhile). Without it a running Server session is left alone ([ConnectVpnResult.Skipped]).
+     * [stoppedSession]: the caller has just asked SshVpnService to stop the running Server session (a
+     * restart through another server or after an app-routing change), noted as [latestSession] before
+     * that stop, so this first waits for that session to let go. Another mode or a newer Server session
+     * started meanwhile (the quick tile, Always-on VPN) has taken the VPN over, and [isStillWanted] is
+     * asked as well (false: the user stopped the VPN meanwhile); either way nothing is started
+     * ([ConnectVpnResult.Skipped]). Without it a running Server session is left alone (Skipped too).
      */
     suspend operator fun invoke(
         preserveDiagnostics: Boolean = false,
-        afterSshStop: Boolean = false,
+        stoppedSession: Long? = null,
         isStillWanted: () -> Boolean = { true },
     ): ConnectVpnResult {
-        if (afterSshStop) {
-            if (!awaitStoppedSshSession()) return ConnectVpnResult.PreviousSessionActive
-            if (isTakenOver() || !isStillWanted()) return ConnectVpnResult.Skipped
+        if (stoppedSession != null) {
+            if (!awaitStoppedSshSession(stoppedSession)) return ConnectVpnResult.PreviousSessionActive
+            if (isTakenOver(stoppedSession) || !isStillWanted()) return ConnectVpnResult.Skipped
         }
 
         // Checked after that wait, so a failure is published into the state the stopped session left.
@@ -92,7 +108,9 @@ class ConnectVpnUseCase(
         }
 
         // Again after the reads above: the switch below would stop a session started meanwhile.
-        if (afterSshStop && (isTakenOver() || !isStillWanted())) return ConnectVpnResult.Skipped
+        if (stoppedSession != null && (isTakenOver(stoppedSession) || !isStillWanted())) {
+            return ConnectVpnResult.Skipped
+        }
         val stateBeforeSwitch = vpnConnectionRepository.currentState
         if (stateBeforeSwitch.activeTransport == VpnTransportType.XRAY) {
             val disconnectIntent = if (
@@ -135,6 +153,8 @@ class ConnectVpnUseCase(
         }
 
         lastVpnSessionStore.record(VpnSessionOwner.SHADOW_SSH)
+        // Before the state is published, so whoever sees the new session also sees it is a newer one.
+        publishedSessions.incrementAndGet()
         if (preserveDiagnostics) {
             vpnConnectionRepository.setReconnecting(config.id)
         } else {
@@ -160,17 +180,21 @@ class ConnectVpnUseCase(
     }
 
     /**
-     * Waits for the Server session the caller stopped to let go (SshVpnService: its lifecycle lock,
-     * connection job join, TUN forwarder stop), then for Android to destroy the stopped service. False
-     * when it still owns the VPN after [SSH_OWNER_RELEASE_TIMEOUT_MS].
+     * Waits for the Server session the caller stopped ([stoppedSession]) to let go (SshVpnService: its
+     * lifecycle lock, connection job join, TUN forwarder stop), then for Android to destroy the stopped
+     * service. A newer Server session ends the wait as well: it can only have started after the stopped
+     * one let go, even when the state went from one straight to the other for this collector. False
+     * when the stopped session still owns the VPN after [SSH_OWNER_RELEASE_TIMEOUT_MS].
      */
-    private suspend fun awaitStoppedSshSession(): Boolean {
-        val released = awaitVpnOwnerRelease(
-            state = vpnConnectionRepository.state,
-            owner = VpnSessionOwner.SHADOW_SSH,
-            timeoutMs = SSH_OWNER_RELEASE_TIMEOUT_MS,
-        )
+    private suspend fun awaitStoppedSshSession(stoppedSession: Long): Boolean {
+        val released = withTimeoutOrNull(SSH_OWNER_RELEASE_TIMEOUT_MS) {
+            vpnConnectionRepository.state.first { state ->
+                state.sessionOwner != VpnSessionOwner.SHADOW_SSH || latestSession != stoppedSession
+            }
+        } != null
         if (!released) return false
+        // Taken over: nothing will be started, so there is nothing to wait out.
+        if (latestSession != stoppedSession) return true
         // SshVpnService publishes the release before Android destroys it, and its onDestroy() clears any
         // SHADOW_SSH session it still finds: a start published right now would be wiped and its connect
         // command rejected as stale. Waited out after every such stop, also when the session had
@@ -180,10 +204,14 @@ class ConnectVpnUseCase(
     }
 
     /**
-     * After the stopped Server session let go: another mode or the quick tile has taken the VPN since,
-     * and starting now would undo that.
+     * After the Server session [stoppedSession] let go: another mode or a newer Server session (the
+     * quick tile, Always-on VPN) has taken the VPN since, and starting now would undo that. A newer
+     * Server session counts even when it has already ended: it was started with the current server and
+     * settings, which is all a restart is for.
      */
-    private fun isTakenOver(): Boolean = vpnConnectionRepository.currentState.sessionOwner != null
+    private fun isTakenOver(stoppedSession: Long): Boolean {
+        return vpnConnectionRepository.currentState.sessionOwner != null || latestSession != stoppedSession
+    }
 
     private fun reject(configId: String?, message: String): ConnectVpnResult.Rejected {
         val published = canPublishVpnStartFailure(vpnConnectionRepository.currentState)
