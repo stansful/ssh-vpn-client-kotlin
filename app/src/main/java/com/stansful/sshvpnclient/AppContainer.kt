@@ -82,7 +82,9 @@ class AppContainer(
     private val secretStorage by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TinkSecretStorage(
             context = appContext,
-            log = { message -> vpnConnectionRepository.appendDiagnostic(message) },
+            // A notice: the read that finds the store unreadable is often the first one of a connect,
+            // right before that connect clears the log.
+            log = { message -> vpnConnectionRepository.appendNotice(message) },
         )
     }
 

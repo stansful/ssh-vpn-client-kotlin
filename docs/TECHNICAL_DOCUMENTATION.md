@@ -238,7 +238,8 @@ Entities:
 Keystore-ключ не покидает устройство. Если keyset сохранён, но не читается, а исправный Keystore
 отвечает, что master key `ssh_vpn_secret_master_key` отсутствует (данные перенесены с другого
 телефона), `RecoveringKeysetLoader` стирает keyset и шифртексты под ним и создаёт новый keyset; в
-Activity пишется строка `Saved passwords and keys can't be decrypted: ...`. До Android 12 Keystore
+Activity пишется строка `Saved passwords and keys can't be decrypted: ...` через `appendNotice()`: первое чтение
+секрета часто происходит внутри Connect, прямо перед `setConnecting()`, который очищает лог. До Android 12 Keystore
 сообщает «ключа нет», когда его сервис недоступен, поэтому «нет» засчитывается только после того, как
 пробный ключ удалось создать и найти. Любая другая ошибка (ключ есть, Keystore не ответил,
 `ProviderException`) пробрасывается как есть, без стирания.
@@ -271,7 +272,9 @@ Connect проверяет, читается ли секрет строки с �
 - Diagnostics сохраняются в SharedPreferences `ssh-vpn-connection-state`.
 - Diagnostics ограничены 500 строками, 131 072 символами суммарного текста и 2 048 символами на запись; TUN destination metadata редактируется до persistence.
 - Persistence diagnostics ограничена интервалом 15 секунд, кроме forced updates.
-- При `setConnecting()` diagnostics очищаются.
+- При `setConnecting()` diagnostics очищаются. Исключение - строки, записанные через `appendNotice()`: они
+  переживают ближайшую очистку при `setConnecting()` (одну, не больше; в памяти процесса, до 8 строк), чтобы
+  попасть в лог попытки, которую объясняют. `clearDiagnostics()` убирает и их.
 - При `setDisconnected()` transport сбрасывается в `null`.
 - При `setError()` transport сбрасывается в `null`.
 
@@ -1284,6 +1287,7 @@ Backup:
 - `TunnelDnsPolicyTest` - порядок резолверов через SSH, пропуск молчащих, короткий бюджет для частного адреса, границы частных диапазонов.
 - `SilentResolverTrackerTest` - отметка молчащего резолвера держится весь срок и переживает ответы запасных резолверов, снимается ответом самого резолвера и сменой транспорта, отметка от старого транспорта игнорируется.
 - `FlowWriterExecutorTest` - потоки, застрявшие на закрытом окне SSH-канала, не задерживают аплоад другого потока; закрытие канала освобождает writer; число writer'ов ограничено.
+- `InMemoryVpnConnectionRepositoryNoticeTest` - notice, записанный перед Connect, остаётся в логе этой попытки и только её; Connect без очистки лога переносит его на следующую очистку; ручная очистка лога его убирает.
 - `RecoveringKeysetLoaderTest` - keyset без своего Keystore-ключа заменяется новым; при существующем ключе, неотвечающем Keystore, отсутствии keyset и runtime-ошибках ничего не стирается.
 - `ReconnectSupervisorTest` - backoff (включая screen-off), поколения линков, устаревшие триггеры (время постановки в очередь, id линка), прерывание ожидания и его пределы, лестница деградации, flapping, throttle строк триггеров.
 - `ReconnectBackoffTest` - exponential backoff.

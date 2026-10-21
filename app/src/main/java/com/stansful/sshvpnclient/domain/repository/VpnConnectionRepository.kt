@@ -28,5 +28,12 @@ interface VpnConnectionRepository {
     fun setDisconnected()
     fun setError(configId: String?, message: String)
     fun appendDiagnostic(message: String)
+
+    /**
+     * A diagnostic the user must not miss. It also survives the next [setConnecting] that clears
+     * the log, so it shows up in the log of the attempt it explains even when it was written just
+     * before that attempt started; [clearDiagnostics] drops it.
+     */
+    fun appendNotice(message: String)
     fun clearDiagnostics()
 }
