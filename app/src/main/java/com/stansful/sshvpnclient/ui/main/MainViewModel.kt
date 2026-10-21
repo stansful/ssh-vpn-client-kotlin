@@ -157,6 +157,9 @@ class MainViewModel(
     @Volatile
     private var terminalSession: SshTerminalSession? = null
     private var connectJob: Job? = null
+
+    /** Whether [connectJob] waits for the Server session a restart stopped (see [connect]). */
+    private var connectAfterSshStop = false
     private var sessionRestartJob: Job? = null
     private var sessionRestartStarted = false
     private val sessionNotice = MutableStateFlow<ServerSessionNotice?>(null)
@@ -240,19 +243,18 @@ class MainViewModel(
             return
         }
         // An explicit Connect takes over a restart (Home offers it once the restarted session has
-        // stopped): both would start a session, and the loser would report a bogus failure.
+        // stopped): both would start a session, and the loser would report a bogus failure. A restart
+        // that has already stopped its session hands over its wait for that session to let go, and so
+        // does an earlier Connect that took one over.
+        val afterSshStop = (sessionRestartStarted && sessionRestartJob?.isActive == true) ||
+            (connectAfterSshStop && connectJob?.isActive == true)
         cancelSessionRestart()
         // The newest request wins; one that already started the service has completed anyway.
         connectJob?.cancel()
+        connectAfterSshStop = afterSshStop
         connectJob = viewModelScope.launch {
             try {
-                val result = connectVpnUseCase()
-                if (result == ConnectVpnResult.PREVIOUS_SESSION_ACTIVE) {
-                    vpnConnectionRepository.appendDiagnostic(
-                        "Connect skipped: the previous VPN session is still stopping",
-                    )
-                    notify("Couldn’t connect", PREVIOUS_SESSION_ACTIVE_DETAIL)
-                }
+                reportUnstartedConnect("Couldn’t connect", connectVpnUseCase(afterSshStop = afterSshStop))
             } catch (cancellation: CancellationException) {
                 // The repository outlives this ViewModel; a cancelled scope must not publish
                 // a connection error into app-wide VPN state.
@@ -532,7 +534,7 @@ class MainViewModel(
 
     private suspend fun reconnectAfterRestart() {
         val result = try {
-            connectVpnUseCase(preserveDiagnostics = true)
+            connectVpnUseCase(preserveDiagnostics = true, afterSshStop = true)
         } catch (cancellation: CancellationException) {
             // Disconnect (or a cleared ViewModel) cancelled the restart: publish nothing.
             throw cancellation
@@ -540,17 +542,25 @@ class MainViewModel(
             reportConnectFailure("Couldn’t reconnect", error)
             return
         }
-        // Still owned by the stopped Server session: setError would clear its ownership, and its
-        // loops would then exit without tearing the tunnel down. Tell the user here instead. Another
-        // owner means another mode was started meanwhile; that needs no message.
-        if (result == ConnectVpnResult.PREVIOUS_SESSION_ACTIVE &&
-            vpnConnectionRepository.currentState.sessionOwner == VpnSessionOwner.SHADOW_SSH
-        ) {
-            vpnConnectionRepository.appendDiagnostic(
-                "Reconnect skipped: the previous SSH session is still stopping",
-            )
-            notify("Couldn’t reconnect", PREVIOUS_SESSION_ACTIVE_DETAIL)
-        }
+        reportUnstartedConnect("Couldn’t reconnect", result)
+    }
+
+    /**
+     * A connect that started nothing and could not say so through the connection state, shown as a
+     * toast: the previous session did not let go in time, or a precondition failed while another
+     * session owned that state (setError would clear its ownership, and its loops would then exit
+     * without tearing the tunnel down). A skipped connect needs no message.
+     */
+    private fun reportUnstartedConnect(title: String, result: ConnectVpnResult) {
+        val detail = when (result) {
+            ConnectVpnResult.PreviousSessionActive -> PREVIOUS_SESSION_ACTIVE_DETAIL
+            is ConnectVpnResult.Rejected -> result.message.takeUnless { result.published }
+            ConnectVpnResult.Started,
+            ConnectVpnResult.Skipped,
+            -> null
+        } ?: return
+        vpnConnectionRepository.appendDiagnostic("$title: $detail")
+        notify(title, detail)
     }
 
     /**
