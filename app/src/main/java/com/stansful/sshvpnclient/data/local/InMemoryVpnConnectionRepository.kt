@@ -42,6 +42,9 @@ class InMemoryVpnConnectionRepository(
         maxEntryCharacters = MAX_DIAGNOSTIC_ENTRY_CHARACTERS,
     )
     private val mutableState = MutableStateFlow(VpnConnectionState())
+
+    /** Notices owed to the next clearing [setConnecting]; see [appendNotice]. */
+    private val pendingNotices = ArrayDeque<String>(MAX_PENDING_NOTICES)
     private val persistenceRequests = Channel<PersistenceRequest>(Channel.CONFLATED)
     private var diagnosticsTouched = false
     private var diagnosticsPublishJob: Job? = null
@@ -67,8 +70,13 @@ class InMemoryVpnConnectionRepository(
                 diagnosticsTouched = true
                 diagnosticsBuffer.clear()
                 diagnosticsPublishJob?.cancel()
-                enqueuePersistence(emptyList(), force = true)
-                emptyList()
+                // A notice written just before this attempt - the first secret read of a connect
+                // can be the one that finds the secret store unreadable - belongs to its log.
+                diagnosticsBuffer.addAll(pendingNotices)
+                pendingNotices.clear()
+                val carried = diagnosticsBuffer.snapshot()
+                enqueuePersistence(carried, force = true)
+                carried
             } else {
                 mutableState.value.diagnostics
             }
@@ -153,30 +161,48 @@ class InMemoryVpnConnectionRepository(
     }
 
     override fun appendDiagnostic(message: String) {
-        val safeMessage = redactPersistentDestinationMetadata(message)
-        val line = "${LocalTime.now().format(TIME_FORMAT)} $safeMessage"
+        val line = diagnosticLine(message)
         synchronized(stateLock) {
-            diagnosticsTouched = true
-            diagnosticsBuffer.addLast(line)
-            if (diagnosticsPublishJob?.isActive != true) {
-                diagnosticsPublishJob = applicationScope.launch {
-                    delay(DIAGNOSTICS_UI_BATCH_MS)
-                    synchronized(stateLock) {
-                        val diagnostics = publishDiagnosticsLocked()
-                        enqueuePersistence(diagnostics, force = false)
-                    }
-                }
-            }
+            appendLineLocked(line)
+        }
+    }
+
+    override fun appendNotice(message: String) {
+        val line = diagnosticLine(message)
+        synchronized(stateLock) {
+            if (pendingNotices.size >= MAX_PENDING_NOTICES) pendingNotices.removeFirst()
+            pendingNotices.addLast(line)
+            appendLineLocked(line)
         }
     }
 
     override fun clearDiagnostics() {
         synchronized(stateLock) {
             diagnosticsTouched = true
+            pendingNotices.clear()
             diagnosticsBuffer.clear()
             diagnosticsPublishJob?.cancel()
             mutableState.value = mutableState.value.copy(diagnostics = emptyList())
             enqueuePersistence(emptyList(), force = true)
+        }
+    }
+
+    private fun diagnosticLine(message: String): String {
+        val safeMessage = redactPersistentDestinationMetadata(message)
+        return "${LocalTime.now().format(TIME_FORMAT)} $safeMessage"
+    }
+
+    private fun appendLineLocked(line: String) {
+        diagnosticsTouched = true
+        diagnosticsBuffer.addLast(line)
+        if (diagnosticsPublishJob?.isActive != true) {
+            diagnosticsPublishJob = applicationScope.launch {
+                delay(DIAGNOSTICS_UI_BATCH_MS)
+                synchronized(stateLock) {
+                    val diagnostics = publishDiagnosticsLocked()
+                    enqueuePersistence(diagnostics, force = false)
+                }
+            }
         }
     }
 
@@ -259,6 +285,7 @@ class InMemoryVpnConnectionRepository(
         const val MAX_DIAGNOSTIC_ENTRIES = 500
         const val MAX_DIAGNOSTIC_CHARACTERS = 128 * 1_024
         const val MAX_DIAGNOSTIC_ENTRY_CHARACTERS = 2 * 1_024
+        const val MAX_PENDING_NOTICES = 8
         val TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
     }
 }
