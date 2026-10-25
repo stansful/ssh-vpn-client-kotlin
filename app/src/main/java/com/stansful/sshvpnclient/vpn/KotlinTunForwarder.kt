@@ -613,8 +613,8 @@ internal inline fun <T : Any> submitToPool(onRefused: (PoolRefusal) -> Unit, sub
  * the uplink. A disconnect needs that monitor first and then the socket for its CLOSE message, so
  * under upload congestion it can take a while. The closer threads only ever wait, so a few are
  * enough, and they expire when idle. A disconnect is never lost: once the closer is shut down, or
- * when it can't start a thread and has none left, it runs on the caller, and [shutdown] runs the
- * ones still queued.
+ * when it can't start a thread and has none left, it runs on the caller (in the latter case with any
+ * others still queued), and [shutdown] runs the ones still queued.
  */
 internal class ChannelCloser(
     threadFactory: ThreadFactory,
@@ -653,16 +653,22 @@ internal class ChannelCloser(
     }
 
     /**
-     * Queues [task] for the closer threads still running; false, with the task back out of the
-     * queue, when there are none. The last of them may be leaving right now. It only leaves an empty
-     * queue, and once it is out of the pool it looks again and starts a thread for anything queued
-     * since. So either this sees it gone and takes the task back, or it sees the task: then it takes
-     * the task, its replacement does, or, when that thread can't start, [runCloserThread] runs it.
+     * Queues [task] for the closer threads still running, or, with none left, runs it here together
+     * with whatever else is queued; false when it could not be queued at all.
+     *
+     * The last thread to leave the pool looks at the queue once it is out, and for anything queued
+     * since starts a thread to take its place, or, when that one can't start, [runCloserThread] runs
+     * the queue. It skips this while the pool still counts another thread, but the pool counts a
+     * thread from the moment it sets out to start one: when that is the next disconnect's thread and
+     * it fails to start, the last thread has gone and left this task queued with no thread to take it.
+     * That failed start counts back down before its caller gets here, so the caller finds the pool
+     * empty; whoever does runs the whole queue, not just its own disconnect.
      */
     private fun queueForRunningThreads(task: Runnable): Boolean {
         // A full pool queues the task itself, and fails only if all its threads left meanwhile.
         val queued = task in executor.queue || executor.queue.offer(task)
-        return queued && (executor.poolSize > 0 || !executor.remove(task))
+        if (queued && executor.poolSize == 0) runQueued()
+        return queued
     }
 
     /**
@@ -675,8 +681,13 @@ internal class ChannelCloser(
         try {
             worker.run()
         } catch (_: OutOfMemoryError) {
-            generateSequence { executor.queue.poll() }.forEach(Runnable::run)
+            runQueued()
         }
+    }
+
+    /** Runs the queued disconnects here, one taken at a time: each runs once while others do the same. */
+    private fun runQueued() {
+        generateSequence { executor.queue.poll() }.forEach(Runnable::run)
     }
 
     /**
