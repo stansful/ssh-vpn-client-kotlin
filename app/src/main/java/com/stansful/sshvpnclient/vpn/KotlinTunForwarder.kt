@@ -13,6 +13,7 @@ import java.io.OutputStream
 import java.net.SocketTimeoutException
 import java.util.ArrayDeque
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.BlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
@@ -612,20 +613,23 @@ internal inline fun <T : Any> submitToPool(onRefused: (PoolRefusal) -> Unit, sub
  * the uplink. A disconnect needs that monitor first and then the socket for its CLOSE message, so
  * under upload congestion it can take a while. The closer threads only ever wait, so a few are
  * enough, and they expire when idle. A disconnect is never lost: once the closer is shut down, or
- * when it can't start a thread, it runs on the caller, and [shutdown] runs the ones still queued.
+ * when it can't start a thread and has none left, it runs on the caller, and [shutdown] runs the
+ * ones still queued.
  */
 internal class ChannelCloser(
     threadFactory: ThreadFactory,
     keepAliveMs: Long,
     threads: Int = CHANNEL_CLOSER_THREADS,
+    /** Where disconnects wait for a thread; tests stall it to time a thread's exit. */
+    queue: BlockingQueue<Runnable> = LinkedBlockingQueue(),
 ) {
     private val executor = ThreadPoolExecutor(
         threads,
         threads,
         keepAliveMs,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(),
-        threadFactory,
+        queue,
+        ThreadFactory { worker -> threadFactory.newThread { runCloserThread(worker) } },
         ThreadPoolExecutor.AbortPolicy(),
     ).apply {
         allowCoreThreadTimeOut(true)
@@ -633,9 +637,45 @@ internal class ChannelCloser(
 
     /** A failed disconnect has nobody to tell; on a pool thread it must not end the process either. */
     fun disconnectLater(disconnect: () -> Unit) {
-        val handedOver = submitToPool(onRefused = {}) { executor.execute { runCatching(disconnect) } }
-        if (handedOver == null) {
-            runCatching(disconnect)
+        val task = Runnable { runCatching(disconnect) }
+        submitToPool(onRefused = { refusal -> runRefused(task, refusal) }) { executor.execute(task) }
+    }
+
+    /**
+     * Runs [task] here unless a closer thread can still take it. Short of its full count the pool
+     * starts a thread for every new disconnect rather than queueing it, so a thread that can't start
+     * ([PoolRefusal.NO_THREAD]) refuses the disconnect even while other closer threads wait idle on
+     * the queue: it goes to them. Only a stopped closer, or one with no thread left, leaves it here.
+     */
+    private fun runRefused(task: Runnable, refusal: PoolRefusal) {
+        if (refusal == PoolRefusal.NO_THREAD && queueForRunningThreads(task)) return
+        task.run()
+    }
+
+    /**
+     * Queues [task] for the closer threads still running; false, with the task back out of the
+     * queue, when there are none. The last of them may be leaving right now. It only leaves an empty
+     * queue, and once it is out of the pool it looks again and starts a thread for anything queued
+     * since. So either this sees it gone and takes the task back, or it sees the task: then it takes
+     * the task, its replacement does, or, when that thread can't start, [runCloserThread] runs it.
+     */
+    private fun queueForRunningThreads(task: Runnable): Boolean {
+        // A full pool queues the task itself, and fails only if all its threads left meanwhile.
+        val queued = task in executor.queue || executor.queue.offer(task)
+        return queued && (executor.poolSize > 0 || !executor.remove(task))
+    }
+
+    /**
+     * Runs a closer thread. Its disconnects can't throw, but the pool can: its last thread leaving
+     * while a disconnect waits starts a thread to take its place, and when that one can't start
+     * either the [OutOfMemoryError] comes out here, past the pool. This thread is still alive then,
+     * so it runs what is queued itself instead of letting the error end the process.
+     */
+    private fun runCloserThread(worker: Runnable) {
+        try {
+            worker.run()
+        } catch (_: OutOfMemoryError) {
+            generateSequence { executor.queue.poll() }.forEach(Runnable::run)
         }
     }
 
