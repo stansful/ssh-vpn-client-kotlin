@@ -25,6 +25,10 @@ class ChannelCloserTest {
     @Volatile
     private var outOfThreads = false
 
+    /** Runs in a closer thread start about to fail; a test holds the start here while the pool counts it. */
+    @Volatile
+    private var beforeFailedStart: () -> Unit = {}
+
     @After
     fun releaseWriter() {
         writeDone.countDown()
@@ -167,6 +171,42 @@ class ChannelCloserTest {
         assertNothingEscaped()
     }
 
+    @Test
+    fun `a disconnect the last closer thread left queued runs with the next one that finds no thread`() {
+        // The thread timed out and found the queue empty, so it may leave; it is still in the pool.
+        val queue = StallingQueue(stallAt = LEAVE_CHECK)
+        val closer = closer(keepAliveMs = EXPIRE_MS, queue = queue)
+        closer.disconnectLater {}
+        assertTrue(queue.stalled.await(WAIT_SECONDS, TimeUnit.SECONDS))
+        val leaving = synchronized(created) { created.single() }
+        outOfThreads = true
+        val ran: MutableList<Pair<String, Thread>> = Collections.synchronizedList(mutableListOf())
+        closer.disconnectLater { ran += "first" to Thread.currentThread() }
+        // The pool counts the next disconnect's thread while it starts, before the start fails.
+        val starting = CountDownLatch(1)
+        val failStart = CountDownLatch(1)
+        beforeFailedStart = {
+            starting.countDown()
+            failStart.await(WAIT_SECONDS, TimeUnit.SECONDS)
+        }
+        val tunReader = Thread { closer.disconnectLater { ran += "second" to Thread.currentThread() } }
+        tunReader.start()
+        assertTrue(starting.await(WAIT_SECONDS, TimeUnit.SECONDS))
+
+        // Counting that thread, the last one leaves the first disconnect queued and starts no other.
+        queue.release.countDown()
+        leaving.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS))
+        failStart.countDown()
+        tunReader.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS))
+
+        assertEquals(
+            "the caller that finds no thread runs the stranded disconnect too, each once",
+            listOf("first" to tunReader, "second" to tunReader),
+            ran.toList(),
+        )
+        assertNothingEscaped()
+    }
+
     /** On Android an exception that escapes a pool thread ends the process. */
     private fun assertNothingEscaped() {
         // A thread's uncaught-exception handler has run once the thread is gone.
@@ -183,7 +223,10 @@ class ChannelCloserTest {
     ): ChannelCloser {
         val factory = ThreadFactory { task ->
             // What Android's Thread.start throws; the JVM pool asks the factory first.
-            if (outOfThreads) throw OutOfMemoryError("pthread_create (1040KB stack) failed: Try again")
+            if (outOfThreads) {
+                beforeFailedStart()
+                throw OutOfMemoryError("pthread_create (1040KB stack) failed: Try again")
+            }
             Thread(task, CLOSER_THREAD_NAME).apply {
                 isDaemon = true
                 uncaughtExceptionHandler = Thread.UncaughtExceptionHandler { _, error -> uncaught += error }
