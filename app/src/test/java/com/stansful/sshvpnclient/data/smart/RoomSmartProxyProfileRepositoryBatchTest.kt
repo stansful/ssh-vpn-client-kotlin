@@ -646,6 +646,66 @@ class RoomSmartProxyProfileRepositoryBatchTest {
         assertTrue(saved.secretId in secrets.deletedSecretIds)
     }
 
+    @Test
+    fun `catalog sync while the secret store can't be read adds no twin of an older build's plus profile`() =
+        runBlocking {
+            val dao = RecordingSmartProxyProfileDao(emptyMap())
+            val secrets = RecordingSmartSecretStorage(emptyMap())
+            val repository = repository(dao, secrets)
+            val link = "trojan://correct+horse@plus.test:443?security=tls#Plus"
+            val parsed = (ProxyShareLinkParser().parse(link) as ProxyParseResult.Success).profile
+            repository.import(link, ProxyProfileSource.REMOTE, "https://example.test/smart")
+            val saved = dao.remainingEntities().single()
+                .copy(fingerprint = checkNotNull(parsed.legacyFingerprint), isPinned = true)
+                .also { dao.upsert(it) }
+            val savedBefore = secrets.savedSecrets.toMap()
+            // The keyset fails to load for the older profile's lookup only; the save right after it would work.
+            secrets.keysetLoadFailures = 1
+
+            val failure = runCatching {
+                repository.import(link, ProxyProfileSource.REMOTE, "https://example.test/smart")
+            }.exceptionOrNull()
+
+            assertTrue(failure is GeneralSecurityException)
+            assertEquals(listOf(saved), dao.remainingEntities().toList())
+            assertEquals(savedBefore, secrets.savedSecrets)
+            assertTrue(secrets.deletedSecretIds.isEmpty())
+            // Once it reads again, the same sync finds the profile.
+            val again = repository.import(link, ProxyProfileSource.REMOTE, "https://example.test/smart")
+            assertEquals(0, again.added)
+            assertEquals(saved.id, dao.remainingEntities().single().id)
+        }
+
+    @Test
+    fun `smart edit to a plus link while the secret store can't be read fails and keeps both profiles`() =
+        runBlocking {
+            val dao = RecordingSmartProxyProfileDao(emptyMap())
+            val secrets = RecordingSmartSecretStorage(emptyMap())
+            val repository = repository(dao, secrets)
+            val link = "trojan://correct+horse@plus.test:443?security=tls#Plus"
+            val parsed = (ProxyShareLinkParser().parse(link) as ProxyParseResult.Success).profile
+            repository.import(link, ProxyProfileSource.REMOTE, "https://example.test/smart")
+            val saved = dao.remainingEntities().single()
+                .copy(fingerprint = checkNotNull(parsed.legacyFingerprint))
+                .also { dao.upsert(it) }
+            repository.import(
+                "vless://00000000-0000-4000-8000-000000000012@other.test:443?security=tls#Other",
+                ProxyProfileSource.MANUAL,
+                sourceUrl = null,
+            )
+            val other = dao.remainingEntities().single { entity -> entity.id != saved.id }
+            val savedBefore = secrets.savedSecrets.toMap()
+            secrets.keysetLoadFailures = 1
+
+            val failure = runCatching { repository.update(id = other.id, rawUri = link) }.exceptionOrNull()
+
+            assertTrue(failure is GeneralSecurityException)
+            assertEquals(saved, dao.entity(saved.id))
+            assertEquals(other, dao.entity(other.id))
+            assertEquals(savedBefore, secrets.savedSecrets)
+            assertTrue(secrets.deletedSecretIds.isEmpty())
+        }
+
     private fun repository(
         dao: SmartProxyProfileDao,
         secretStorage: SecretStorage,

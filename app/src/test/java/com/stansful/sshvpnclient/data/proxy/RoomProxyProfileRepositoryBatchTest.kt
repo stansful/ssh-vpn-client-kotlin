@@ -492,6 +492,72 @@ class RoomProxyProfileRepositoryBatchTest {
         assertEquals(currentFingerprint(PLUS_LINK), dao.entity(saved.id)?.fingerprint)
     }
 
+    @Test
+    fun `pasting a plus link while the secret store can't be read fails instead of adding it twice`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        val saved = dao.savedByOlderBuild(repository, PLUS_LINK, ProxyProfileSource.MANUAL, sourceUrl = null)
+        val savedBefore = secretStorage.savedSecrets.toMap()
+        // The keyset fails to load for the older route's lookup only; the save right after it would work.
+        secretStorage.keysetLoadFailures = 1
+
+        val failure = runCatching {
+            repository.import(text = PLUS_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+        }.exceptionOrNull()
+
+        assertTrue(failure is GeneralSecurityException)
+        assertEquals(listOf(saved), dao.remainingEntities().toList())
+        assertEquals(savedBefore, secretStorage.savedSecrets)
+        assertTrue(secretStorage.deletedSecretIds.isEmpty())
+        // Once it reads again, the same paste finds the route.
+        val again = repository.import(text = PLUS_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+        assertEquals(1, again.duplicates)
+        assertEquals(1, dao.remainingEntities().size)
+    }
+
+    @Test
+    fun `a sync while the secret store can't be read leaves an older build's plus route as it was`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        val saved = dao.savedByOlderBuild(repository, PLUS_LINK, ProxyProfileSource.REMOTE, SOURCE_URL)
+            .copy(isSelected = true, isPinned = true)
+            .also { dao.upsert(it) }
+        val savedBefore = secretStorage.savedSecrets.toMap()
+        secretStorage.keysetLoadFailures = 1
+
+        val failure = runCatching {
+            repository.import(text = PLUS_LINK, source = ProxyProfileSource.REMOTE, sourceUrl = SOURCE_URL)
+        }.exceptionOrNull()
+
+        // No twin is added beside the selected, pinned route.
+        assertTrue(failure is GeneralSecurityException)
+        assertEquals(listOf(saved), dao.remainingEntities().toList())
+        assertEquals(savedBefore, secretStorage.savedSecrets)
+        assertTrue(secretStorage.deletedSecretIds.isEmpty())
+    }
+
+    @Test
+    fun `editing a route to a plus link while the secret store can't be read fails and keeps both`() = runBlocking {
+        val dao = RecordingProxyProfileDao(emptyMap())
+        val secretStorage = RecordingSecretStorage(emptyMap())
+        val repository = repository(dao, secretStorage)
+        val saved = dao.savedByOlderBuild(repository, PLUS_LINK, ProxyProfileSource.MANUAL, sourceUrl = null)
+        repository.import(text = OWN_LINK, source = ProxyProfileSource.MANUAL, sourceUrl = null)
+        val other = dao.remainingEntities().single { entity -> entity.id != saved.id }
+        val savedBefore = secretStorage.savedSecrets.toMap()
+        secretStorage.keysetLoadFailures = 1
+
+        val failure = runCatching { repository.update(id = other.id, rawUri = PLUS_LINK) }.exceptionOrNull()
+
+        assertTrue(failure is GeneralSecurityException)
+        assertEquals(saved, dao.entity(saved.id))
+        assertEquals(other, dao.entity(other.id))
+        assertEquals(savedBefore, secretStorage.savedSecrets)
+        assertTrue(secretStorage.deletedSecretIds.isEmpty())
+    }
+
     /** Imports [link] and gives its row the fingerprint an older build saved it under. */
     private suspend fun RecordingProxyProfileDao.savedByOlderBuild(
         repository: RoomProxyProfileRepository,

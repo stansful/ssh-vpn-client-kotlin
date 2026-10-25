@@ -19,6 +19,11 @@ import com.stansful.sshvpnclient.domain.usecase.proxy.ProxyShareLinkParser
  * current fingerprint, so a row whose link can't be read stays apart, and so does a row another
  * profile in [profiles] already finds by its current fingerprint. [rowsByFingerprint] holds the rows
  * found by both fingerprints; only the few rows found by an older one are read.
+ *
+ * A store that can't be read at all throws ([SecretStorage.checkAvailable]), as
+ * [com.stansful.sshvpnclient.data.secret.readableSecretIds] does, instead of reading every link as
+ * missing: no row would match, and the caller would add the link a second time. Without such rows
+ * nothing is read, so nothing is checked either.
  */
 internal suspend fun <E : Any> legacyFingerprintMatches(
     profiles: Collection<ParsedProxyProfile>,
@@ -34,6 +39,7 @@ internal suspend fun <E : Any> legacyFingerprintMatches(
         (parsed to row).takeUnless { row in claimed }
     }
     if (candidates.isEmpty()) return emptyMap()
+    secretStorage.checkAvailable()
     val storedLinks = secretStorage.getSecrets(candidates.map { (_, row) -> secretIdOf(row) })
     return buildMap {
         candidates.forEach { (parsed, row) ->
