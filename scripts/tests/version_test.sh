@@ -10,13 +10,20 @@
 # set outside them.
 # shellcheck disable=SC2016,SC2034
 set -u
+# SIGPIPE ignored, as on the GitHub runner (every step inherits that from its Node.js), for these tests and the
+# scripts they run: a reader that stops early makes its writer fail with "Broken pipe" there instead of dying quietly
+trap "" PIPE
 
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 TREE="$(cd "$HERE/../.." && pwd -P)"
 LIB="$TREE/scripts/lib/version.sh"
 BASH_BIN="${TEST_BASH:-bash}"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/version-test.XXXXXX")"
-WORK="$(cd "$WORK" && pwd -P)"
+# no temp dir stops here: an empty WORK would make the current directory (the checkout) the work dir, and the
+# EXIT trap would delete it
+if ! WORK="$(mktemp -d "${TMPDIR:-/tmp}/version-test.XXXXXX")" || ! WORK="$(cd "$WORK" && pwd -P)"; then
+  echo "not ok no temp dir in ${TMPDIR:-/tmp}"
+  exit 1
+fi
 if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$WORK"' EXIT; else echo "# work dir: $WORK"; fi
 # app_version_set's temp files land here: the test checks that none is left behind
 mkdir -p "$WORK/tmp"
@@ -35,13 +42,14 @@ check() {
   if eval "$2"; then ok "$1"; else nok "$1" "rc=$RC; condition: $2; stdout: '$OUT'; stderr: '$ERR'"; fi
 }
 # fn <stdin (printf %b)> <function> [args...]: the function in a fresh BASH_BIN that sourced version.sh under
-# set -euo pipefail; sets OUT, ERR, RC
+# set -euo pipefail; sets OUT, ERR, RC. stderr comes through the command substitution, which waits for every
+# process holding it: a process substitution's late error lands in this ERR, not in a later one's
 fn() {
   local input="$1"
   shift
-  OUT="$(printf '%b' "$input" | "$BASH_BIN" -c 'set -euo pipefail; . "$0"; "$@"' "$LIB" "$@" 2>"$WORK/err")"
+  ERR="$(printf '%b' "$input" | "$BASH_BIN" -c 'set -euo pipefail; . "$0"; "$@"' "$LIB" "$@" 2>&1 >"$WORK/out")"
   RC=$?
-  ERR="$(cat "$WORK/err")"
+  OUT="$(cat "$WORK/out")"
 }
 # is <name> <rc> <stdout>: the last fn exited with rc and printed exactly stdout, and nothing on stderr
 is() {
@@ -194,6 +202,8 @@ for c in 'zero|plugins {}\nval name = appVersionName\n' \
     '[ $RC = 1 ] && [ -z "$OUT" ] && cmp -s "$F" "$WORK/before"'
 done
 check "...no temp file is left in TMPDIR" '[ -z "$(ls -A "$WORK/tmp")" ]'
+# its directory exists, so the file could be created
+mkdir -p "$WORK/missing/app"
 fn '' app_version_set "$WORK/missing" 2.0.0
 check "app_version_set: a missing file fails and is not created" '[ $RC != 0 ] && [ ! -e "$WORK/missing/app/build.gradle.kts" ]'
 
@@ -250,6 +260,10 @@ fn "$TAGS" tag_of_version 0.9.0
 is "tag_of_version: nothing for a version without a tag (a branch named 0.9.0 is not one)" 0 ''
 fn "$TAGS" tag_of_version 1.2
 is "tag_of_version: nothing for a non-version" 0 ''
+# Over 64 KiB (a pipe buffer) of release_tags output after the match: a tag_of_version that stops reading there
+# leaves release_tags writing into a closed pipe every time, not only when it loses a race (the CI's Broken pipe)
+fn "0.4.0$(awk 'BEGIN { for (i = 1; i <= 4000; i++) printf "\n1.0.%d", i }')" tag_of_version 0.4.0
+is "tag_of_version: reads release_tags to the end, past a pipe buffer of tags after the match" 0 0.4.0
 
 # --- tag_commit <tag>: the commit of refs/tags/<tag> in `git ls-remote --tags` lines
 REFS='1111\trefs/tags/0.1.0\n2222\trefs/tags/v0.2.0\n3333\trefs/tags/v0.2.0^{}\n'

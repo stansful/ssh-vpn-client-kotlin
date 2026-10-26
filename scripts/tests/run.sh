@@ -9,6 +9,9 @@
 #
 # Exits non-zero when a test fails.
 set -u
+# SIGPIPE ignored, as on the GitHub runner (every step inherits that from its Node.js), for these tests and the
+# scripts they run: a reader that stops early makes its writer fail with "Broken pipe" there instead of dying quietly
+trap "" PIPE
 
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 fail=0

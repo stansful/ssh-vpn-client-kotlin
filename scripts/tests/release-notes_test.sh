@@ -10,12 +10,19 @@
 # set outside them.
 # shellcheck disable=SC2016,SC2034
 set -u
+# SIGPIPE ignored, as on the GitHub runner (every step inherits that from its Node.js), for these tests and the
+# scripts they run: a reader that stops early makes its writer fail with "Broken pipe" there instead of dying quietly
+trap "" PIPE
 
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 TREE="$(cd "$HERE/../.." && pwd -P)"
 BASH_BIN="${TEST_BASH:-bash}"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/release-notes-test.XXXXXX")"
-WORK="$(cd "$WORK" && pwd -P)"
+# no temp dir stops here: an empty WORK would make the current directory (the checkout) the work dir, and the
+# EXIT trap would delete it
+if ! WORK="$(mktemp -d "${TMPDIR:-/tmp}/release-notes-test.XXXXXX")" || ! WORK="$(cd "$WORK" && pwd -P)"; then
+  echo "not ok no temp dir in ${TMPDIR:-/tmp}"
+  exit 1
+fi
 if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$WORK"' EXIT; else echo "# work dir: $WORK"; fi
 
 export HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/home/.config" GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0

@@ -11,6 +11,9 @@
 # The patterns match the workflows' and scripts' own text, $VERSION and the like included.
 # shellcheck disable=SC2016
 set -u
+# SIGPIPE ignored, as on the GitHub runner (every step inherits that from its Node.js), for these tests and the
+# scripts they run: a reader that stops early makes its writer fail with "Broken pipe" there instead of dying quietly
+trap "" PIPE
 
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 TREE="$(cd "$HERE/../.." && pwd -P)"

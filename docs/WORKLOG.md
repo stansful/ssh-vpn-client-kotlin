@@ -2563,3 +2563,20 @@ Result:
 - Verified `scripts/build-release.sh --test --out DIR`: success; unit tests pass, 5 APKs, 4 Xray files and `SHA256SUMS`, APK sizes equal to the published 3.7.0 assets.
 - Verified `scripts/lib/check-env.sh` and `scripts/lib/lint.sh` from the new location: success.
 - Limits: the workflows haven't run on GitHub yet; the first push to a branch shows whether the CI jobs (Robolectric on Linux with JDK 21, Gradle cache) behave as they do locally. The Room migration tests (`androidTest`, emulator) still run nowhere in CI.
+
+### 2026-10-26 - Block 62
+
+Plan:
+
+- The first CI run (the 3.7.1 push to `master`, `release.yml` calling `ci.yml`) failed in "Scripts and workflows": `version_test.sh` saw `echo: write error: Broken pipe` from `tag_of_version`. Fix it, then look for everything else that only breaks on the GitHub runner.
+
+Result:
+
+- Cause: the runner ignores SIGPIPE (its Node.js does, every step inherits it), so a writer whose reader stopped early gets EPIPE and prints an error instead of dying quietly as on macOS or in a plain `docker run`. `tag_of_version` returned inside `while read; done < <(release_tags)`; it now reads to the end and prints the first match after.
+- Every `scripts/tests/*_test.sh` and `run.sh` now does `trap "" PIPE`, so local runs see what the runner sees. `version_test.sh`'s `fn` reads stderr through the command substitution, which waits for process substitutions too, and a new case puts over 64 KiB of tags after the match, so an early reader fails every time (60 of 60 runs under load in `ubuntu:24.04`; before this the old code slipped through about one run in six).
+- A sweep of all scripts, workflow steps and tests (three lenses, every finding reproduced by a verifier) found one release bug: `release-state.sh` asked the API with `curl --retry 3 -o /dev/null`. curl 8.5.0 (ubuntu-24.04) truncates its output before a retry, which fails on `/dev/null` (exit 23, no retry, no status), so one 5xx or 429 from api.github.com failed the release gate with "HTTP 000". The body now goes to a temp file; with real curl 8.5.0, one or two 503s then 404 give `new`, four 503s give "HTTP 503". The test's curl stub now refuses an `-o` that is not a regular file.
+- Test holes fixed: a duplicated `new_case notags` in `make-release_test.sh` (its clone failed and the case ran in the earlier case's repository; `new_case` now stops on a reused name); an unchecked `mktemp -d` in five test files (with a bad TMPDIR the checkout became the work dir and the EXIT trap deleted it); `app_version_set`'s "missing file is not created" check, which could not fail; the scripts under test now get an absolute `$WORK/tmp` as TMPDIR, so a relative TMPDIR no longer fails `make-release_test.sh` and `release-state_test.sh`.
+- An independent review of the fix (two lenses, mutation tests on macOS and ubuntu, each finding re-checked) found the last two items; both fixed.
+- Verified `scripts/tests/run.sh`: 374 checks pass under `/bin/bash` 3.2 (also with a relative TMPDIR) and in `ubuntu:24.04` with SIGPIPE ignored and the runner's environment variables.
+- Verified actionlint and shellcheck (`rhysd/actionlint:1.7.12`): clean.
+- Limits: the fix has not run on GitHub yet. The 3.7.1 release did not go out (its CI failed before the build); it is built and published from the next commit pushed to `master`.
