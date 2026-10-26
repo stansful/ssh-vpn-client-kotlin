@@ -233,7 +233,7 @@ tasks.withType<io.gitlab.arturbosch.detekt.DetektCreateBaselineTask>().configure
 }
 
 /** Fails when a broad `catch (e: Exception)` in coroutine code can swallow cancellation. */
-val cancellationGuardScript = rootProject.file("scripts/check-cancellation.sh")
+val cancellationGuardScript = rootProject.file("scripts/lib/check-cancellation.sh")
 val isWindowsHost = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
 
 if (cancellationGuardScript.isFile && !isWindowsHost) {

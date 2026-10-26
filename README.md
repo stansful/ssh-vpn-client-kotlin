@@ -84,18 +84,19 @@
 
 ### Сборка из исходников
 
-Нужны macOS или Linux, JDK 17+ и Android SDK с API 37. Путь к SDK берётся из `ANDROID_HOME` или из `local.properties` (пример — [local.properties.example](local.properties.example)).
+Нужны macOS или Linux, JDK 17+ (для юнит-тестов — JDK 21+: Robolectric запускает их на Android SDK 36) и Android SDK с API 37. Путь к SDK берётся из `ANDROID_HOME` или из `local.properties` (пример — [local.properties.example](local.properties.example)).
 
 ```bash
-./scripts/check-env.sh      # проверить JDK, SDK и Gradle
-./scripts/build-debug.sh    # собрать debug APK
-./scripts/install-debug.sh  # установить на подключённое устройство
-./scripts/test.sh           # запустить юнит-тесты
+./scripts/lib/check-env.sh      # проверить JDK, SDK и Gradle
+./scripts/lib/build-debug.sh    # собрать debug APK
+./scripts/lib/install-debug.sh  # установить на подключённое устройство
+./scripts/lib/test.sh           # запустить юнит-тесты
 ```
 
-- **Релиз:** `./scripts/build-release.sh`. Если переменные `SSH_VPN_RELEASE_*` не заданы, скрипт сам создаст локальный ключ подписи в `.local/signing/`. Кроме APK, скрипт собирает движок Xray для релиза: нужны `ANDROID_HOME` в окружении (одного `local.properties` мало) и python3, а без готового `app/libs/libXray.aar` — ещё Go и Android NDK. Чтобы пропустить этот шаг, задайте `SSH_VPN_SKIP_XRAY_RELEASE_ASSETS=1`.
-- **Публикация:** GitHub Actions собирает и публикует релиз, когда в `master` меняется версия в `app/build.gradle.kts`.
-- **Скриншоты** отрендерены из Compose-кода без эмулятора: `./scripts/screenshots.sh` кладёт рендеры в `app/build/screenshots/`, а `python3 scripts/readme-screenshots.py` (нужен Pillow) собирает из них картинки для README в `docs/screenshots/`.
+- **Новая версия:** `./scripts/make-release.sh` показывает текущую версию и последний релиз, спрашивает новую (Enter — следующая минорная; она должна быть выше текущей и всех релизных тегов), записывает её в `app/build.gradle.kts` и делает коммит `feat: release - version X.Y.Z`. Пушить коммит в `master` — вручную.
+- **Публикация:** когда в `master` приходит коммит с новой версией, GitHub Actions (`.github/workflows/release.yml`) прогоняет все проверки, собирает подписанные APK и движок Xray и публикует релиз `X.Y.Z`. Остальные ветки и pull request'ы проверяет `.github/workflows/ci.yml`: юнит-тесты, Android lint, релизная сборка, shellcheck и тесты релизных скриптов.
+- **Сборка релиза локально:** `./scripts/build-release.sh` собирает те же файлы, что публикует GitHub: APK (universal и по одному на ABI), движок Xray по ABI и `SHA256SUMS`. `--test` сначала прогоняет тесты, `--no-xray` собирает только APK, `--out DIR` ещё и копирует файлы в `DIR`. Если переменные `SSH_VPN_RELEASE_*` не заданы, скрипт сам создаст локальный ключ подписи в `.local/signing/`. Для движка Xray нужны `ANDROID_HOME` в окружении (одного `local.properties` мало) и python3, а без готового `app/libs/libXray.aar` — ещё Go и Android NDK.
+- **Скриншоты** отрендерены из Compose-кода без эмулятора: `./scripts/lib/screenshots.sh` кладёт рендеры в `app/build/screenshots/`, а `python3 scripts/lib/readme-screenshots.py` (нужен Pillow) собирает из них картинки для README в `docs/screenshots/`.
 
 ### Как это сделано
 
@@ -189,18 +190,19 @@ The app finds new versions by itself and offers to install them.
 
 ### Build from source
 
-You need macOS or Linux, JDK 17+ and the Android SDK with API 37. The SDK path comes from `ANDROID_HOME` or `local.properties` (see [local.properties.example](local.properties.example)).
+You need macOS or Linux, JDK 17+ (JDK 21+ for the unit tests: Robolectric runs them on Android SDK 36) and the Android SDK with API 37. The SDK path comes from `ANDROID_HOME` or `local.properties` (see [local.properties.example](local.properties.example)).
 
 ```bash
-./scripts/check-env.sh      # check JDK, SDK and Gradle
-./scripts/build-debug.sh    # build a debug APK
-./scripts/install-debug.sh  # install it on a connected device
-./scripts/test.sh           # run the unit tests
+./scripts/lib/check-env.sh      # check JDK, SDK and Gradle
+./scripts/lib/build-debug.sh    # build a debug APK
+./scripts/lib/install-debug.sh  # install it on a connected device
+./scripts/lib/test.sh           # run the unit tests
 ```
 
-- **Release:** `./scripts/build-release.sh`. If the `SSH_VPN_RELEASE_*` variables are not set, the script creates a local signing key in `.local/signing/`. Besides the APKs, it also builds the Xray engine for the release. This step needs `ANDROID_HOME` set in the environment (`local.properties` alone is not enough) and python3, plus Go and the Android NDK when there is no prebuilt `app/libs/libXray.aar`. Skip it with `SSH_VPN_SKIP_XRAY_RELEASE_ASSETS=1`.
-- **Publishing:** GitHub Actions builds and publishes a release when the version in `app/build.gradle.kts` changes on `master`.
-- **Screenshots** are rendered from the Compose code without an emulator: `./scripts/screenshots.sh` writes the renders to `app/build/screenshots/`, and `python3 scripts/readme-screenshots.py` (needs Pillow) turns them into the README images in `docs/screenshots/`.
+- **New version:** `./scripts/make-release.sh` shows the current version and the last release, asks for the new one (Enter takes the next minor version; it must be higher than the current version and every release tag), writes it into `app/build.gradle.kts` and commits it as `feat: release - version X.Y.Z`. Pushing the commit to `master` is up to you.
+- **Publishing:** when a commit with a new version reaches `master`, GitHub Actions (`.github/workflows/release.yml`) runs every check, builds the signed APKs and the Xray engine and publishes release `X.Y.Z`. Other branches and pull requests are checked by `.github/workflows/ci.yml`: unit tests, Android lint, the release build, shellcheck and the release scripts' tests.
+- **Local release build:** `./scripts/build-release.sh` builds the same files GitHub publishes: the APKs (universal and one per ABI), the Xray engine per ABI and `SHA256SUMS`. `--test` runs the tests first, `--no-xray` builds the APKs only, `--out DIR` also copies the files to `DIR`. If the `SSH_VPN_RELEASE_*` variables are not set, the script creates a local signing key in `.local/signing/`. The Xray engine needs `ANDROID_HOME` set in the environment (`local.properties` alone is not enough) and python3, plus Go and the Android NDK when there is no prebuilt `app/libs/libXray.aar`.
+- **Screenshots** are rendered from the Compose code without an emulator: `./scripts/lib/screenshots.sh` writes the renders to `app/build/screenshots/`, and `python3 scripts/lib/readme-screenshots.py` (needs Pillow) turns them into the README images in `docs/screenshots/`.
 
 ### How it was made
 

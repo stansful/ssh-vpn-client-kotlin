@@ -108,7 +108,7 @@ exceptions:
       - 'Throwable'
     # `Exception` is intentionally absent: network/tunnel loops legitimately catch it.
     # The guard against swallowed cancellation is SwallowedException above plus the
-    # CancellationExceptionRethrow lint in scripts/check-cancellation.sh.
+    # CancellationExceptionRethrow lint in scripts/lib/check-cancellation.sh.
     allowedExceptionNameRegex: '_|(ignore|expected).*'
   TooGenericExceptionThrown:
     active: true

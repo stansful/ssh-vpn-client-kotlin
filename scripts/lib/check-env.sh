@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT_DIR/scripts/env.sh"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/scripts/lib/env.sh"
 ANDROID_STUDIO_JAVA="/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java"
 
 printf 'Project: %s\n' "$ROOT_DIR"
@@ -41,5 +41,5 @@ EOF
   exit 1
 fi
 
-"$ROOT_DIR/scripts/resolve-gradle.sh" >/dev/null
+"$ROOT_DIR/scripts/lib/resolve-gradle.sh" >/dev/null
 printf 'Environment looks ready.\n'

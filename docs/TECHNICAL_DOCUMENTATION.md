@@ -1141,16 +1141,24 @@ Install:
 
 Основные scripts:
 
-- `scripts/test.sh` - unit tests.
-- `scripts/lint.sh` - lint.
-- `scripts/build-debug.sh` - debug APK.
-- `scripts/build-release.sh` - release APK.
-- `scripts/build-xray-core.sh` - pinned build `libXray.aar`.
-- `scripts/package-xray-core-assets.sh` - ABI-specific Xray core release assets.
+- `scripts/make-release.sh` - новая версия в `app/build.gradle.kts` (выше текущей и всех релизных тегов) и коммит `feat: release - version X.Y.Z`.
+- `scripts/build-release.sh` - файлы релиза: release APK, ABI-specific Xray core assets и `SHA256SUMS` (`--test`, `--no-xray`, `--out DIR`).
+- `scripts/lib/version.sh` - общие функции версий: чтение и запись `appVersionName`, `versionCode`, релизные теги, список файлов релиза.
+- `scripts/lib/test.sh` - unit tests.
+- `scripts/lib/lint.sh` - lint.
+- `scripts/lib/build-debug.sh` - debug APK.
+- `scripts/lib/build-xray-core.sh` - pinned build `libXray.aar`.
+- `scripts/lib/package-xray-core-assets.sh` - ABI-specific Xray core release assets.
+- `scripts/tests/run.sh` - тесты релизных скриптов на временных git-репозиториях.
+
+GitHub Actions:
+
+- `.github/workflows/ci.yml` - push в любую ветку, кроме `master`, и pull request: shellcheck, actionlint и тесты релизных скриптов, unit tests, lint, release build с временным ключом без Xray.
+- `.github/workflows/release.yml` - push в `master`: весь `ci.yml`, затем, если у версии ещё нет релиза, сборка `libXray.aar`, подписанная сборка `scripts/build-release.sh`, проверка ключа подписи по последнему релизу и публикация релиза `X.Y.Z` (черновик, загрузка и проверка файлов, публикация; тег создаёт GitHub).
 
 Release APK:
 
-- `appVersionName = 2.5.6`.
+- Версия — строка `val appVersionName = "X.Y.Z"` в `app/build.gradle.kts`, её меняет `scripts/make-release.sh`.
 - `versionCode = major * 1_000_000 + minor * 1_000 + patch`.
 - ABI splits включены для:
   - `arm64-v8a`.
@@ -1176,7 +1184,7 @@ Signing:
 
 Xray core build:
 
-- `scripts/build-xray-core.sh` клонирует pinned upstream:
+- `scripts/lib/build-xray-core.sh` клонирует pinned upstream:
   - `libXray`: `9bb7cad11a225f1039274dc8afd9810bcf458038`.
   - `Xray-core`: `94ffd50060f1cfd5d7482ec90a23a92bdefdff68`.
   - `gomobile`: `v0.0.0-20260611195102-4dd8f1dbf5d2`.
@@ -1185,11 +1193,11 @@ Xray core build:
 
 Xray release assets:
 
-- `scripts/package-xray-core-assets.sh` берет source AAR.
+- `scripts/lib/package-xray-core-assets.sh` берет source AAR.
 - D8 компилирует `classes.jar` в `classes.dex`.
 - Для каждого ABI создает `libXray-<appVersion>-<abi>.aar`.
 - В asset остаются только base AAR entries, `classes.dex` и один `jni/<abi>/libgojni.so`.
-- `.sha256` файлы сейчас не генерируются.
+- Отдельных `.sha256` файлов нет: `scripts/build-release.sh` пишет один `SHA256SUMS` на все файлы релиза, и он публикуется вместе с ними.
 
 По умолчанию Xray core не бандлится в APK. Для forced bundled build есть Gradle property `-PbundleXrayCore=true` и env `SSH_VPN_BUNDLE_XRAY_CORE=1`.
 
@@ -1295,7 +1303,7 @@ Backup:
 
 ## 32. Тестовая поверхность
 
-Точное количество тестов в документации намеренно не фиксируется: источником истины служит отчёт актуального запуска `scripts/test.sh`.
+Точное количество тестов в документации намеренно не фиксируется: источником истины служит отчёт актуального запуска `scripts/lib/test.sh`.
 
 Основные unit test suites:
 

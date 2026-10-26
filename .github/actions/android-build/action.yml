@@ -1,0 +1,31 @@
+name: Android build host
+description: A JDK (Temurin) for Gradle and the Android SDK packages the build needs
+
+inputs:
+  java-version:
+    description: >-
+      The JDK Gradle runs on, which also runs the unit tests (the project sets no toolchain). The release build uses
+      17; the Robolectric tests need 21, since Robolectric refuses Android SDK 36 on an older Java.
+    default: "17"
+  gradle-cache:
+    description: Cache Gradle's dependencies and wrapper between runs (actions/setup-java)
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.java-version }}
+        cache: ${{ inputs.gradle-cache == 'true' && 'gradle' || '' }}
+
+    - name: Ensure Android SDK packages
+      shell: bash --noprofile --norc -euo pipefail {0}
+      run: |
+        # compileSdk 37 and the build-tools local builds use. Already present on ubuntu-24.04.
+        for package in "platforms;android-37.0" "build-tools;37.0.0"; do
+          if [[ ! -d "$ANDROID_HOME/${package//;//}" ]]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "$package"
+          fi
+        done

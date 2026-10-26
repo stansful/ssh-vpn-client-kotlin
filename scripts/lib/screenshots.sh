@@ -2,15 +2,15 @@
 # Renders Compose UI to PNG on the JVM (Robolectric native graphics + Roborazzi; no emulator).
 # Output: app/build/screenshots/<Name>.png (density 2.0, overwritten on every run).
 #
-# Usage: scripts/screenshots.sh [TestClassOrPattern ...]
-#   scripts/screenshots.sh ScreenshotSamplesTest        # one class
-#   scripts/screenshots.sh HomeScreenshotTest.connected # one method
-#   scripts/screenshots.sh                              # every test under ...sshvpnclient.screenshots
+# Usage: scripts/lib/screenshots.sh [TestClassOrPattern ...]
+#   scripts/lib/screenshots.sh ScreenshotSamplesTest        # one class
+#   scripts/lib/screenshots.sh HomeScreenshotTest.connected # one method
+#   scripts/lib/screenshots.sh                              # every test under ...sshvpnclient.screenshots
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT_DIR/scripts/env.sh"
-GRADLE="$("$ROOT_DIR/scripts/resolve-gradle.sh")"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/scripts/lib/env.sh"
+GRADLE="$("$ROOT_DIR/scripts/lib/resolve-gradle.sh")"
 OUT_DIR="$ROOT_DIR/app/build/screenshots"
 
 filters=()
