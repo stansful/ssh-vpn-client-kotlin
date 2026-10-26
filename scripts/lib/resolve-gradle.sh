@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 if [[ -x "$ROOT_DIR/gradlew" ]]; then
   printf '%s\n' "$ROOT_DIR/gradlew"
@@ -25,7 +25,7 @@ cat >&2 <<'EOF'
 Gradle was not found.
 
 Install Gradle 9.x or run:
-  ./scripts/create-gradle-wrapper.sh
+  ./scripts/lib/create-gradle-wrapper.sh
 
 That script also requires a local gradle command for the initial wrapper creation.
 EOF

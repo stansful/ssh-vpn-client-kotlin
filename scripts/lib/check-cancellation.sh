@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOURCE_DIR="$ROOT_DIR/app/src/main/java"
 
 # path-suffix : reason
@@ -74,7 +74,7 @@ Fix by rethrowing cancellation before the broad catch:
     }
 
 If the file genuinely cannot be cancelled (no suspension points), add it to ALLOWLIST
-in scripts/check-cancellation.sh together with the reason.
+in scripts/lib/check-cancellation.sh together with the reason.
 EOF
   exit 1
 fi

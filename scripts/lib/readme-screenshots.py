@@ -2,8 +2,8 @@
 """Builds the README images in docs/screenshots/ from the Compose renders.
 
 Usage:
-  ./scripts/screenshots.sh              # renders app/build/screenshots/*.png (no emulator)
-  python3 scripts/readme-screenshots.py # frames, crops and lays them out into docs/screenshots/
+  ./scripts/lib/screenshots.sh              # renders app/build/screenshots/*.png (no emulator)
+  python3 scripts/lib/readme-screenshots.py # frames, crops and lays them out into docs/screenshots/
 
 Needs Pillow (python3 -m pip install pillow). Images are saved as full-colour RGBA PNGs:
 palette quantization bands the orb glows and breaks the transparent corners.
@@ -21,7 +21,7 @@ try:
 except ImportError:
     sys.exit("Pillow is missing: python3 -m pip install pillow")
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC = os.path.join(ROOT, "app", "build", "screenshots")
 OUT = os.path.join(ROOT, "docs", "screenshots")
 ICON = os.path.join(ROOT, "resources", "icons", "icon.svg")
@@ -65,7 +65,7 @@ LOGO = ("logo.svg", 112)
 def load(name, crop_height=None):
     path = os.path.join(SRC, name + ".png")
     if not os.path.exists(path):
-        sys.exit(f"{path} is missing: run ./scripts/screenshots.sh first")
+        sys.exit(f"{path} is missing: run ./scripts/lib/screenshots.sh first")
     img = Image.open(path).convert("RGBA")
     if crop_height and img.height > crop_height:
         img = img.crop((0, 0, img.width, crop_height))

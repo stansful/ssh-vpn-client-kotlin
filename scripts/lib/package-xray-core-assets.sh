@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT_DIR/scripts/env.sh"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/scripts/lib/env.sh"
+# shellcheck source=scripts/lib/version.sh
+source "$ROOT_DIR/scripts/lib/version.sh"
 
 OUTPUT_DIR="${1:-$ROOT_DIR/build/app/outputs/apk/release}"
 SOURCE_AAR="${SSH_VPN_XRAY_CORE_AAR:-}"
@@ -23,7 +25,7 @@ if [[ -z "$SOURCE_AAR" ]]; then
   elif [[ -f "$ROOT_DIR/app/libs/libXray.aar" ]]; then
     SOURCE_AAR="$ROOT_DIR/app/libs/libXray.aar"
   else
-    "$ROOT_DIR/scripts/build-xray-core.sh"
+    "$ROOT_DIR/scripts/lib/build-xray-core.sh"
     SOURCE_AAR="$ROOT_DIR/build/xray-core/libXray/libXray.aar"
     if [[ ! -f "$SOURCE_AAR" ]]; then
       SOURCE_AAR="$ROOT_DIR/app/libs/libXray.aar"
@@ -36,18 +38,10 @@ if [[ ! -f "$SOURCE_AAR" ]]; then
   exit 1
 fi
 
-APP_VERSION="$(
-  python3 - "$ROOT_DIR/app/build.gradle.kts" <<'PY'
-import re
-import sys
-
-text = open(sys.argv[1], encoding="utf-8").read()
-match = re.search(r'val\s+appVersionName\s*=\s*"([^"]+)"', text)
-if not match:
-    raise SystemExit("Unable to read appVersionName from app/build.gradle.kts")
-print(match.group(1))
-PY
-)"
+APP_VERSION="$(app_version_get "$ROOT_DIR")" || {
+  echo "Unable to read appVersionName from app/build.gradle.kts" >&2
+  exit 1
+}
 
 mkdir -p "$OUTPUT_DIR"
 rm -f "$OUTPUT_DIR"/libXray-*.aar

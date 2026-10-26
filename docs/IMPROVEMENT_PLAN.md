@@ -47,7 +47,7 @@
        throw cancellation
    } catch (error: Exception) {
    ```
-2. Добавлен `scripts/check-cancellation.sh` — эвристический guard: файл с корутинами + широким catch обязан упоминать `CancellationException`. Проверен на canary-файле (ловит регрессию, exit 1). Подключён к `:app:check` и отдельным шагом в CI.
+2. Добавлен `scripts/lib/check-cancellation.sh` — эвристический guard: файл с корутинами + широким catch обязан упоминать `CancellationException`. Проверен на canary-файле (ловит регрессию, exit 1). Подключён к `:app:check` и отдельным шагом в CI.
 3. `KotlinTunForwarder.kt` внесён в ALLOWLIST скрипта с обоснованием, а не «починен» вслепую.
 
 ### 0.2. CI отсутствует — ✅ СДЕЛАНО
@@ -73,6 +73,8 @@ jobs:
 ```
 
 **Что сделано.**
+
+> 26.10.2026 `ci.yml` и `release.yml` написаны заново (актуальное описание — `docs/TECHNICAL_DOCUMENTATION.md`, раздел 27): релиз выходит из `master`, когда `scripts/make-release.sh` поднял версию, тег — `X.Y.Z` без `v`, контрольные суммы — `SHA256SUMS`. Detekt (нет `config/detekt/baseline.xml`) и тесты миграций на эмуляторе в CI сейчас не запускаются. Список ниже — то, что было сделано тогда.
 
 - `.github/workflows/ci.yml` — job `build`: guard отмены → `assembleDebug` → `testDebugUnitTest` → `lintDebug` → `detekt`, с выгрузкой отчётов и debug-APK.
 - `.github/workflows/ci.yml` — job `migrations`: тесты миграций Room на эмуляторе (см. 1.2).
@@ -240,7 +242,7 @@ jobs:
 
 - **Документация раздута и дублируется:** `README.md` (454 строки, 47 КБ) + `README_SA.md` (34 КБ) + `docs/TECHNICAL_DOCUMENTATION.md` (1 043) + `docs/WORKLOG.md` (2 047). README превратился в changelog+спеку. → README ужать до 60–80 строк (что это, скриншот, установка, сборка, ссылки), детали увести в `docs/`, WORKLOG заархивировать (`docs/archive/`), фичи описывать в GitHub Releases.
 - `.DS_Store` не в git (хорошо), но лежат в рабочей копии — `find . -name .DS_Store -delete`.
-- `scripts/env.sh` содержит захардкоженный `/Users/stansful/Library/Android/sdk` — заменить на детект через `ANDROID_HOME`/`local.properties` с понятной ошибкой, иначе скрипты не работают ни у кого другого (для open-source это барьер для контрибьюторов).
+- `scripts/lib/env.sh` содержит захардкоженный `/Users/stansful/Library/Android/sdk` — заменить на детект через `ANDROID_HOME`/`local.properties` с понятной ошибкой, иначе скрипты не работают ни у кого другого (для open-source это барьер для контрибьюторов).
 - Нет `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE`, шаблонов issue/PR. Для проекта с VPN/крипто `SECURITY.md` с политикой раскрытия уязвимостей — must have.
 - Сборка с/без `bundleXrayCore` даёт разные APK — задокументировать, какой флаг используется для официальных релизов, и зафиксировать его в `release.yml` (воспроизводимость сборки).
 - `NetworkDiagnostics`/диагностические логи: убедиться (тестом), что host/user/пароли не попадают в буфер, который пользователь копирует в clipboard и отправляет в поддержку.
@@ -267,7 +269,7 @@ jobs:
 git add config/detekt/baseline.xml app/lint-baseline.xml
 
 # 5. Guard отмены (работает и без SDK)
-bash scripts/check-cancellation.sh
+bash scripts/lib/check-cancellation.sh
 ```
 
 После шага 4 — убрать `continue-on-error: true` у шага Detekt в `.github/workflows/ci.yml`.

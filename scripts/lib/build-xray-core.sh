@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT_DIR/scripts/env.sh"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/scripts/lib/env.sh"
 
 LIBXRAY_COMMIT="9bb7cad11a225f1039274dc8afd9810bcf458038"
 XRAY_CORE_COMMIT="94ffd50060f1cfd5d7482ec90a23a92bdefdff68"
@@ -58,7 +58,8 @@ checkout_pinned_repository "https://github.com/XTLS/libXray.git" "$LIBXRAY_DIR" 
 checkout_pinned_repository "https://github.com/XTLS/Xray-core.git" "$XRAY_CORE_DIR" "$XRAY_CORE_COMMIT"
 
 export GOTOOLCHAIN=auto
-export PATH="$(go env GOPATH)/bin:$PATH"
+PATH="$(go env GOPATH)/bin:$PATH"
+export PATH
 
 (
   cd "$LIBXRAY_DIR"

@@ -1,14 +1,24 @@
 name: Release
 
-# Push/merge to master -> ./scripts/build-release.sh -> tag <appVersionName> on the pushed commit ->
-# GitHub release "ssh-vpn-client-kotlin-<version>-release" with everything from build/app/outputs/apk/release.
-# A push that does not bump appVersionName is a no-op: the tag already exists, build and publish are skipped.
+# Releases shadow from master. Every push to master runs the whole CI first (ci.yml through workflow_call; ci.yml
+# skips its own run of that push, so the checks run once). When the version in app/build.gradle.kts
+# (val appVersionName) has no release yet, scripts/build-release.sh (what a local build runs) builds the signed APKs,
+# the Xray engine per ABI and SHA256SUMS, and they are published as GitHub release
+# "ssh-vpn-client-kotlin-<version>-release" with the plain tag <version> (no "v") on the built commit: a draft
+# first, every upload checked, then published as the latest release, which the in-app updater polls.
+# A push that does not bump the version is tested and ends with a notice. Bump it with scripts/make-release.sh,
+# which commits "feat: release - version X.Y.Z". Nothing is built or published from a commit whose checks fail:
+# re-run the failed jobs, or push a fix (the version is still unreleased).
 #
 # Jobs:
-#   gate     reads appVersionName and decides whether there is anything to release.
+#   gate     reads the version and its release state (.github/scripts/release-state.sh).
+#   quality  the whole CI (ci.yml) on every push to master, released or not.
 #   xray     builds libXray.aar from the pinned sources. No secrets: it runs third-party Go code.
 #   build    signs with the release key (repository secrets). No write token.
-#   publish  creates the tag and the release: draft -> upload assets -> publish.
+#   publish  creates the release: draft -> upload and check the assets -> publish (GitHub creates the tag).
+#
+# workflow_dispatch with dry_run builds any branch the same way (signed, checked against the latest release's key)
+# and publishes nothing.
 
 on:
   push:
@@ -30,7 +40,7 @@ concurrency:
 
 defaults:
   run:
-    shell: bash
+    shell: bash --noprofile --norc -euo pipefail {0}
 
 jobs:
   gate:
@@ -48,39 +58,55 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          sparse-checkout: |
+            /app/build.gradle.kts
+            /scripts/lib/
+            /.github/scripts/
+          sparse-checkout-cone-mode: false
 
-      - name: Read appVersionName and compare with tags
+      - name: Read the version and its release state
         id: decide
         env:
           DRY_RUN: ${{ inputs.dry_run == true }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          # Same pattern as scripts/package-xray-core-assets.sh. Two matches leave a newline and fail the check.
-          version="$(sed -nE 's/.*val[[:space:]]+appVersionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle.kts)"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error file=app/build.gradle.kts::Expected one appVersionName in X.Y.Z format, got '${version}'."
+          . scripts/lib/version.sh
+          if ! version="$(app_version_get .)"; then
+            echo "::error file=app/build.gradle.kts::Expected exactly one line val appVersionName = \"X.Y.Z\"."
             exit 1
           fi
 
-          build=true
-          publish=true
-          [[ "$DRY_RUN" == "true" ]] && publish=false
-          if [[ "$publish" == "true" && "$GITHUB_REF" != "refs/heads/master" ]]; then
-            echo "::error::Releases are published only from master. Use dry_run to build another branch."
-            exit 1
-          fi
-
-          tags="$(git ls-remote --tags --refs origin | sed -E 's#^.*refs/tags/##')"
-          newest="$({ sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' <<<"$tags"; echo "$version"; } | sort -V | tail -n 1)"
-          if grep -qxF -e "$version" -e "v$version" <<<"$tags"; then
-            if [[ "$publish" == "true" ]]; then
-              build=false
-              publish=false
-              echo "::notice title=Nothing to release::Tag ${version} already exists. Bump appVersionName in app/build.gradle.kts to release."
+          if [[ "$DRY_RUN" == "true" ]]; then
+            # Any branch and any version: build and check, never publish. The state is only reported.
+            state="$(bash .github/scripts/release-state.sh)" || state="not releasable"
+            build=true
+            publish=false
+          else
+            if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+              echo "::error::Releases are published only from master. Use dry_run to build another branch."
+              exit 1
             fi
-          elif [[ "$newest" != "$version" && "$publish" == "true" ]]; then
-            echo "::error file=app/build.gradle.kts::appVersionName ${version} is lower than the newest tag ${newest}."
-            exit 1
+            state="$(bash .github/scripts/release-state.sh)"
+            case $state in
+              released)
+                build=false
+                publish=false
+                echo "::notice title=Nothing to release::Version ${version} is already released. Bump it with scripts/make-release.sh (commit \"feat: release - version X.Y.Z\") and push to release."
+                ;;
+              retry)
+                build=true
+                publish=true
+                echo "::notice::Tag ${version} is already on this commit without a release: publishing it."
+                ;;
+              new)
+                build=true
+                publish=true
+                ;;
+              *)
+                echo "::error::release-state.sh printed '${state}'."
+                exit 1
+                ;;
+            esac
           fi
 
           {
@@ -88,7 +114,19 @@ jobs:
             echo "build=$build"
             echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
-          echo "Version $version, build $build, publish $publish"
+          echo "Version $version ($state): build $build, publish $publish"
+
+  # Every push to master, released or not, gets the whole CI here (ci.yml itself ignores pushes to master). It
+  # runs even when the gate refused the version, so the push is still tested.
+  quality:
+    name: CI
+    needs: gate
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+    with:
+      release: true
 
   xray:
     name: Build libXray.aar
@@ -116,12 +154,11 @@ jobs:
 
       - name: Build libXray.aar from pinned sources
         run: |
-          set -euo pipefail
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
           if [[ ! -d "$ANDROID_NDK_HOME" ]]; then
             "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$ANDROID_NDK_VERSION"
           fi
-          ./scripts/build-xray-core.sh
+          scripts/lib/build-xray-core.sh
 
       - name: Upload libXray.aar
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -133,7 +170,8 @@ jobs:
 
   build:
     name: Build signed APKs
-    needs: [gate, xray]
+    needs: [gate, quality, xray]
+    if: needs.gate.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -146,21 +184,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Ensure Android SDK packages
-        run: |
-          set -euo pipefail
-          # compileSdk 37 and the build-tools local builds use. Already present on ubuntu-24.04.
-          for package in "platforms;android-37.0" "build-tools;37.0.0"; do
-            if [[ ! -d "$ANDROID_HOME/${package//;//}" ]]; then
-              "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "$package"
-            fi
-          done
+      - uses: ./.github/actions/android-build
 
       - name: Download libXray.aar
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -175,7 +199,6 @@ jobs:
           KEY_ALIAS: ${{ secrets.SSH_VPN_RELEASE_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.SSH_VPN_RELEASE_KEY_PASSWORD }}
         run: |
-          set -euo pipefail
           # Without all four secrets build-release.sh would sign with a throwaway key that installed apps reject.
           for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
             if [[ -z "${!name}" ]]; then
@@ -187,7 +210,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/signing"
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/signing/release.keystore"
 
-      - name: Build release
+      - name: Build release (scripts/build-release.sh)
         env:
           SSH_VPN_RELEASE_STORE_FILE: ${{ runner.temp }}/signing/release.keystore
           SSH_VPN_RELEASE_STORE_PASSWORD: ${{ secrets.SSH_VPN_RELEASE_STORE_PASSWORD }}
@@ -196,18 +219,31 @@ jobs:
           # The packaging script must use the AAR from the xray job, never start its own Go build here.
           SSH_VPN_XRAY_CORE_AAR: ${{ runner.temp }}/libxray/libXray.aar
         run: |
-          set -euo pipefail
-          ./scripts/build-release.sh
+          scripts/build-release.sh --out "$RUNNER_TEMP/out"
           if [[ -e .local/signing ]]; then
             echo "::error::build-release.sh fell back to a throwaway keystore."
             exit 1
           fi
 
+      - name: Check the release files
+        run: |
+          . scripts/lib/version.sh
+          if [[ "$(app_version_get .)" != "$VERSION" ]]; then
+            echo "::error file=app/build.gradle.kts::appVersionName is not $VERSION."
+            exit 1
+          fi
+          expected="$(release_assets "$VERSION" | LC_ALL=C sort)"
+          actual="$(find "$RUNNER_TEMP/out" -mindepth 1 -maxdepth 1 -printf '%P\n' | LC_ALL=C sort)"
+          if [[ "$expected" != "$actual" ]]; then
+            echo "::error::The build holds ${actual//$'\n'/ }, not ${expected//$'\n'/ }."
+            exit 1
+          fi
+          (cd "$RUNNER_TEMP/out" && sha256sum -c SHA256SUMS)
+
       - name: Verify signer matches the latest release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
           # Installed apps accept an update only when it is signed like the release they already have.
           build_tools="$(printf '%s\n' "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
           signers() {
@@ -221,7 +257,7 @@ jobs:
             echo "::error::Cannot read the signing certificate of the latest release."
             exit 1
           fi
-          for apk in build/app/outputs/apk/release/*.apk; do
+          for apk in "$RUNNER_TEMP"/out/*.apk; do
             actual="$(signers "$apk")"
             if [[ "$actual" != "$expected" ]]; then
               echo "::error title=Wrong signing key::$(basename "$apk") is signed by ${actual}, the latest release by ${expected}."
@@ -234,7 +270,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ env.VERSION }}
-          path: build/app/outputs/apk/release/
+          path: ${{ runner.temp }}/out/
           if-no-files-found: error
           retention-days: ${{ needs.gate.outputs.publish == 'true' && 7 || 1 }}
           compression-level: 0
@@ -243,9 +279,11 @@ jobs:
         if: always()
         run: rm -rf "$RUNNER_TEMP/signing"
 
+  # A separate job, so the write token never shares a machine with the build, and a failed upload can be re-run
+  # without rebuilding.
   publish:
-    name: Tag and publish release
-    needs: [gate, build]
+    name: Publish release
+    needs: [gate, quality, build]
     if: needs.gate.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -253,13 +291,21 @@ jobs:
       contents: write
     env:
       VERSION: ${{ needs.gate.outputs.version }}
+      GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Check out (full history for release notes)
+      # Full history and tags for the notes, without the tree.
+      - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
+          sparse-checkout: |
+            /app/build.gradle.kts
+            /scripts/lib/
+            /.github/scripts/
+          sparse-checkout-cone-mode: false
 
       - name: Download build outputs
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -267,56 +313,126 @@ jobs:
           name: release-${{ env.VERSION }}
           path: ${{ runner.temp }}/release-assets
 
-      - name: Create tag and release
+      # The commit subjects since the previous release tag; the in-app update sheet shows them
+      - name: Write release notes
         run: |
-          set -euo pipefail
-          # A re-run of an old run must not tag a commit that master has already moved past.
+          bash .github/scripts/release-notes.sh > "$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/release-notes.md"
+
+      - name: Publish ${{ needs.gate.outputs.version }}
+        run: |
+          . scripts/lib/version.sh
+          # Fresh state, not the gate's: this job may be a re-run days later.
+          state="$(bash .github/scripts/release-state.sh)"
+          if [[ "$state" == released ]]; then
+            # A re-run after GitHub applied the publish but answered it with an error: the release went live
+            # from this very commit.
+            if [[ "$(git ls-remote --tags origin | tag_commit "$VERSION")" == "$GITHUB_SHA" ]]; then
+              echo "::notice::${VERSION} is already published from this commit."
+              exit 0
+            fi
+            echo "::error::${VERSION} has already been released from another commit."
+            exit 1
+          fi
+          # A re-run of an old run must not release a commit that master has already moved past. That newer run
+          # releases the version instead (GITHUB_TOKEN could not tag this commit anyway once the workflows differ).
           tip="$(git ls-remote origin refs/heads/master | cut -f 1)"
           if [[ "$tip" != "$GITHUB_SHA" ]]; then
             echo "::notice title=Not published::master moved to ${tip}; the run for that commit releases ${VERSION}."
             exit 0
           fi
-          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" > /dev/null; then
-            echo "::error::Tag ${VERSION} already exists."
-            exit 1
-          fi
+
+          assets=()
+          while IFS= read -r name; do
+            assets+=("$RUNNER_TEMP/release-assets/$name")
+          done < <(release_assets "$VERSION")
+          for f in "${assets[@]}"; do
+            if [[ ! -s "$f" ]]; then
+              echo "::error::The build outputs lack $(basename "$f")."
+              exit 1
+            fi
+          done
 
           # A run interrupted before publishing leaves a draft. Remove our own, never one a person made.
-          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            --jq ".[] | select(.draft and .tag_name == \"$VERSION\") | \"\(.id) \(.author.login)\"" \
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+            --jq '.[] | select(.draft and .tag_name == env.VERSION) | "\(.id) \(.author.login)"' \
             | while read -r release_id author; do
                 if [[ "$author" != "github-actions[bot]" ]]; then
                   echo "::error::Draft release ${VERSION} by ${author} already exists. Publish or delete it, then re-run."
                   exit 1
                 fi
-                gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+                gh api --method DELETE "repos/$GH_REPO/releases/$release_id" --silent
               done
 
-          # Notes: commit subjects since the previous version tag, like earlier releases.
-          notes="$RUNNER_TEMP/release-notes.md"
-          previous="$(git tag --merged "$GITHUB_SHA" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
-          if [[ -n "$previous" ]]; then
-            git log --no-merges --pretty='%s' "$previous..$GITHUB_SHA" > "$notes"
-          else
-            git log --no-merges --pretty='%s' --max-count=50 "$GITHUB_SHA" > "$notes"
-          fi
-          [[ -s "$notes" ]] || echo "Release $VERSION" > "$notes"
-          cat "$notes"
-
-          # 1) Draft with all assets: invisible to /releases/latest, which the in-app updaters poll.
-          gh release create "$VERSION" "$RUNNER_TEMP"/release-assets/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft \
-            --target "$GITHUB_SHA" \
-            --title "ssh-vpn-client-kotlin-$VERSION-release" \
-            --notes-file "$notes"
-          # 2) Publish: GitHub creates the tag on GITHUB_SHA now. A separate call on purpose: if this request
-          #    fails, gh's one-shot create would delete the release even when it already went live.
-          gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest
-
-          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')"
-          if [[ "$latest" != "$VERSION" ]]; then
-            echo "::error::/releases/latest returns ${latest}, not ${VERSION}."
+          # 1) A draft: invisible to /releases/latest, which the in-app updater polls. GitHub creates the tag on
+          #    publish. The API returns the draft's id at once; everything below works with that id, never with a
+          #    lookup in the release list, which lags behind.
+          id="$(gh api --method POST "repos/$GH_REPO/releases" \
+            -f tag_name="$VERSION" -f target_commitish="$GITHUB_SHA" \
+            -f name="ssh-vpn-client-kotlin-$VERSION-release" -F body=@"$RUNNER_TEMP/release-notes.md" \
+            -F draft=true --jq .id)"
+          if [[ ! "$id" =~ ^[0-9]+$ ]]; then
+            echo "::error::Creating the draft for ${VERSION} returned no release id: ${id}"
             exit 1
           fi
-          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$VERSION"
+          # A failed step removes the draft, but never a release that went live: GitHub may apply the PATCH below
+          # and still answer it with an error, so once the PATCH was sent only a release that is still a draft
+          # goes. A re-run then finds the release published from this commit.
+          trap 'if [[ -z "${published:-}" ]] && { [[ -z "${patching:-}" ]] || [[ "$(gh api "repos/$GH_REPO/releases/$id" --jq .draft 2>/dev/null)" == true ]]; }; then gh api --method DELETE "repos/$GH_REPO/releases/$id" --silent || true; fi' EXIT
+
+          # 2) Every asset, then the draft's asset list against the built files: name, size and digest
+          for f in "${assets[@]}"; do
+            curl -fsS --max-time 300 -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/octet-stream" --data-binary "@$f" \
+              "https://uploads.github.com/repos/$GH_REPO/releases/$id/assets?name=$(basename "$f")" > /dev/null
+          done
+          uploaded="$RUNNER_TEMP/uploaded.txt"
+          for _ in 1 2 3 4 5 6; do
+            gh api "repos/$GH_REPO/releases/$id" \
+              --jq '.assets[] | "\(.name) \(.size) \(.state) \(.digest // "-")"' > "$uploaded"
+            [[ "$(wc -l < "$uploaded")" -ne "${#assets[@]}" ]] || break
+            sleep 5
+          done
+          if [[ "$(wc -l < "$uploaded")" -ne "${#assets[@]}" ]]; then
+            echo "::error::The draft has $(wc -l < "$uploaded") assets instead of ${#assets[@]}."
+            exit 1
+          fi
+          for f in "${assets[@]}"; do
+            name="$(basename "$f")"
+            size="" asset_state="" digest=""
+            read -r _ size asset_state digest < <(awk -v n="$name" '$1 == n' "$uploaded") || true
+            if [[ "$size" != "$(wc -c < "$f" | tr -d ' ')" || "$asset_state" != uploaded ]]; then
+              echo "::error::${name} on the draft does not match the built file (size ${size:-?}, state ${asset_state:-?})."
+              exit 1
+            fi
+            if [[ "$digest" == "-" ]]; then
+              echo "::warning::GitHub reported no digest for ${name}."
+            elif [[ "$digest" != "sha256:$(sha256sum "$f" | cut -d ' ' -f 1)" ]]; then
+              echo "::error::${name} on the draft has digest ${digest}, which differs from the built file."
+              exit 1
+            fi
+          done
+
+          # 3) Publish as the latest release
+          patching=1
+          gh api --method PATCH "repos/$GH_REPO/releases/$id" -F draft=false -f make_latest=true --silent
+          published=1
+
+          latest=""
+          for _ in 1 2 3 4 5 6; do
+            latest="$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name || true)"
+            [[ "$latest" == "$VERSION" ]] && break
+            sleep 5
+          done
+          if [[ "$latest" != "$VERSION" ]]; then
+            echo "::error::/releases/latest returns \"${latest}\", not ${VERSION}."
+            exit 1
+          fi
+          # The tag GitHub created on publish, an annotated one followed to its commit
+          tag_sha="$(git ls-remote --tags origin | tag_commit "$VERSION")"
+          if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+            echo "::error::Tag ${VERSION} points at ${tag_sha:-nothing}, not ${GITHUB_SHA}."
+            exit 1
+          fi
+          echo "Published https://github.com/$GH_REPO/releases/tag/$VERSION"

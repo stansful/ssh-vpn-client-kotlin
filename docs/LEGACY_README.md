@@ -13,7 +13,7 @@
 > - Auto заменяет уже проверенный маршрут только после 3 неудачных раундов проверки (не меньше 30 с). Пока Auto ищет или меняет маршрут, трафик идёт мимо VPN.
 > - При выключенном экране пауза между попытками переподключения SSH растёт до 5 минут. Для переподключения сервис берёт короткий partial wake lock и ставит будильник через `AlarmManager.setAndAllowWhileIdle`.
 > - Дерево `ui/` в разделе «Архитектура» устарело: экраны теперь в `ui/{home,servers,routes,settings,shell,system,terminal,activity,designsystem}`.
-> - Файлы подписи со скриншота `docs/img.png` вручную создавать не нужно: `build-release.sh` создаёт их сам. Имена APK содержат версию: `app-universal-release-<version>.apk`.
+> - Файлы подписи со скриншота `docs/img.png` вручную создавать не нужно: `build-release.sh` создаёт их сам. Имена APK содержат версию: `app-universal-release-<version>.apk`. Скрипты сборки теперь в `scripts/lib/` (`scripts/lib/build-debug.sh` и другие), в `scripts/` остались `make-release.sh` и `build-release.sh`.
 > - Раздел «Последняя проверенная сборка» исторический: тогда было 144 теста, сейчас больше 600.
 
 Native Android VPN client на Kotlin + Jetpack Compose. Приложение поднимает Android `VpnService`, подключается к SSH-серверу и проксирует трафик приложений через SSH `direct-tcpip` каналы.
@@ -21,7 +21,7 @@ Native Android VPN client на Kotlin + Jetpack Compose. Приложение п
 ## setup / description / fast start
 1. Скачать [android studio](https://developer.android.com/studio?hl=ru), открыть проект, установить зависимости (ide по умолчанию это уже делает)
 2. Создать в корне файл local.properties пример содержимого находится в файле [local.properties.example](../local.properties.example)
-3. Запустить скрипт [build-debug.sh](../scripts/build-debug.sh), для [build-release.sh](../scripts/build-release.sh) нужно в корне создать файлы из скриншота по пути [docs/img.png](img.png) (нейросеть в помощь)
+3. Запустить скрипт [build-debug.sh](../scripts/lib/build-debug.sh), для [build-release.sh](../scripts/build-release.sh) нужно в корне создать файлы из скриншота по пути [docs/img.png](img.png) (нейросеть в помощь)
 4. В проекте не было написано ни единой строчки кода разработчиком, всё делал codex в связке с chatgpt-5.5 с высоким reasoning
 5. На проект ушло примерно 6 часов, 4 из которых это просмотр youtube, остальные 2 часа потрачены написание простых запросов в стиле `Добавь кнопку с подключением / перекрась / сломалось это / давай добавим логи для дебага / нужен новый функционал Х` а также запуск на мобилке и ручное тестирование функционала
 6. Цель проекта была простая - создать vpn тунель через ssh соединение, а также убедится что программирование в том виде в котором мы знаем умерло С:

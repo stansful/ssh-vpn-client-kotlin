@@ -1,0 +1,106 @@
+# Tests every push to a branch other than master, and every pull request. A push to master does not start this
+# workflow: release.yml calls it (workflow_call) before it builds and publishes anything, so the checks run once per
+# push and no skipped CI run is left behind.
+#   scripts        actionlint (the workflows), shellcheck (scripts/, .github/scripts/) and the tests of the release
+#                  scripts (scripts/tests/run.sh)
+#   unit           the coroutine cancellation guard, the unit tests (scripts/lib/test.sh) and Android lint
+#   release-build  scripts/build-release.sh with a throwaway key and without Xray: R8, resource shrinking and
+#                  lintVital, as release.yml builds the release
+name: CI
+
+on:
+  push:
+    branches-ignore: [master]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release:
+        description: Called by release.yml, which runs these checks on every push to master
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# A newer push to a branch or pull request cancels its older checks. The checks release.yml calls get a group of
+# their own run (release.yml queues its runs itself), so nothing, not even a dry run of the same branch, cancels
+# them.
+concurrency:
+  group: ci-${{ inputs.release && format('release-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !inputs.release }}
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  scripts:
+    name: Scripts and workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # the workflows, with shellcheck over their run: scripts
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo "$ACTIONLINT_IMAGE" -color
+      # actionlint does not look at script files; the same image's shellcheck does. -f gcc: this static build
+      # cannot print the Cyrillic source lines of its default format, whatever the locale
+      - name: shellcheck
+        if: ${{ !cancelled() }}
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo --entrypoint shellcheck "$ACTIONLINT_IMAGE" -x -f gcc \
+            scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh .github/scripts/*.sh
+      - name: Release scripts tests (make-release.sh, build-release.sh, release-state.sh, release-notes.sh)
+        if: ${{ !cancelled() }}
+        run: scripts/tests/run.sh
+
+  unit:
+    name: Unit tests and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Java 21: the Robolectric tests run Android SDK 36, which Robolectric 4.17 refuses on Java 17
+      - uses: ./.github/actions/android-build
+        with:
+          java-version: "21"
+          gradle-cache: "true"
+      - name: Coroutine cancellation guard (scripts/lib/check-cancellation.sh)
+        run: scripts/lib/check-cancellation.sh
+      - name: Unit tests (scripts/lib/test.sh)
+        if: ${{ !cancelled() }}
+        run: scripts/lib/test.sh
+      - name: Android lint (scripts/lib/lint.sh)
+        if: ${{ !cancelled() }}
+        run: scripts/lib/lint.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ failure() }}
+        with:
+          name: unit-reports
+          path: |
+            build/app/reports/
+            build/app/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release-build:
+    name: Release build (throwaway key, no Xray)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/android-build
+        with:
+          gradle-cache: "true"
+      # No SSH_VPN_RELEASE_* here: build-release.sh signs with a key it creates in .local/signing/
+      - name: scripts/build-release.sh --no-xray
+        run: scripts/build-release.sh --no-xray
