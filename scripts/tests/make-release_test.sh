@@ -11,12 +11,19 @@
 # set outside them.
 # shellcheck disable=SC2016,SC2034
 set -u
+# SIGPIPE ignored, as on the GitHub runner (every step inherits that from its Node.js), for these tests and the
+# scripts they run: a reader that stops early makes its writer fail with "Broken pipe" there instead of dying quietly
+trap "" PIPE
 
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 TREE="$(cd "$HERE/../.." && pwd -P)"
 BASH_BIN="${TEST_BASH:-bash}"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/make-release-test.XXXXXX")"
-WORK="$(cd "$WORK" && pwd -P)"
+# no temp dir stops here: an empty WORK would make the current directory (the checkout) the work dir, and the
+# EXIT trap would delete it
+if ! WORK="$(mktemp -d "${TMPDIR:-/tmp}/make-release-test.XXXXXX")" || ! WORK="$(cd "$WORK" && pwd -P)"; then
+  echo "not ok no temp dir in ${TMPDIR:-/tmp}"
+  exit 1
+fi
 if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$WORK"' EXIT; else echo "# work dir: $WORK"; fi
 
 export HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/home/.config" GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
@@ -27,6 +34,10 @@ GIT_CEILING_DIRECTORIES="$(dirname "$WORK")"
 export GIT_CEILING_DIRECTORIES
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 mkdir -p "$HOME"
+# the script's temp files (app_version_set) land here, an absolute path whatever the caller's TMPDIR (the script runs
+# from WORK)
+mkdir -p "$WORK/tmp"
+export TMPDIR="$WORK/tmp"
 
 pass=0 fail=0
 ok() {
@@ -95,9 +106,14 @@ printf 'out/\n' >"$TPL/seed/.gitignore"
   exit 1
 }
 
-# new_case <name>: CASE/origin.git (a copy of the template's) and its clone REPO
+# new_case <name>: CASE/origin.git (a copy of the template's) and its clone REPO; a name used twice stops the tests
+# (the clone would fail and the case would run in the earlier case's repository)
 new_case() {
   CASE="$WORK/$1"
+  if [ -e "$CASE" ]; then
+    echo "not ok the test case name '$1' is used twice"
+    exit 1
+  fi
   mkdir -p "$CASE"
   cp -R "$TPL/origin.git" "$CASE/origin.git"
   git clone -q "$CASE/origin.git" "$CASE/repo"
@@ -410,7 +426,7 @@ check "at 2100.0.0 no version fits versionCode any more: refused, nothing change
   '[ $RC = 1 ] && has "после 2100.0.0 нет версии, которая помещается в versionCode" && gradle_is 2100.0.0 && [ "$(count)" = "$before" ] && clean'
 
 # --- origin's tags cannot be read and the clone has none: no claims about tags
-new_case notags
+new_case notags-offline
 g tag -d 0.1.0 >/dev/null
 g remote set-url origin "$CASE/missing.git"
 mr '0.2.0\n' --no-commit

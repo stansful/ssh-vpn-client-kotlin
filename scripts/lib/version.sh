@@ -149,15 +149,17 @@ highest_tag() {
 }
 
 # tag_of_version <X.Y.Z>: reads what release_tags reads and prints the first tag of that version (X.Y.Z or
-# vX.Y.Z); nothing when there is none
+# vX.Y.Z); nothing when there is none. It reads release_tags to the end: a reader that stops early leaves
+# release_tags writing into a closed pipe, which is "echo: write error: Broken pipe" where SIGPIPE is ignored (the
+# GitHub runner)
 tag_of_version() {
-  local v t
+  local v t found=''
   while read -r v t; do
-    if [ "$v" = "$1" ]; then
-      echo "$t"
-      return 0
+    if [ -z "$found" ] && [ "$v" = "$1" ]; then
+      found=$t
     fi
   done < <(release_tags)
+  [ -z "$found" ] || echo "$found"
 }
 
 # tag_commit <tag>: reads the lines of `git ls-remote --tags <remote>` (every tag: given a pattern, ls-remote leaves

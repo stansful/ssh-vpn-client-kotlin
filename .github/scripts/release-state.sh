@@ -31,11 +31,15 @@ if ! version_code "$VERSION" >/dev/null; then
   exit 1
 fi
 
-# GET /releases/tags/{tag} only returns published releases, never drafts.
-status="$(curl -sS --retry 3 --max-time 30 -o /dev/null -w '%{http_code}' \
+# GET /releases/tags/{tag} only returns published releases, never drafts. The body goes to a temp file, not
+# /dev/null: before a retry curl 8.5 (ubuntu-24.04) truncates its output, which fails on /dev/null (exit 23, no
+# retry, no status), so one 5xx or 429 would fail the gate.
+body="$(mktemp "${TMPDIR:-/tmp}/release-state.XXXXXX")"
+status="$(curl -sS --retry 3 --max-time 30 -o "$body" -w '%{http_code}' \
   -H "Accept: application/vnd.github+json" \
   ${GH_TOKEN:+-H "Authorization: Bearer $GH_TOKEN"} \
   "${GITHUB_API_URL:-https://api.github.com}/repos/$GITHUB_REPOSITORY/releases/tags/$VERSION")" || true
+rm -f "$body"
 case $status in
 200)
   echo released
